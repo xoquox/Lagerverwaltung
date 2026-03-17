@@ -97,6 +97,9 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(loaded["delivery_note_printer"], app_settings.DEFAULT_SETTINGS["delivery_note_printer"])
             self.assertEqual(loaded["pdf_output_dir"], app_settings.DEFAULT_SETTINGS["pdf_output_dir"])
             self.assertEqual(loaded["delivery_note_logo_source"], app_settings.DEFAULT_SETTINGS["delivery_note_logo_source"])
+            self.assertEqual(loaded["location_regex_regal"], app_settings.DEFAULT_SETTINGS["location_regex_regal"])
+            self.assertEqual(loaded["location_regex_fach"], app_settings.DEFAULT_SETTINGS["location_regex_fach"])
+            self.assertEqual(loaded["location_regex_platz"], app_settings.DEFAULT_SETTINGS["location_regex_platz"])
 
             self.assertFalse(local_settings_path.exists())
 
@@ -107,10 +110,31 @@ class LagerMcLogicTests(unittest.TestCase):
         cls.lager_mc = load_lager_mc()
 
     def test_normalize_regal_accepts_single_letter_only(self):
-        self.assertEqual(self.lager_mc.normalize_regal(" a "), "A")
+        self.assertEqual(self.lager_mc.normalize_regal("A"), "A")
+        self.assertIsNone(self.lager_mc.normalize_regal(" a "))
         self.assertEqual(self.lager_mc.normalize_regal(""), "")
         self.assertIsNone(self.lager_mc.normalize_regal("AA"))
         self.assertIsNone(self.lager_mc.normalize_regal("1"))
+
+    def test_normalize_fach_and_platz_default_regex(self):
+        self.assertEqual(self.lager_mc.normalize_fach("1"), "1")
+        self.assertEqual(self.lager_mc.normalize_fach("99"), "99")
+        self.assertIsNone(self.lager_mc.normalize_fach("0"))
+        self.assertIsNone(self.lager_mc.normalize_fach("100"))
+        self.assertEqual(self.lager_mc.normalize_platz("7"), "7")
+        self.assertIsNone(self.lager_mc.normalize_platz("07"))
+
+    def test_normalize_location_uses_configured_regex(self):
+        with mock.patch.dict(self.lager_mc.SETTINGS, {"location_regex_regal": "^[A-Z0-9]{2}$"}, clear=False):
+            self.assertEqual(self.lager_mc.normalize_regal("A1"), "A1")
+            self.assertIsNone(self.lager_mc.normalize_regal("A"))
+
+    def test_is_location_input_allowed_blocks_invalid_chars(self):
+        self.assertTrue(self.lager_mc.is_location_input_allowed("regal", "A"))
+        self.assertFalse(self.lager_mc.is_location_input_allowed("regal", "a"))
+        self.assertFalse(self.lager_mc.is_location_input_allowed("regal", "%"))
+        self.assertTrue(self.lager_mc.is_location_input_allowed("fach", "99"))
+        self.assertFalse(self.lager_mc.is_location_input_allowed("fach", "100"))
 
     def test_build_location_rows_groups_and_sorts_locations(self):
         items = [

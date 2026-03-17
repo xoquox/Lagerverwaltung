@@ -520,25 +520,60 @@ def _sort_location_value(value):
 
 
 def normalize_regal(value):
-    value = (value or "").strip().upper()
+    return normalize_location_value("regal", value)
+
+
+def normalize_fach(value):
+    return normalize_location_value("fach", value)
+
+
+def normalize_platz(value):
+    return normalize_location_value("platz", value)
+
+
+def get_location_regex(field_name):
+    setting_key = f"location_regex_{field_name}"
+    configured = (SETTINGS.get(setting_key) or "").strip()
+    if configured:
+        return configured
+    return DEFAULT_SETTINGS[setting_key]
+
+
+def normalize_location_value(field_name, value):
+    value = (value or "").strip()
 
     if value == "":
         return ""
 
-    if len(value) != 1 or value not in string.ascii_uppercase:
+    pattern = get_location_regex(field_name)
+    try:
+        if re.fullmatch(pattern, value):
+            return value
+    except re.error:
         return None
 
+    return None
+
+
+def validate_location_or_error(stdscr, field_name, raw_value):
+    value = normalize_location_value(field_name, raw_value)
+    if value is None:
+        label = {"regal": "Regal", "fach": "Fach", "platz": "Platz"}[field_name]
+        pattern = get_location_regex(field_name)
+        message_box(stdscr, "Fehler", f"{label} passt nicht zu Regex: {pattern}"[:56])
+        return None
     return value
 
 
+def is_location_input_allowed(field_name, raw_value):
+    value = (raw_value or "").strip()
+    if value == "":
+        return True
+    return normalize_location_value(field_name, value) is not None
+
+
 def validate_regal_or_error(stdscr, raw_value):
-    regal = normalize_regal(raw_value)
-
-    if regal is None:
-        message_box(stdscr, "Fehler", "Regal muss ein Buchstabe von A bis Z sein.")
-        return None
-
-    return regal
+    return validate_location_or_error(stdscr, "regal", raw_value)
 
 
 def format_row(row):
@@ -938,7 +973,7 @@ def confirm_box(stdscr, title, message):
         if key in ("n", "N", 27):
             return False
 
-def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra_actions=None):
+def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra_actions=None, field_validators=None):
 
     h, w = stdscr.getmaxyx()
 
@@ -962,6 +997,7 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
     scroll_offsets = [0 for _ in values]
     footer = footer_text or "Enter weiter  ↑↓ wechseln  F2 Speichern  F9 Abbrechen"
     extra_actions = extra_actions or []
+    field_validators = field_validators or {}
 
     def normalize_view(index, field_width):
         field_width = max(1, field_width)
@@ -1085,7 +1121,13 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
         elif isinstance(key, str):
             if key.isprintable():
                 pos = cursor_positions[active]
-                values[active] = values[active][:pos] + key + values[active][pos:]
+                candidate = values[active][:pos] + key + values[active][pos:]
+                field_name = fields[active]["name"]
+                validator = field_validators.get(field_name)
+                if validator and not validator(candidate):
+                    curses.beep()
+                    continue
+                values[active] = candidate
                 cursor_positions[active] = pos + 1
 
 def search_dialog(stdscr, initial):
@@ -1316,6 +1358,9 @@ def settings_dialog(stdscr):
         "printer_uri": SETTINGS["printer_uri"],
         "printer_model": SETTINGS["printer_model"],
         "label_size": SETTINGS["label_size"],
+        "location_regex_regal": SETTINGS.get("location_regex_regal", DEFAULT_SETTINGS["location_regex_regal"]),
+        "location_regex_fach": SETTINGS.get("location_regex_fach", DEFAULT_SETTINGS["location_regex_fach"]),
+        "location_regex_platz": SETTINGS.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
         "picklist_printer": SETTINGS["picklist_printer"],
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
@@ -1340,6 +1385,9 @@ def settings_dialog(stdscr):
                 {"name": "printer_uri", "label": "Drucker URI", "value": values["printer_uri"]},
                 {"name": "printer_model", "label": "Drucker Modell", "value": values["printer_model"]},
                 {"name": "label_size", "label": "Labelformat", "value": values["label_size"]},
+                {"name": "location_regex_regal", "label": "Regex Regal", "value": values["location_regex_regal"]},
+                {"name": "location_regex_fach", "label": "Regex Fach", "value": values["location_regex_fach"]},
+                {"name": "location_regex_platz", "label": "Regex Platz", "value": values["location_regex_platz"]},
                 {"name": "picklist_printer", "label": "Pickliste CUPS", "value": values["picklist_printer"]},
                 {"name": "delivery_note_printer", "label": "Lieferschein CUPS", "value": values["delivery_note_printer"]},
                 {"name": "pdf_output_dir", "label": "PDF Ordner", "value": values["pdf_output_dir"]},
@@ -1373,6 +1421,9 @@ def settings_dialog(stdscr):
                     "printer_uri",
                     "printer_model",
                     "label_size",
+                    "location_regex_regal",
+                    "location_regex_fach",
+                    "location_regex_platz",
                     "picklist_printer",
                     "delivery_note_printer",
                     "pdf_output_dir",
@@ -1400,6 +1451,9 @@ def settings_dialog(stdscr):
         "printer_uri": res["printer_uri"].strip(),
         "printer_model": res["printer_model"].strip(),
         "label_size": res["label_size"].strip(),
+        "location_regex_regal": res["location_regex_regal"].strip(),
+        "location_regex_fach": res["location_regex_fach"].strip(),
+        "location_regex_platz": res["location_regex_platz"].strip(),
         "picklist_printer": res["picklist_printer"].strip(),
         "delivery_note_printer": res["delivery_note_printer"].strip(),
         "pdf_output_dir": os.path.expanduser(res["pdf_output_dir"].strip()),
@@ -1433,6 +1487,19 @@ def settings_dialog(stdscr):
     if updated["delivery_note_template_path"] and not os.path.isfile(updated["delivery_note_template_path"]):
         message_box(stdscr, "Fehler", "LS Vorlage existiert nicht.")
         return
+    for key, label in [
+        ("location_regex_regal", "Regex Regal"),
+        ("location_regex_fach", "Regex Fach"),
+        ("location_regex_platz", "Regex Platz"),
+    ]:
+        if not updated[key]:
+            message_box(stdscr, "Fehler", f"{label} darf nicht leer sein.")
+            return
+        try:
+            re.compile(updated[key])
+        except re.error as exc:
+            message_box(stdscr, "Fehler", f"{label} ungueltig: {exc}"[:56])
+            return
     if updated["delivery_note_logo_source"]:
         logo_source = updated["delivery_note_logo_source"]
         if not is_http_url(logo_source):
@@ -1485,6 +1552,11 @@ def add_item(stdscr):
             {"name": "platz", "label": "Platz", "value": ""},
             {"name": "menge", "label": "Menge", "value": ""},
         ],
+        field_validators={
+            "regal": lambda value: is_location_input_allowed("regal", value),
+            "fach": lambda value: is_location_input_allowed("fach", value),
+            "platz": lambda value: is_location_input_allowed("platz", value),
+        },
     )
 
     if res is None:
@@ -1492,6 +1564,12 @@ def add_item(stdscr):
 
     regal = validate_regal_or_error(stdscr, res["regal"])
     if regal is None:
+        return
+    fach = validate_location_or_error(stdscr, "fach", res["fach"])
+    if fach is None:
+        return
+    platz = validate_location_or_error(stdscr, "platz", res["platz"])
+    if platz is None:
         return
 
     menge = parse_int_or_error(stdscr, res["menge"], "Menge")
@@ -1514,8 +1592,8 @@ def add_item(stdscr):
             res["sku"],
             res["name"],
             regal,
-            res["fach"],
-            res["platz"],
+            fach,
+            platz,
             menge,
             menge,
             0,
@@ -1652,6 +1730,11 @@ def change_location(stdscr, item):
             {"name": "fach", "label": "Fach", "value": item["fach"] or ""},
             {"name": "platz", "label": "Platz", "value": item["platz"] or ""},
         ],
+        field_validators={
+            "regal": lambda value: is_location_input_allowed("regal", value),
+            "fach": lambda value: is_location_input_allowed("fach", value),
+            "platz": lambda value: is_location_input_allowed("platz", value),
+        },
     )
 
     if res is None:
@@ -1659,6 +1742,12 @@ def change_location(stdscr, item):
 
     regal = validate_regal_or_error(stdscr, res["regal"])
     if regal is None:
+        return
+    fach = validate_location_or_error(stdscr, "fach", res["fach"])
+    if fach is None:
+        return
+    platz = validate_location_or_error(stdscr, "platz", res["platz"])
+    if platz is None:
         return
 
     con = db()
@@ -1674,8 +1763,8 @@ def change_location(stdscr, item):
     """,
     (
         regal,
-        res["fach"],
-        res["platz"],
+        fach,
+        platz,
         item["sku"]
     ))
 
@@ -1700,6 +1789,11 @@ def edit_item(stdscr, item):
             {"name": "platz", "label": "Platz", "value": item["platz"] or ""},
             {"name": "menge", "label": "Menge", "value": str(item["menge"])},
         ],
+        field_validators={
+            "regal": lambda value: is_location_input_allowed("regal", value),
+            "fach": lambda value: is_location_input_allowed("fach", value),
+            "platz": lambda value: is_location_input_allowed("platz", value),
+        },
     )
 
     if res is None:
@@ -1707,6 +1801,12 @@ def edit_item(stdscr, item):
 
     regal = validate_regal_or_error(stdscr, res["regal"])
     if regal is None:
+        return
+    fach = validate_location_or_error(stdscr, "fach", res["fach"])
+    if fach is None:
+        return
+    platz = validate_location_or_error(stdscr, "platz", res["platz"])
+    if platz is None:
         return
 
     try:
@@ -1737,8 +1837,8 @@ def edit_item(stdscr, item):
         res["sku"],
         res["name"],
         regal,
-        res["fach"],
-        res["platz"],
+        fach,
+        platz,
         menge,
         menge,
         item["sku"]

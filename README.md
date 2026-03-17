@@ -61,6 +61,7 @@ Wichtige Einstellungen:
 
 - `db_host`, `db_name`, `db_user`, `db_pass`
 - `printer_uri`, `printer_model`, `label_size`
+- `location_regex_regal`, `location_regex_fach`, `location_regex_platz`
 - `picklist_printer`
 - `delivery_note_printer`
 - `pdf_output_dir`
