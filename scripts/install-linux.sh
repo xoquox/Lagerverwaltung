@@ -47,7 +47,11 @@ install_system_dependencies() {
         postgresql-devel \
         redhat-rpm-config \
         libusb1 \
-        cups
+        cups \
+        cairo \
+        pango \
+        gdk-pixbuf2 \
+        libffi-devel
       ;;
     apt)
       sudo apt-get update
@@ -59,7 +63,13 @@ install_system_dependencies() {
         build-essential \
         libpq-dev \
         libusb-1.0-0 \
-        cups-client
+        cups-client \
+        libcairo2 \
+        libpango-1.0-0 \
+        libgdk-pixbuf-2.0-0 \
+        libffi-dev \
+        shared-mime-info \
+        fonts-dejavu-core
       ;;
     pacman)
       sudo pacman -Syu --noconfirm \
@@ -70,7 +80,11 @@ install_system_dependencies() {
         postgresql-libs \
         postgresql \
         libusb \
-        cups
+        cups \
+        cairo \
+        pango \
+        gdk-pixbuf2 \
+        libffi
       ;;
     zypper)
       sudo zypper --non-interactive install \
@@ -82,7 +96,11 @@ install_system_dependencies() {
         make \
         postgresql-devel \
         libusb-1_0-0 \
-        cups-client
+        cups-client \
+        cairo \
+        pango \
+        gdk-pixbuf \
+        libffi-devel
       ;;
     *)
       echo "Nicht unterstuetzter Paketmanager: ${manager}" >&2

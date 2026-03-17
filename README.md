@@ -42,6 +42,7 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 - `curses`
 - fuer Labeldruck: `Pillow`, `python-barcode`, `brother_ql`
 - fuer Listen-/Lieferschein-Druck: CUPS bzw. `lp`
+- fuer HTML/CSS-Lieferscheine: `WeasyPrint` (inkl. Systembibliotheken wie cairo/pango)
 
 Die Anwendung erweitert benoetigte Datenbankspalten und legt die Tabellen fuer Bestellungen und Inventur bei Bedarf selbst an.
 
@@ -64,6 +65,7 @@ Wichtige Einstellungen:
 - `delivery_note_printer`
 - `pdf_output_dir`
 - `delivery_note_template_path` (optional, lokaler Pfad zur PDF-Vorlage ausserhalb von Git)
+- `delivery_note_logo_source` (optional, lokaler Pfad oder `https://`-URL fuer das Logo)
 - `delivery_note_sender_name`
 - `delivery_note_sender_street`
 - `delivery_note_sender_city`
@@ -131,14 +133,16 @@ Picklisten werden textbasiert ueber den in den Einstellungen hinterlegten CUPS-D
 
 ### Lieferscheine
 
-Lieferscheine nutzen optional eine lokal hinterlegte PDF-Vorlage (`delivery_note_template_path` in `settings.local.json`).
-Wenn kein Pfad gesetzt ist, verwendet die Anwendung ein internes Fallback-Layout ohne externe Datei.
+Lieferscheine werden standardmaessig ueber HTML/CSS mit WeasyPrint erzeugt.
+`delivery_note_template_path` kann optional auf eine `.html`/`.htm`-Datei zeigen, um das Layout frei anzupassen.
+Wenn stattdessen eine `.pdf`-Vorlage hinterlegt wird, nutzt die Anwendung den Legacy-PDF-Renderer.
 
 Beispiel (`settings.local.json`):
 
 ```json
 {
-  "delivery_note_template_path": "/home/<user>/Dokumente/lager/delivery_note_template.pdf"
+  "delivery_note_template_path": "/home/<user>/Dokumente/lager/lieferschein_template.html",
+  "delivery_note_logo_source": "https://example.com/logo.png"
 }
 ```
 

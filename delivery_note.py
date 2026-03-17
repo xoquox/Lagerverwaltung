@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
+import base64
 import datetime
+from html import escape
 import math
 import re
 import struct
+from string import Template
 import urllib.request
 import zlib
 from pathlib import Path
+
+try:
+    from weasyprint import HTML
+except Exception:  # pragma: no cover - optional dependency
+    HTML = None
 
 
 MAX_DELIVERY_NOTE_ITEMS = 10
 MEDIA_BOX = "[0.000 0.000 595.280 841.890]"
 LOCAL_TEMPLATE_PATH = Path(__file__).resolve().parent / "local_only" / "delivery_note_template.pdf"
+WEASYPRINT_AVAILABLE = HTML is not None
 
 DEFAULT_SENDER = {
     "name": "Firmenname",
@@ -45,9 +54,232 @@ def format_delivery_address_lines(order):
 
 
 def build_delivery_note_pdf(template_path, output_path, order, order_items, sender=None, logo_source=""):
+    rows = build_delivery_note_rows(order_items)
+    if _should_use_html_renderer(template_path):
+        _build_delivery_note_pdf_html(template_path, output_path, order, rows, sender=sender, logo_source=logo_source)
+        return Path(output_path)
+    return _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sender=sender, logo_source=logo_source)
+
+
+def _should_use_html_renderer(template_path):
+    if not WEASYPRINT_AVAILABLE:
+        return False
+    if not template_path:
+        return True
+    suffix = Path(template_path).suffix.lower()
+    if suffix == ".pdf":
+        return False
+    return suffix in {"", ".html", ".htm"}
+
+
+def _build_delivery_note_pdf_html(template_path, output_path, order, rows, sender=None, logo_source=""):
+    sender_data = _normalized_sender(sender)
+    order_name = order.get("order_name") or "-"
+    created_at = order.get("created_at")
+    if hasattr(created_at, "strftime"):
+        order_date = created_at.strftime("%d.%m.%Y")
+    else:
+        order_date = str(created_at or "")
+
+    if logo_source:
+        logo_data_uri = _build_logo_data_uri(logo_source)
+        logo_html = f'<img class="logo" src="{logo_data_uri}" alt="Logo">'
+    else:
+        logo_html = ""
+
+    items_html = _build_order_rows_html(rows)
+    template_html = _load_html_template(template_path)
+    rendered = Template(template_html).safe_substitute(
+        logo_html=logo_html,
+        order_name=escape(order_name),
+        order_date=escape(order_date),
+        sender_line=escape(_build_sender_line(sender_data)),
+        sender_block_html="".join(f"<div>{escape(line)}</div>" for line in _build_sender_block_lines(sender_data)),
+        address_html="".join(f"<div>{escape(line)}</div>" for line in format_delivery_address_lines(order)),
+        items_html=items_html,
+    )
+    HTML(string=rendered, base_url=str(Path(__file__).resolve().parent)).write_pdf(output_path)
+
+
+def _build_order_rows_html(rows):
+    if not rows:
+        return "<tr><td>1</td><td>-<br><span class='sku'>-</span></td><td class='qty'>0</td></tr>"
+
+    html_rows = []
+    for index, row in enumerate(rows, start=1):
+        title = escape(row.get("title") or "-")
+        sku = escape(row.get("sku") or "-")
+        qty = escape(str(row.get("quantity") or 0))
+        html_rows.append(
+            "<tr>"
+            f"<td>{index}</td>"
+            f"<td>{title}<br><span class='sku'>{sku}</span></td>"
+            f"<td class='qty'>{qty}</td>"
+            "</tr>"
+        )
+    return "".join(html_rows)
+
+
+def _load_html_template(template_path):
+    if template_path and Path(template_path).suffix.lower() in {".html", ".htm"}:
+        return Path(template_path).read_text(encoding="utf-8")
+    return _default_delivery_note_html_template()
+
+
+def _default_delivery_note_html_template():
+    return """<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page {
+      size: A4;
+      margin: 24mm 15mm 20mm 15mm;
+      @bottom-right {
+        content: "Seite " counter(page) " von " counter(pages);
+        font-size: 10pt;
+        color: #21303f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: #21303f;
+      font-family: "DejaVu Sans", "Arial", sans-serif;
+      font-size: 10.5pt;
+      line-height: 1.3;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16mm;
+    }
+    .logo {
+      max-width: 150px;
+      max-height: 44px;
+      object-fit: contain;
+    }
+    .doc-head {
+      text-align: right;
+      min-width: 260px;
+    }
+    .doc-head .title {
+      font-size: 20pt;
+      font-weight: 700;
+      margin-bottom: 4mm;
+    }
+    .meta-row { margin-bottom: 1.5mm; }
+    .address {
+      display: flex;
+      justify-content: space-between;
+      gap: 12mm;
+      margin-bottom: 10mm;
+    }
+    .address-left {
+      flex: 1;
+      min-width: 0;
+    }
+    .sender-line {
+      font-size: 7.5pt;
+      margin-bottom: 1.5mm;
+      border-bottom: 1px solid #21303f;
+      padding-bottom: 1mm;
+    }
+    .ship-lines > div { margin-bottom: 1.2mm; }
+    .sender-right {
+      width: 230px;
+      text-align: left;
+      white-space: pre-line;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    thead { display: table-header-group; }
+    tr { page-break-inside: avoid; }
+    th {
+      text-align: left;
+      border-bottom: 1px solid #21303f;
+      padding: 2.5mm 2mm;
+      font-weight: 700;
+    }
+    td {
+      border-bottom: 1px solid #d4dce5;
+      padding: 3mm 2mm;
+      vertical-align: top;
+    }
+    th:nth-child(1), td:nth-child(1) { width: 70px; }
+    th:nth-child(3), td:nth-child(3) { width: 70px; text-align: right; }
+    .sku {
+      display: inline-block;
+      margin-top: 1mm;
+      color: #415161;
+      font-size: 9.5pt;
+    }
+    .qty { text-align: right; }
+    .thanks {
+      margin-top: 14mm;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>$logo_html</div>
+    <div class="doc-head">
+      <div class="title">Lieferschein</div>
+      <div class="meta-row"><strong>Bestellung:</strong> $order_name</div>
+      <div class="meta-row"><strong>Datum:</strong> $order_date</div>
+    </div>
+  </div>
+
+  <div class="address">
+    <div class="address-left">
+      <div class="sender-line">$sender_line</div>
+      <div class="ship-lines">$address_html</div>
+    </div>
+    <div class="sender-right">$sender_block_html</div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Position</th>
+        <th>Artikel</th>
+        <th>Anzahl</th>
+      </tr>
+    </thead>
+    <tbody>$items_html</tbody>
+  </table>
+
+  <div class="thanks">Vielen Dank für Ihre Bestellung!</div>
+</body>
+</html>
+"""
+
+
+def _build_logo_data_uri(source):
+    image_bytes = _load_binary_source(source)
+    mime = _detect_image_mime(image_bytes)
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _detect_image_mime(image_bytes):
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    raise ValueError("Logo-Format nicht unterstuetzt (erwartet PNG/JPG/GIF/WEBP).")
+
+
+def _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sender=None, logo_source=""):
     template_bytes = _load_template_bytes(template_path)
     objects = _parse_pdf_objects(template_bytes)
-    rows = build_delivery_note_rows(order_items)
     regular_font_obj_id = max(objects) + 1
     bold_font_obj_id = regular_font_obj_id + 1
     objects[regular_font_obj_id] = _build_builtin_font_object("Helvetica")

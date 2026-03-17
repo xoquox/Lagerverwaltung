@@ -201,8 +201,9 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
-                path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+            with mock.patch.object(delivery_note, "WEASYPRINT_AVAILABLE", False):
+                with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
+                    path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
 
             self.assertEqual(len(rows), 1)
             self.assertTrue(path.endswith(".pdf"))
@@ -218,6 +219,8 @@ class LagerMcLogicTests(unittest.TestCase):
             self.assertIn("Vielen Dank für Ihre Bestellung!", stream)
 
     def test_create_delivery_note_pdf_uses_configured_output_dir(self):
+        import delivery_note
+
         order = {
             "order_name": "#2003",
             "created_at": datetime.datetime(2026, 3, 16, 12, 0, 0),
@@ -232,9 +235,10 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(self.lager_mc.SETTINGS, {"pdf_output_dir": tmpdir}, clear=False):
-                with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
-                    path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items)
+            with mock.patch.object(delivery_note, "WEASYPRINT_AVAILABLE", False):
+                with mock.patch.dict(self.lager_mc.SETTINGS, {"pdf_output_dir": tmpdir}, clear=False):
+                    with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
+                        path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items)
 
             self.assertTrue(path.startswith(tmpdir))
 
@@ -270,6 +274,8 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(cleaned, "Text A\nText\nB\nPunkt")
 
     def test_create_delivery_note_pdf_splits_multiple_pages(self):
+        import delivery_note
+
         order = {
             "order_name": "#2002",
             "created_at": datetime.datetime(2026, 3, 16, 12, 0, 0),
@@ -285,8 +291,9 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
-                path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+            with mock.patch.object(delivery_note, "WEASYPRINT_AVAILABLE", False):
+                with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
+                    path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
 
             self.assertEqual(len(rows), 12)
             content = Path(path).read_bytes()
@@ -310,13 +317,14 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch.dict(
-                self.lager_mc.SETTINGS,
-                {"delivery_note_logo_source": "https://example.invalid/logo.png"},
-                clear=False,
-            ):
-                with mock.patch.object(delivery_note, "_load_binary_source", return_value=self._tiny_rgb_png_bytes()):
-                    path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+            with mock.patch.object(delivery_note, "WEASYPRINT_AVAILABLE", False):
+                with mock.patch.dict(
+                    self.lager_mc.SETTINGS,
+                    {"delivery_note_logo_source": "https://example.invalid/logo.png"},
+                    clear=False,
+                ):
+                    with mock.patch.object(delivery_note, "_load_binary_source", return_value=self._tiny_rgb_png_bytes()):
+                        path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
 
             content = Path(path).read_bytes()
             self.assertIn(b"/Subtype /Image", content)
@@ -326,6 +334,42 @@ class LagerMcLogicTests(unittest.TestCase):
             stream_end = objects[7].rindex(b"\nendstream")
             stream = zlib.decompress(objects[7][stream_start:stream_end]).decode("cp1252")
             self.assertIn("/L1 Do", stream)
+
+    def test_create_delivery_note_pdf_uses_html_renderer_when_available(self):
+        import delivery_note
+
+        order = {
+            "order_name": "#2005",
+            "created_at": datetime.datetime(2026, 3, 16, 12, 0, 0),
+            "shipping_name": "Max Mustermann",
+            "shipping_address1": "Musterweg 4",
+            "shipping_zip": "12345",
+            "shipping_city": "Berlin",
+            "shipping_country": "Deutschland",
+        }
+        order_items = [
+            {"sku": "A-1", "title": "Alpha Teil", "quantity": 1, "external_fulfillment": False},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            html_template = Path(tmpdir) / "template.html"
+            html_template.write_text("<html><body>$order_name<table>$items_html</table></body></html>", encoding="utf-8")
+
+            fake_writer = mock.Mock()
+            fake_html_instance = mock.Mock(write_pdf=fake_writer)
+            fake_html_class = mock.Mock(return_value=fake_html_instance)
+
+            with mock.patch.object(delivery_note, "WEASYPRINT_AVAILABLE", True):
+                with mock.patch.object(delivery_note, "HTML", fake_html_class):
+                    with mock.patch.dict(
+                        self.lager_mc.SETTINGS,
+                        {"delivery_note_template_path": str(html_template), "delivery_note_logo_source": ""},
+                        clear=False,
+                    ):
+                        path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+
+            fake_html_class.assert_called_once()
+            fake_writer.assert_called_once_with(path)
 
     @staticmethod
     def _tiny_rgb_png_bytes():
