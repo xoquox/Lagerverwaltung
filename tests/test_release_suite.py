@@ -139,6 +139,18 @@ class LagerMcLogicTests(unittest.TestCase):
 
         self.assertEqual([row["sku"] for row in sorted_rows], ["A", "B"])
 
+    def test_get_items_uses_filter_text_for_barcode_search(self):
+        cursor = FakeCursor(fetchall_results=[[{"sku": "A"}]])
+        connection = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=connection):
+            rows = self.lager_mc.get_items(filter_text="4012345678901")
+
+        self.assertEqual(rows, [{"sku": "A"}])
+        query, params = cursor.executed[0]
+        self.assertIn("COALESCE(barcode, '') ILIKE %s", query)
+        self.assertEqual(params[2], "%4012345678901%")
+
     def test_build_picklist_text_contains_shipping_address_and_position_count(self):
         order = {
             "order_name": "#1001",
@@ -221,6 +233,37 @@ class LagerMcLogicTests(unittest.TestCase):
                 path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items)
 
             self.assertTrue(path.startswith(tmpdir))
+
+    def test_build_item_info_lines_includes_shopify_fields(self):
+        item = {
+            "sku": "A-1",
+            "name": "Alpha",
+            "barcode": "4012345678901",
+            "shopify_product_status": "active",
+            "shopify_price": "12.95",
+            "shopify_compare_at_price": "14.95",
+            "shopify_unit_cost": "6.20",
+            "shopify_unit_cost_currency": "EUR",
+            "shopify_weight_grams": 380,
+            "sync_status": "ok",
+            "regal": "A",
+            "fach": "1",
+            "platz": "3",
+            "shopify_description": "Beschreibung",
+        }
+
+        lines = self.lager_mc.build_item_info_lines(item)
+
+        self.assertIn("Barcode/GTIN: 4012345678901", lines)
+        self.assertIn("EK Kosten: 6.20 EUR", lines)
+        self.assertIn("Gewicht: 380 g", lines)
+
+    def test_clean_shopify_description_strips_html(self):
+        html_text = "<p>Text&nbsp;A</p><p>Text<br>B</p><ul><li>Punkt</li></ul>"
+
+        cleaned = self.lager_mc.clean_shopify_description(html_text)
+
+        self.assertEqual(cleaned, "Text A\nText\nB\nPunkt")
 
     def test_create_delivery_note_pdf_splits_multiple_pages(self):
         order = {

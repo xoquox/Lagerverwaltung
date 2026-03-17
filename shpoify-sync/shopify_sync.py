@@ -35,6 +35,14 @@ def init_db():
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS reserved integer DEFAULT 0")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS committed integer DEFAULT 0")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS unavailable integer DEFAULT 0")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS barcode text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_status text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_description text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_price text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_compare_at_price text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost_currency text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_weight_grams integer")
     cur.execute("UPDATE items SET reserved = COALESCE(reserved, 0)")
     cur.execute("UPDATE items SET committed = COALESCE(committed, 0)")
     cur.execute(
@@ -356,6 +364,14 @@ def sync_inventory_levels():
 def sync_products():
 
     products = get_all_products()
+    inventory_item_ids = []
+    for product in products:
+        for variant in product["variants"]:
+            inventory_item_id = variant.get("inventory_item_id")
+            if inventory_item_id:
+                inventory_item_ids.append(inventory_item_id)
+
+    unit_cost_by_inventory_item_id = get_inventory_item_unit_costs(inventory_item_ids)
 
     con = db()
     cur = con.cursor()
@@ -374,6 +390,11 @@ def sync_products():
 
             variant_id = variant["id"]
             inventory_item_id = variant["inventory_item_id"]
+            barcode = variant.get("barcode")
+            price = variant.get("price")
+            compare_at_price = variant.get("compare_at_price")
+            weight_grams = variant.get("grams")
+            unit_cost = unit_cost_by_inventory_item_id.get(inventory_item_id, {})
             qty = variant["inventory_quantity"]
             print("Import:", sku, qty)
 
@@ -389,11 +410,19 @@ def sync_products():
                 shopify_product_id,
                 shopify_variant_id,
                 shopify_inventory_item_id,
+                barcode,
+                shopify_product_status,
+                shopify_description,
+                shopify_price,
+                shopify_compare_at_price,
+                shopify_unit_cost,
+                shopify_unit_cost_currency,
+                shopify_weight_grams,
                 sync_status,
                 last_sync,
                 updated_at
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ok',NOW(),NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ok',NOW(),NOW())
             ON CONFLICT (sku)
             DO UPDATE SET
                 name = EXCLUDED.name,
@@ -411,6 +440,14 @@ def sync_products():
                 shopify_product_id = EXCLUDED.shopify_product_id,
                 shopify_variant_id = EXCLUDED.shopify_variant_id,
                 shopify_inventory_item_id = EXCLUDED.shopify_inventory_item_id,
+                barcode = EXCLUDED.barcode,
+                shopify_product_status = EXCLUDED.shopify_product_status,
+                shopify_description = EXCLUDED.shopify_description,
+                shopify_price = EXCLUDED.shopify_price,
+                shopify_compare_at_price = EXCLUDED.shopify_compare_at_price,
+                shopify_unit_cost = EXCLUDED.shopify_unit_cost,
+                shopify_unit_cost_currency = EXCLUDED.shopify_unit_cost_currency,
+                shopify_weight_grams = EXCLUDED.shopify_weight_grams,
                 last_sync = NOW(),
                 sync_status = 'ok',
                 updated_at = NOW(),
@@ -429,11 +466,65 @@ def sync_products():
                 0,
                 product_id,
                 variant_id,
-                inventory_item_id
+                inventory_item_id,
+                barcode,
+                product.get("status"),
+                product.get("body_html"),
+                price,
+                compare_at_price,
+                unit_cost.get("amount"),
+                unit_cost.get("currency"),
+                weight_grams,
             ))
 
     con.commit()
     con.close()
+
+
+def _chunks(values, size):
+    for index in range(0, len(values), size):
+        yield values[index : index + size]
+
+
+def get_inventory_item_unit_costs(inventory_item_ids):
+    ids = sorted({item_id for item_id in inventory_item_ids if item_id})
+    if not ids:
+        return {}
+
+    query = """
+    query InventoryItemUnitCosts($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on InventoryItem {
+          id
+          unitCost {
+            amount
+            currencyCode
+          }
+        }
+      }
+    }
+    """
+
+    costs = {}
+    for chunk in _chunks(ids, 100):
+        gid_chunk = [f"gid://shopify/InventoryItem/{item_id}" for item_id in chunk]
+        data = graphql_request(query, {"ids": gid_chunk})
+        for node in data["nodes"]:
+            if not node:
+                continue
+            gid = node["id"]
+            try:
+                item_id = int(gid.rsplit("/", 1)[-1])
+            except (TypeError, ValueError):
+                continue
+            unit_cost = node.get("unitCost") or {}
+            costs[item_id] = {
+                "amount": unit_cost.get("amount"),
+                "currency": unit_cost.get("currencyCode"),
+            }
+        time.sleep(0.2)
+
+    return costs
 
 
 def get_all_orders():

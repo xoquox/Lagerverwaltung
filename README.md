@@ -63,6 +63,7 @@ Wichtige Einstellungen:
 - `picklist_printer`
 - `delivery_note_printer`
 - `pdf_output_dir`
+- `delivery_note_template_path` (optional, lokaler Pfad zur PDF-Vorlage ausserhalb von Git)
 - `delivery_note_sender_name`
 - `delivery_note_sender_street`
 - `delivery_note_sender_city`
@@ -93,6 +94,18 @@ Der Sync schreibt unter anderem:
 
 ## Installation
 
+Automatische Installation fuer die meisten Linux-Distributionen:
+
+```bash
+git clone <repo-url>
+cd Lagerverwaltung
+./scripts/install-linux.sh
+```
+
+Das Script erkennt `dnf`, `apt`, `pacman` oder `zypper` automatisch, installiert Systempakete, erstellt `.venv` und legt einen Starter unter `~/.local/bin/lager-mc` an.
+
+Manueller Start ohne Install-Script:
+
 ```bash
 git clone <repo-url>
 cd Lagerverwaltung
@@ -118,7 +131,18 @@ Picklisten werden textbasiert ueber den in den Einstellungen hinterlegten CUPS-D
 
 ### Lieferscheine
 
-Lieferscheine basieren auf [Lieferschein_Vorlage.pdf](/home/chrisi/Lagerverwaltung/Lieferschein_Vorlage.pdf) und unterstuetzen:
+Lieferscheine nutzen optional eine lokal hinterlegte PDF-Vorlage (`delivery_note_template_path` in `settings.local.json`).
+Wenn kein Pfad gesetzt ist, verwendet die Anwendung ein internes Fallback-Layout ohne externe Datei.
+
+Beispiel (`settings.local.json`):
+
+```json
+{
+  "delivery_note_template_path": "/home/<user>/Dokumente/lager/delivery_note_template.pdf"
+}
+```
+
+Unterstuetzt werden:
 
 - PDF-Export
 - getrennten CUPS-Drucker

@@ -2,17 +2,20 @@
 import curses
 import csv
 import datetime
+import html
 import os
 import psycopg2
 import psycopg2.extras
 import locale
+import re
 import subprocess
 import string
 import tempfile
+import textwrap
+from pathlib import Path
 
 from app_logging import MAIN_LOG_PATH, PRINT_LOG_PATH, get_logger
-from app_settings import load_settings, save_settings
-from delivery_note import TEMPLATE_PATH as DELIVERY_NOTE_TEMPLATE_PATH
+from app_settings import DEFAULT_SETTINGS, load_settings, save_settings
 from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
 
 locale.setlocale(locale.LC_ALL, "")
@@ -44,6 +47,14 @@ def init_db():
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS committed integer DEFAULT 0")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS unavailable integer DEFAULT 0")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS external_fulfillment boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS barcode text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_status text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_description text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_price text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_compare_at_price text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost_currency text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_weight_grams integer")
     cur.execute("UPDATE items SET reserved = COALESCE(reserved, 0)")
     cur.execute("UPDATE items SET committed = COALESCE(committed, 0)")
     cur.execute(
@@ -151,6 +162,31 @@ def test_db_connection(settings):
     con.close()
 
 
+def _is_default_db_settings(settings):
+    for key in ("db_host", "db_name", "db_user", "db_pass"):
+        if settings.get(key) != DEFAULT_SETTINGS.get(key):
+            return False
+    return True
+
+
+def ensure_database_ready(stdscr):
+    while True:
+        if _is_default_db_settings(SETTINGS):
+            message_box(stdscr, "Setup", "Bitte zuerst DB Einstellungen in Shift+F8 speichern.")
+            settings_dialog(stdscr)
+            if _is_default_db_settings(SETTINGS):
+                if confirm_box(stdscr, "Setup", "Keine DB Daten gesetzt. Programm beenden?"):
+                    return False
+                continue
+
+        try:
+            init_db()
+            return True
+        except Exception as exc:
+            message_box(stdscr, "DB Fehler", str(exc)[:56])
+            settings_dialog(stdscr)
+
+
 def get_items(filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
     con = db()
     cur = con.cursor()
@@ -159,8 +195,8 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
     params = []
 
     if filter_text:
-        conditions.append("(name ILIKE %s OR sku ILIKE %s)")
-        params.extend([f"%{filter_text}%", f"%{filter_text}%"])
+        conditions.append("(name ILIKE %s OR sku ILIKE %s OR COALESCE(barcode, '') ILIKE %s)")
+        params.extend([f"%{filter_text}%", f"%{filter_text}%", f"%{filter_text}%"])
 
     if filter_no_location:
         conditions.append("(regal IS NULL OR regal='' OR fach IS NULL OR platz IS NULL)")
@@ -208,6 +244,14 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
         ) AS available,
         dirty,
         shopify_variant_id,
+        barcode,
+        shopify_product_status,
+        shopify_description,
+        shopify_price,
+        shopify_compare_at_price,
+        shopify_unit_cost,
+        shopify_unit_cost_currency,
+        shopify_weight_grams,
         sync_status,
         COALESCE(external_fulfillment, FALSE) AS external_fulfillment
     FROM items
@@ -528,6 +572,109 @@ def format_header():
     return " ".join(cells)
 
 
+def _format_eur(value):
+    if value is None:
+        return "-"
+    text = str(value).strip()
+    if not text:
+        return "-"
+    return f"{text} EUR"
+
+
+def clean_shopify_description(value):
+    text = value or ""
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
+    text = re.sub(r"(?i)</\s*p\s*>", "\n", text)
+    text = re.sub(r"(?i)<\s*p[^>]*>", "", text)
+    text = re.sub(r"(?i)<\s*/?\s*li\s*>", "\n", text)
+    text = re.sub(r"(?i)<\s*/?\s*ul\s*>", "\n", text)
+    text = re.sub(r"(?i)<\s*/?\s*ol\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    text = text.replace("\xa0", " ")
+    lines = [line.strip() for line in text.splitlines()]
+    cleaned = "\n".join(line for line in lines if line)
+    return cleaned or "-"
+
+
+def build_item_info_lines(item):
+    lines = []
+    lines.append(f"SKU: {item.get('sku') or '-'}")
+    lines.append(f"Name: {item.get('name') or '-'}")
+    lines.append(f"Barcode/GTIN: {item.get('barcode') or '-'}")
+    lines.append(f"Shopify Status: {item.get('shopify_product_status') or '-'}")
+    lines.append(f"VK Preis: {_format_eur(item.get('shopify_price'))}")
+    lines.append(f"VK Vergleich: {_format_eur(item.get('shopify_compare_at_price'))}")
+    lines.append(f"EK Kosten: {_format_eur(item.get('shopify_unit_cost'))}")
+
+    weight_grams = item.get("shopify_weight_grams")
+    lines.append(f"Gewicht: {weight_grams} g" if weight_grams is not None else "Gewicht: -")
+    lines.append(f"Sync: {item.get('sync_status') or '-'}")
+    lines.append(f"Lagerplatz: {(item.get('regal') or '-')}/{(item.get('fach') or '-')}/{(item.get('platz') or '-')}")
+    return lines
+
+
+def item_info_dialog(stdscr, item):
+    h, w = stdscr.getmaxyx()
+    width = min(max(84, int(w * 0.8)), w - 4)
+    height = min(max(20, int(h * 0.82)), h - 2)
+    y = max(1, (h - height) // 2)
+    x = max(2, (w - width) // 2)
+
+    info_lines = build_item_info_lines(item)
+    description_lines = clean_shopify_description(item.get("shopify_description")).splitlines()
+    description_top = 0
+
+    while True:
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, " Produktdaten ")
+
+        for index, line in enumerate(info_lines):
+            y_line = 1 + index
+            if y_line >= height - 4:
+                break
+            win.addstr(y_line, 2, line[: width - 4])
+
+        desc_y = min(height - 5, 2 + len(info_lines))
+        desc_height = max(4, height - desc_y - 2)
+        desc_width = width - 4
+        desc_win = win.derwin(desc_height, desc_width, desc_y, 2)
+        desc_win.box()
+        desc_win.addstr(0, 2, " Beschreibung ")
+
+        wrapped_description = []
+        for line in description_lines:
+            wrapped_description.extend(textwrap.wrap(line, width=max(10, desc_width - 4)) or [""])
+
+        visible_desc_rows = max(1, desc_height - 2)
+        visible_desc = wrapped_description[description_top : description_top + visible_desc_rows]
+        for index, line in enumerate(visible_desc):
+            desc_win.addstr(1 + index, 2, line[: desc_width - 4])
+
+        win.attrset(curses.color_pair(3))
+        footer = " PgUp/PgDn oder Pfeile scrollen  F9/Esc schliessen "
+        win.addstr(height - 1, 1, " " * (width - 2))
+        win.addstr(height - 1, 1, footer[: width - 2])
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
+            return
+        if key == curses.KEY_NPAGE:
+            description_top = min(max(0, len(wrapped_description) - visible_desc_rows), description_top + visible_desc_rows)
+        elif key == curses.KEY_PPAGE:
+            description_top = max(0, description_top - visible_desc_rows)
+        elif key == curses.KEY_DOWN:
+            description_top = min(max(0, len(wrapped_description) - visible_desc_rows), description_top + 1)
+        elif key == curses.KEY_UP:
+            description_top = max(0, description_top - 1)
+
+
 def build_location_rows(items):
     grouped = {}
 
@@ -712,9 +859,9 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     stdscr.attrset(curses.color_pair(3))
 
     if show_secondary_help:
-        status = " Shift+F2 Bearb.  Shift+F4 Extern  Shift+F5 Multi-Dr.  Shift+F6 Extern-Liste  Shift+F7 Inventur  Shift+F8 Loeschen  F11 Standard  F12 Auftraege  F10 Ende "
+        status = " Shift+F2 Bearb.  Shift+F3 Info  Shift+F4 Extern  Shift+F5 Multi-Dr.  Shift+F6 Extern-Liste  Shift+F7 Inventur  Shift+F8 Einst.  Shift+F9 Loeschen  F11 Standard  F12 Auftraege  F10 Ende "
     else:
-        status = " Tab Fokus  F1 Sortieren  F2 Neu  F3 Menge  F4 Platz  F5 Drucken  F6 Ohne Platz  F7 Lokal  F8 Einst.  F9 Reset  F10 Ende  F11 Mehr  F12 Auftraege "
+        status = " Tab Fokus  F1 Sortieren  F2 Neu  F3 Menge  F4 Platz  F5 Drucken  F6 Ohne Platz  F7 Lokal  F8 Info  F9 Reset  F10 Ende  F11 Mehr  F12 Auftraege "
     focus = " Fokus: Artikel " if active_pane == "left" else " Fokus: Regale "
     if external_mode == "only":
         focus = focus[:-1] + " | Ansicht: Extern "
@@ -1118,6 +1265,7 @@ def settings_dialog(stdscr):
         "picklist_printer": SETTINGS["picklist_printer"],
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
+        "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
         "delivery_note_sender_name": SETTINGS["delivery_note_sender_name"],
         "delivery_note_sender_street": SETTINGS["delivery_note_sender_street"],
         "delivery_note_sender_city": SETTINGS["delivery_note_sender_city"],
@@ -1140,6 +1288,7 @@ def settings_dialog(stdscr):
                 {"name": "picklist_printer", "label": "Pickliste CUPS", "value": values["picklist_printer"]},
                 {"name": "delivery_note_printer", "label": "Lieferschein CUPS", "value": values["delivery_note_printer"]},
                 {"name": "pdf_output_dir", "label": "PDF Ordner", "value": values["pdf_output_dir"]},
+                {"name": "delivery_note_template_path", "label": "LS Vorlage", "value": values["delivery_note_template_path"]},
                 {"name": "delivery_note_sender_name", "label": "LS Name", "value": values["delivery_note_sender_name"]},
                 {"name": "delivery_note_sender_street", "label": "LS Strasse", "value": values["delivery_note_sender_street"]},
                 {"name": "delivery_note_sender_city", "label": "LS Ort", "value": values["delivery_note_sender_city"]},
@@ -1171,6 +1320,7 @@ def settings_dialog(stdscr):
                     "picklist_printer",
                     "delivery_note_printer",
                     "pdf_output_dir",
+                    "delivery_note_template_path",
                     "delivery_note_sender_name",
                     "delivery_note_sender_street",
                     "delivery_note_sender_city",
@@ -1196,6 +1346,7 @@ def settings_dialog(stdscr):
         "picklist_printer": res["picklist_printer"].strip(),
         "delivery_note_printer": res["delivery_note_printer"].strip(),
         "pdf_output_dir": os.path.expanduser(res["pdf_output_dir"].strip()),
+        "delivery_note_template_path": os.path.expanduser(res["delivery_note_template_path"].strip()),
         "delivery_note_sender_name": res["delivery_note_sender_name"].strip(),
         "delivery_note_sender_street": res["delivery_note_sender_street"].strip(),
         "delivery_note_sender_city": res["delivery_note_sender_city"].strip(),
@@ -1220,6 +1371,9 @@ def settings_dialog(stdscr):
 
     if updated["pdf_output_dir"] and not os.path.isdir(updated["pdf_output_dir"]):
         message_box(stdscr, "Fehler", "PDF Ordner existiert nicht.")
+        return
+    if updated["delivery_note_template_path"] and not os.path.isfile(updated["delivery_note_template_path"]):
+        message_box(stdscr, "Fehler", "LS Vorlage existiert nicht.")
         return
 
     try:
@@ -1697,16 +1851,24 @@ def get_delivery_note_sender():
     }
 
 
+def get_delivery_note_template_path():
+    configured = SETTINGS.get("delivery_note_template_path", "").strip()
+    if not configured:
+        return None
+    return Path(os.path.expanduser(configured))
+
+
 def create_delivery_note_pdf(order, order_items, output_dir=None):
-    if not DELIVERY_NOTE_TEMPLATE_PATH.exists():
-        raise FileNotFoundError(f"Vorlage fehlt: {DELIVERY_NOTE_TEMPLATE_PATH.name}")
+    template_path = get_delivery_note_template_path()
+    if template_path and not template_path.exists():
+        raise FileNotFoundError(f"Vorlage fehlt: {template_path.name}")
 
     output_dir = output_dir or get_pdf_output_dir()
     if not os.path.isdir(output_dir):
         raise FileNotFoundError(f"PDF Ordner fehlt: {output_dir}")
     output_path = os.path.join(output_dir, build_delivery_note_filename(order))
     rows = build_delivery_note_rows(order_items)
-    build_delivery_note_pdf(DELIVERY_NOTE_TEMPLATE_PATH, output_path, order, rows, sender=get_delivery_note_sender())
+    build_delivery_note_pdf(template_path, output_path, order, rows, sender=get_delivery_note_sender())
     return output_path, rows
 
 
@@ -2283,6 +2445,9 @@ def main(stdscr):
     stdscr.bkgd(" ", curses.color_pair(1))
     stdscr.keypad(True)
 
+    if not ensure_database_ready(stdscr):
+        return
+
     left_selected = 0
     left_top_index = 0
     right_selected = 0
@@ -2445,16 +2610,22 @@ def main(stdscr):
             if inventory_dialog(stdscr):
                 reload_items = True
 
-        elif key == curses.KEY_F8:
+        elif key == curses.KEY_F8 and selected_item:
+            item_info_dialog(stdscr, selected_item)
+            
+        elif key == curses.KEY_F8 + 12:
             settings_dialog(stdscr)
             
-        elif key == curses.KEY_F8 + 12 and selected_item:
+        elif key == curses.KEY_F9 + 12 and selected_item:
             delete_item(stdscr, selected_item)
             reload_items = True
         
         elif key == curses.KEY_F2 + 12 and selected_item:
             edit_item(stdscr, selected_item)
             reload_items = True
+            
+        elif key == curses.KEY_F3 + 12 and selected_item:
+            item_info_dialog(stdscr, selected_item)
 
         elif key == curses.KEY_F9:
             filter_text = None
@@ -2508,7 +2679,6 @@ def main(stdscr):
 
 try:
     LOGGER.debug("Starte lager_mc")
-    init_db()
     curses.wrapper(main)
 except Exception:
     LOGGER.exception("lager_mc Start oder Laufzeitfehler")
