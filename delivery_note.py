@@ -2,6 +2,8 @@
 import datetime
 import math
 import re
+import struct
+import urllib.request
 import zlib
 from pathlib import Path
 
@@ -42,7 +44,7 @@ def format_delivery_address_lines(order):
     return lines or ["Keine Lieferadresse"]
 
 
-def build_delivery_note_pdf(template_path, output_path, order, order_items, sender=None):
+def build_delivery_note_pdf(template_path, output_path, order, order_items, sender=None, logo_source=""):
     template_bytes = _load_template_bytes(template_path)
     objects = _parse_pdf_objects(template_bytes)
     rows = build_delivery_note_rows(order_items)
@@ -50,15 +52,24 @@ def build_delivery_note_pdf(template_path, output_path, order, order_items, send
     bold_font_obj_id = regular_font_obj_id + 1
     objects[regular_font_obj_id] = _build_builtin_font_object("Helvetica")
     objects[bold_font_obj_id] = _build_builtin_font_object("Helvetica-Bold")
+    logo_info = None
+    if logo_source:
+        logo_image_obj_id = bold_font_obj_id + 1
+        logo_info = _load_logo_image_for_pdf(logo_source)
+        objects[logo_image_obj_id] = _build_image_xobject(*logo_info)
+
     resources_body = _augment_resources_with_builtin_fonts(
         _extract_page_resources(objects[3]),
         regular_font_obj_id,
         bold_font_obj_id,
+        logo_image_obj_id if logo_info else None,
     )
     objects[3] = _build_pages_object([6], resources_body)
     objects[5] = _build_info_object()
     objects[6] = _build_page_object(7)
-    objects[7] = _build_stream_object(build_delivery_note_content_stream(order, rows, 1, 1, sender=sender))
+    objects[7] = _build_stream_object(
+        build_delivery_note_content_stream(order, rows, 1, 1, sender=sender, has_logo=bool(logo_info), logo_info=logo_info)
+    )
 
     if rows:
         page_count = math.ceil(len(rows) / MAX_DELIVERY_NOTE_ITEMS)
@@ -75,7 +86,15 @@ def build_delivery_note_pdf(template_path, output_path, order, order_items, send
             page_rows = rows[page_index * MAX_DELIVERY_NOTE_ITEMS : (page_index + 1) * MAX_DELIVERY_NOTE_ITEMS]
             objects[page_obj_id] = _build_page_object(content_obj_id)
             objects[content_obj_id] = _build_stream_object(
-                build_delivery_note_content_stream(order, page_rows, page_index + 1, page_count, sender=sender)
+                build_delivery_note_content_stream(
+                    order,
+                    page_rows,
+                    page_index + 1,
+                    page_count,
+                    sender=sender,
+                    has_logo=bool(logo_info),
+                    logo_info=logo_info,
+                )
             )
             if page_index > 0:
                 next_obj_id += 2
@@ -87,7 +106,7 @@ def build_delivery_note_pdf(template_path, output_path, order, order_items, send
     return Path(output_path)
 
 
-def build_delivery_note_content_stream(order, rows, page_number=1, page_count=1, sender=None):
+def build_delivery_note_content_stream(order, rows, page_number=1, page_count=1, sender=None, has_logo=False, logo_info=None):
     order_name = order.get("order_name") or "-"
     created_at = order.get("created_at")
     sender = _normalized_sender(sender)
@@ -106,6 +125,8 @@ def build_delivery_note_content_stream(order, rows, page_number=1, page_count=1,
         _text_cmd(447.779, 737.363, "F3", 10.5, f"Datum: {order_date}"),
         _text_cmd(447.779, 723.919, "F3", 10.5, f"Seite: {page_number} von {page_count}"),
     ]
+    if has_logo:
+        commands.extend(_build_logo_draw_commands(logo_info))
 
     sender_line_y = 697.548
     commands.append(_text_cmd(60.000, sender_line_y, "F3", 7.5, _build_sender_line(sender)))
@@ -232,13 +253,185 @@ def _build_fallback_template_pdf():
     return _assemble_pdf(objects)
 
 
-def _augment_resources_with_builtin_fonts(resources_body, regular_font_obj_id, bold_font_obj_id):
+def _augment_resources_with_builtin_fonts(resources_body, regular_font_obj_id, bold_font_obj_id, logo_image_obj_id=None):
     marker = b"/Font <<"
     insert_at = resources_body.index(b">>", resources_body.index(marker))
     font_refs = (
         f"\n/F3 {regular_font_obj_id} 0 R\n/F4 {bold_font_obj_id} 0 R".encode("ascii")
     )
-    return resources_body[:insert_at] + font_refs + resources_body[insert_at:]
+    updated = resources_body[:insert_at] + font_refs + resources_body[insert_at:]
+    if not logo_image_obj_id:
+        return updated
+    return _augment_resources_with_logo_xobject(updated, logo_image_obj_id)
+
+
+def _augment_resources_with_logo_xobject(resources_body, logo_image_obj_id):
+    marker = b"/XObject <<"
+    logo_ref = f"\n/L1 {logo_image_obj_id} 0 R".encode("ascii")
+    if marker in resources_body:
+        insert_at = resources_body.index(b">>", resources_body.index(marker))
+        return resources_body[:insert_at] + logo_ref + resources_body[insert_at:]
+    insert_at = resources_body.rfind(b">>")
+    if insert_at == -1:
+        raise ValueError("Ungueltige PDF-Ressourcenstruktur.")
+    xobject_block = f"\n/XObject << /L1 {logo_image_obj_id} 0 R >>".encode("ascii")
+    return resources_body[:insert_at] + xobject_block + resources_body[insert_at:]
+
+
+def _build_logo_draw_commands(logo_info):
+    width, height = logo_info[0], logo_info[1]
+    max_width = 150.0
+    max_height = 44.0
+    scale = min(max_width / width, max_height / height, 1.0)
+    draw_width = width * scale
+    draw_height = height * scale
+    x = 60.0
+    y = 764.374
+    return [
+        "q",
+        f"{draw_width:.3f} 0 0 {draw_height:.3f} {x:.3f} {y:.3f} cm /L1 Do",
+        "Q",
+    ]
+
+
+def _load_logo_image_for_pdf(source):
+    try:
+        image_bytes = _load_binary_source(source)
+        return _decode_png_to_pdf_rgb(image_bytes)
+    except Exception as exc:
+        raise ValueError(f"Logo konnte nicht geladen werden ({source}): {exc}") from exc
+
+
+def _load_binary_source(source):
+    source_text = str(source).strip()
+    if source_text.startswith(("http://", "https://")):
+        request = urllib.request.Request(source_text, headers={"User-Agent": "Lagerverwaltung/1.0"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read()
+    return Path(source_text).read_bytes()
+
+
+def _decode_png_to_pdf_rgb(png_bytes):
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not png_bytes.startswith(signature):
+        raise ValueError("Datei ist kein PNG.")
+
+    width = height = bit_depth = color_type = interlace_method = None
+    idat_chunks = []
+    offset = len(signature)
+
+    while offset < len(png_bytes):
+        if offset + 8 > len(png_bytes):
+            raise ValueError("PNG ist unvollstaendig.")
+        chunk_length = struct.unpack(">I", png_bytes[offset:offset + 4])[0]
+        chunk_type = png_bytes[offset + 4:offset + 8]
+        chunk_data_start = offset + 8
+        chunk_data_end = chunk_data_start + chunk_length
+        chunk_crc_end = chunk_data_end + 4
+        if chunk_crc_end > len(png_bytes):
+            raise ValueError("PNG-Chunk ist unvollstaendig.")
+        chunk_data = png_bytes[chunk_data_start:chunk_data_end]
+        offset = chunk_crc_end
+
+        if chunk_type == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace_method = struct.unpack(">IIBBBBB", chunk_data)
+        elif chunk_type == b"IDAT":
+            idat_chunks.append(chunk_data)
+        elif chunk_type == b"IEND":
+            break
+
+    if not width or not height:
+        raise ValueError("PNG ohne IHDR.")
+    if bit_depth != 8:
+        raise ValueError("PNG Bit-Tiefe wird nicht unterstuetzt (nur 8).")
+    if interlace_method != 0:
+        raise ValueError("Interlaced PNG wird nicht unterstuetzt.")
+    if color_type not in {2, 6}:
+        raise ValueError("PNG Farbtyp wird nicht unterstuetzt (nur RGB/RGBA).")
+    if not idat_chunks:
+        raise ValueError("PNG ohne IDAT-Daten.")
+
+    decompressed = zlib.decompress(b"".join(idat_chunks))
+    bytes_per_pixel = 3 if color_type == 2 else 4
+    row_width = width * bytes_per_pixel
+    expected_size = height * (1 + row_width)
+    if len(decompressed) != expected_size:
+        raise ValueError("PNG-Datenlaenge passt nicht zu den Bilddaten.")
+
+    prev_row = b"\x00" * row_width
+    rgb = bytearray()
+    cursor = 0
+    for _ in range(height):
+        filter_type = decompressed[cursor]
+        cursor += 1
+        encoded_row = decompressed[cursor:cursor + row_width]
+        cursor += row_width
+        row = _unfilter_png_row(filter_type, encoded_row, prev_row, bytes_per_pixel)
+        prev_row = row
+        if color_type == 6:
+            for pixel_offset in range(0, len(row), 4):
+                rgb.extend(row[pixel_offset:pixel_offset + 3])
+        else:
+            rgb.extend(row)
+
+    return width, height, zlib.compress(bytes(rgb))
+
+
+def _unfilter_png_row(filter_type, encoded_row, prev_row, bytes_per_pixel):
+    row = bytearray(encoded_row)
+    if filter_type == 0:
+        return bytes(row)
+    if filter_type == 1:
+        for i in range(len(row)):
+            left = row[i - bytes_per_pixel] if i >= bytes_per_pixel else 0
+            row[i] = (row[i] + left) & 0xFF
+        return bytes(row)
+    if filter_type == 2:
+        for i in range(len(row)):
+            row[i] = (row[i] + prev_row[i]) & 0xFF
+        return bytes(row)
+    if filter_type == 3:
+        for i in range(len(row)):
+            left = row[i - bytes_per_pixel] if i >= bytes_per_pixel else 0
+            up = prev_row[i]
+            row[i] = (row[i] + ((left + up) // 2)) & 0xFF
+        return bytes(row)
+    if filter_type == 4:
+        for i in range(len(row)):
+            left = row[i - bytes_per_pixel] if i >= bytes_per_pixel else 0
+            up = prev_row[i]
+            up_left = prev_row[i - bytes_per_pixel] if i >= bytes_per_pixel else 0
+            row[i] = (row[i] + _paeth_predictor(left, up, up_left)) & 0xFF
+        return bytes(row)
+    raise ValueError(f"PNG Filtertyp {filter_type} wird nicht unterstuetzt.")
+
+
+def _paeth_predictor(left, up, up_left):
+    prediction = left + up - up_left
+    distance_left = abs(prediction - left)
+    distance_up = abs(prediction - up)
+    distance_up_left = abs(prediction - up_left)
+    if distance_left <= distance_up and distance_left <= distance_up_left:
+        return left
+    if distance_up <= distance_up_left:
+        return up
+    return up_left
+
+
+def _build_image_xobject(width, height, compressed_rgb):
+    return (
+        b"<< /Type /XObject\n"
+        b"/Subtype /Image\n"
+        + f"/Width {width}\n".encode("ascii")
+        + f"/Height {height}\n".encode("ascii")
+        + b"/ColorSpace /DeviceRGB\n"
+        + b"/BitsPerComponent 8\n"
+        + b"/Filter /FlateDecode\n"
+        + f"/Length {len(compressed_rgb)} >>\n".encode("ascii")
+        + b"stream\n"
+        + compressed_rgb
+        + b"\nendstream"
+    )
 
 
 def _build_pages_object(page_ids, resources_body):

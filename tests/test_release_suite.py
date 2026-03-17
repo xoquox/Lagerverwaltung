@@ -6,6 +6,7 @@ import tempfile
 import types
 import unittest
 import datetime
+import struct
 import zlib
 from pathlib import Path
 from unittest import mock
@@ -95,6 +96,7 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(loaded["db_name"], app_settings.DEFAULT_SETTINGS["db_name"])
             self.assertEqual(loaded["delivery_note_printer"], app_settings.DEFAULT_SETTINGS["delivery_note_printer"])
             self.assertEqual(loaded["pdf_output_dir"], app_settings.DEFAULT_SETTINGS["pdf_output_dir"])
+            self.assertEqual(loaded["delivery_note_logo_source"], app_settings.DEFAULT_SETTINGS["delivery_note_logo_source"])
 
             self.assertFalse(local_settings_path.exists())
 
@@ -199,7 +201,8 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+            with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
+                path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
 
             self.assertEqual(len(rows), 1)
             self.assertTrue(path.endswith(".pdf"))
@@ -230,7 +233,8 @@ class LagerMcLogicTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch.dict(self.lager_mc.SETTINGS, {"pdf_output_dir": tmpdir}, clear=False):
-                path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items)
+                with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
+                    path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items)
 
             self.assertTrue(path.startswith(tmpdir))
 
@@ -281,12 +285,60 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+            with mock.patch.dict(self.lager_mc.SETTINGS, {"delivery_note_logo_source": ""}, clear=False):
+                path, rows = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
 
             self.assertEqual(len(rows), 12)
             content = Path(path).read_bytes()
             self.assertIn(b"/Count 2", content)
             self.assertGreaterEqual(content.count(b"/Type /Page"), 2)
+
+    def test_create_delivery_note_pdf_includes_configured_logo(self):
+        import delivery_note
+
+        order = {
+            "order_name": "#2004",
+            "created_at": datetime.datetime(2026, 3, 16, 12, 0, 0),
+            "shipping_name": "Max Mustermann",
+            "shipping_address1": "Musterweg 4",
+            "shipping_zip": "12345",
+            "shipping_city": "Berlin",
+            "shipping_country": "Deutschland",
+        }
+        order_items = [
+            {"sku": "A-1", "title": "Alpha Teil", "quantity": 1, "external_fulfillment": False},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                self.lager_mc.SETTINGS,
+                {"delivery_note_logo_source": "https://example.invalid/logo.png"},
+                clear=False,
+            ):
+                with mock.patch.object(delivery_note, "_load_binary_source", return_value=self._tiny_rgb_png_bytes()):
+                    path, _ = self.lager_mc.create_delivery_note_pdf(order, order_items, output_dir=tmpdir)
+
+            content = Path(path).read_bytes()
+            self.assertIn(b"/Subtype /Image", content)
+            self.assertIn(b"/L1", content)
+            objects = delivery_note._parse_pdf_objects(content)
+            stream_start = objects[7].index(b"stream\n") + len(b"stream\n")
+            stream_end = objects[7].rindex(b"\nendstream")
+            stream = zlib.decompress(objects[7][stream_start:stream_end]).decode("cp1252")
+            self.assertIn("/L1 Do", stream)
+
+    @staticmethod
+    def _tiny_rgb_png_bytes():
+        signature = b"\x89PNG\r\n\x1a\n"
+        ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        raw_scanline = b"\x00\x1a\x7f\xc8"
+        idat_data = zlib.compress(raw_scanline)
+
+        def chunk(chunk_type, data):
+            crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
+
+        return signature + chunk(b"IHDR", ihdr_data) + chunk(b"IDAT", idat_data) + chunk(b"IEND", b"")
 
     def test_inventory_export_text_reports_summary(self):
         session = {"session_name": "Inventur Test", "session_id": 7}

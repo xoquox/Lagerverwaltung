@@ -18,6 +18,7 @@ DEFAULT_SETTINGS = {
     "delivery_note_printer": "",
     "pdf_output_dir": "",
     "delivery_note_template_path": "",
+    "delivery_note_logo_source": "",
     "delivery_note_sender_name": "Firmenname",
     "delivery_note_sender_street": "Strasse 1",
     "delivery_note_sender_city": "12345 Musterstadt",

@@ -13,6 +13,7 @@ import string
 import tempfile
 import textwrap
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app_logging import MAIN_LOG_PATH, PRINT_LOG_PATH, get_logger
 from app_settings import DEFAULT_SETTINGS, load_settings, save_settings
@@ -941,7 +942,9 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
 
     h, w = stdscr.getmaxyx()
 
-    width = min(70, w - 4)
+    longest_label = max((len(field["label"]) for field in fields), default=10)
+    preferred_width = longest_label + 68
+    width = min(max(70, preferred_width), w - 4)
     height = len(fields) + 6
 
     y = max(1, (h - height) // 2)
@@ -955,8 +958,25 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
 
     values = [f["value"] for f in fields]
     active = max(0, min(initial_active, len(fields) - 1))
+    cursor_positions = [len(value) for value in values]
+    scroll_offsets = [0 for _ in values]
     footer = footer_text or "Enter weiter  ↑↓ wechseln  F2 Speichern  F9 Abbrechen"
     extra_actions = extra_actions or []
+
+    def normalize_view(index, field_width):
+        field_width = max(1, field_width)
+        value_len = len(values[index])
+        max_scroll = max(0, value_len - field_width)
+
+        cursor = max(0, min(cursor_positions[index], value_len))
+        cursor_positions[index] = cursor
+
+        scroll = max(0, min(scroll_offsets[index], max_scroll))
+        if cursor < scroll:
+            scroll = cursor
+        elif cursor > scroll + field_width - 1:
+            scroll = cursor - field_width + 1
+        scroll_offsets[index] = max(0, min(scroll, max_scroll))
 
     while True:
 
@@ -979,8 +999,12 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
 
             if i == active:
                 win.attron(curses.color_pair(2))
+                field_width = max(1, width - xpos - 2)
+                normalize_view(i, field_width)
+                visible = val[scroll_offsets[i]: scroll_offsets[i] + field_width]
+            else:
+                visible = val[-(width - xpos - 2):]
 
-            visible = val[-(width - xpos - 2):]
             win.addstr(row, xpos, visible.ljust(width - xpos - 2))
 
 
@@ -994,9 +1018,9 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
         val = values[active]
 
         xpos = len(label) + 4
-        field_width = width - xpos - 2
-
-        cursor_x = xpos + min(len(val), field_width - 1)
+        field_width = max(1, width - xpos - 2)
+        normalize_view(active, field_width)
+        cursor_x = xpos + min(max(0, cursor_positions[active] - scroll_offsets[active]), field_width - 1)
 
         win.move(cursor_y, cursor_x)
 
@@ -1028,11 +1052,41 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
             continue
 
         if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
-            values[active] = values[active][:-1]
+            pos = cursor_positions[active]
+            if pos > 0:
+                values[active] = values[active][:pos - 1] + values[active][pos:]
+                cursor_positions[active] = pos - 1
+            continue
+
+        if key == curses.KEY_DC:
+            pos = cursor_positions[active]
+            if pos < len(values[active]):
+                values[active] = values[active][:pos] + values[active][pos + 1:]
+            continue
+
+        if key == curses.KEY_LEFT:
+            if cursor_positions[active] > 0:
+                cursor_positions[active] -= 1
+            continue
+
+        if key == curses.KEY_RIGHT:
+            if cursor_positions[active] < len(values[active]):
+                cursor_positions[active] += 1
+            continue
+
+        if key == curses.KEY_HOME:
+            cursor_positions[active] = 0
+            continue
+
+        if key == curses.KEY_END:
+            cursor_positions[active] = len(values[active])
             continue
 
         elif isinstance(key, str):
-            values[active] += key
+            if key.isprintable():
+                pos = cursor_positions[active]
+                values[active] = values[active][:pos] + key + values[active][pos:]
+                cursor_positions[active] = pos + 1
 
 def search_dialog(stdscr, initial):
 
@@ -1266,6 +1320,7 @@ def settings_dialog(stdscr):
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
         "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
+        "delivery_note_logo_source": SETTINGS.get("delivery_note_logo_source", ""),
         "delivery_note_sender_name": SETTINGS["delivery_note_sender_name"],
         "delivery_note_sender_street": SETTINGS["delivery_note_sender_street"],
         "delivery_note_sender_city": SETTINGS["delivery_note_sender_city"],
@@ -1289,6 +1344,7 @@ def settings_dialog(stdscr):
                 {"name": "delivery_note_printer", "label": "Lieferschein CUPS", "value": values["delivery_note_printer"]},
                 {"name": "pdf_output_dir", "label": "PDF Ordner", "value": values["pdf_output_dir"]},
                 {"name": "delivery_note_template_path", "label": "LS Vorlage", "value": values["delivery_note_template_path"]},
+                {"name": "delivery_note_logo_source", "label": "LS Logo URL/Pfad", "value": values["delivery_note_logo_source"]},
                 {"name": "delivery_note_sender_name", "label": "LS Name", "value": values["delivery_note_sender_name"]},
                 {"name": "delivery_note_sender_street", "label": "LS Strasse", "value": values["delivery_note_sender_street"]},
                 {"name": "delivery_note_sender_city", "label": "LS Ort", "value": values["delivery_note_sender_city"]},
@@ -1321,6 +1377,7 @@ def settings_dialog(stdscr):
                     "delivery_note_printer",
                     "pdf_output_dir",
                     "delivery_note_template_path",
+                    "delivery_note_logo_source",
                     "delivery_note_sender_name",
                     "delivery_note_sender_street",
                     "delivery_note_sender_city",
@@ -1347,6 +1404,7 @@ def settings_dialog(stdscr):
         "delivery_note_printer": res["delivery_note_printer"].strip(),
         "pdf_output_dir": os.path.expanduser(res["pdf_output_dir"].strip()),
         "delivery_note_template_path": os.path.expanduser(res["delivery_note_template_path"].strip()),
+        "delivery_note_logo_source": res["delivery_note_logo_source"].strip(),
         "delivery_note_sender_name": res["delivery_note_sender_name"].strip(),
         "delivery_note_sender_street": res["delivery_note_sender_street"].strip(),
         "delivery_note_sender_city": res["delivery_note_sender_city"].strip(),
@@ -1375,6 +1433,14 @@ def settings_dialog(stdscr):
     if updated["delivery_note_template_path"] and not os.path.isfile(updated["delivery_note_template_path"]):
         message_box(stdscr, "Fehler", "LS Vorlage existiert nicht.")
         return
+    if updated["delivery_note_logo_source"]:
+        logo_source = updated["delivery_note_logo_source"]
+        if not is_http_url(logo_source):
+            logo_path = os.path.expanduser(logo_source)
+            if not os.path.isfile(logo_path):
+                message_box(stdscr, "Fehler", "LS Logo Datei existiert nicht.")
+                return
+            updated["delivery_note_logo_source"] = logo_path
 
     try:
         test_db_connection(updated)
@@ -1858,17 +1924,34 @@ def get_delivery_note_template_path():
     return Path(os.path.expanduser(configured))
 
 
+def is_http_url(value):
+    parsed = urlparse((value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def get_delivery_note_logo_source():
+    configured = SETTINGS.get("delivery_note_logo_source", "").strip()
+    if not configured:
+        return ""
+    if is_http_url(configured):
+        return configured
+    return os.path.expanduser(configured)
+
+
 def create_delivery_note_pdf(order, order_items, output_dir=None):
     template_path = get_delivery_note_template_path()
     if template_path and not template_path.exists():
         raise FileNotFoundError(f"Vorlage fehlt: {template_path.name}")
+    logo_source = get_delivery_note_logo_source()
+    if logo_source and not is_http_url(logo_source) and not os.path.isfile(logo_source):
+        raise FileNotFoundError(f"Logo fehlt: {os.path.basename(logo_source)}")
 
     output_dir = output_dir or get_pdf_output_dir()
     if not os.path.isdir(output_dir):
         raise FileNotFoundError(f"PDF Ordner fehlt: {output_dir}")
     output_path = os.path.join(output_dir, build_delivery_note_filename(order))
     rows = build_delivery_note_rows(order_items)
-    build_delivery_note_pdf(template_path, output_path, order, rows, sender=get_delivery_note_sender())
+    build_delivery_note_pdf(template_path, output_path, order, rows, sender=get_delivery_note_sender(), logo_source=logo_source)
     return output_path, rows
 
 

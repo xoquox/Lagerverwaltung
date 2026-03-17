@@ -4,6 +4,7 @@
   "db_pass": "lagerpass",
   "db_user": "lager",
   "delivery_note_printer": "",
+  "delivery_note_logo_source": "",
   "delivery_note_template_path": "",
   "delivery_note_sender_city": "12345 Musterstadt",
   "delivery_note_sender_email": "info@example.com",
