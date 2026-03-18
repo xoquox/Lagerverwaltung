@@ -173,7 +173,7 @@ def _is_default_db_settings(settings):
 def ensure_database_ready(stdscr):
     while True:
         if _is_default_db_settings(SETTINGS):
-            message_box(stdscr, "Setup", "Bitte zuerst DB Einstellungen in Shift+F8 speichern.")
+            message_box(stdscr, "Setup", "Bitte zuerst DB Einstellungen in Shift+F11 speichern.")
             settings_dialog(stdscr)
             if _is_default_db_settings(SETTINGS):
                 if confirm_box(stdscr, "Setup", "Keine DB Daten gesetzt. Programm beenden?"):
@@ -895,9 +895,9 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     stdscr.attrset(curses.color_pair(3))
 
     if show_secondary_help:
-        status = " Shift+F2 Bearb.  Shift+F3 Info  Shift+F4 Extern  Shift+F5 Multi-Dr.  Shift+F6 Extern-Liste  Shift+F7 Inventur  Shift+F8 Einst.  Shift+F9 Loeschen  F11 Standard  F12 Auftraege  F10 Ende "
+        status = " Shift+F1 Inventur  Shift+F5 Bearb.  Shift+F8 Multi-Label  Shift+F11 Einst.  F11 Standard  F12 Auftraege  F10 Ende "
     else:
-        status = " Tab Fokus  F1 Sortieren  F2 Neu  F3 Menge  F4 Platz  F5 Drucken  F6 Ohne Platz  F7 Lokal  F8 Info  F9 Reset  F10 Ende  F11 Mehr  F12 Auftraege "
+        status = " Tab Fokus  F1 Sortieren  F2 Lokal  F3 Ohne  F4 Info  F5 Neu  F6 Platz  F7 Menge  F8 Label  F9 Reset  F10 Ende  F11 Mehr  F12 Auftraege "
     focus = " Fokus: Artikel " if active_pane == "left" else " Fokus: Regale "
     if external_mode == "only":
         focus = focus[:-1] + " | Ansicht: Extern "
@@ -1220,7 +1220,7 @@ def _parse_lpstat_printers(output):
 
 def get_cups_printers():
     try:
-        PRINT_LOGGER.debug("Lade CUPS-Drucker mit lpstat -p")
+        PRINT_LOGGER.debug("Lade Drucker mit lpstat -p")
         result = subprocess.run(
             ["lpstat", "-p"],
             stdout=subprocess.PIPE,
@@ -1229,16 +1229,16 @@ def get_cups_printers():
             check=True,
         )
     except FileNotFoundError:
-        return [], None, "lpstat/CUPS ist auf diesem System nicht verfuegbar."
+        return [], None, "lpstat/Drucksystem ist auf diesem System nicht verfuegbar."
     except subprocess.CalledProcessError as exc:
         error_text = (exc.stderr or str(exc)).strip()
-        return [], None, error_text or "CUPS-Drucker konnten nicht geladen werden."
+        return [], None, error_text or "Drucker konnten nicht geladen werden."
 
     printers = _parse_lpstat_printers(result.stdout)
     default_printer = None
 
     try:
-        PRINT_LOGGER.debug("Lade CUPS-Defaultdrucker mit lpstat -d")
+        PRINT_LOGGER.debug("Lade Standarddrucker mit lpstat -d")
         default_result = subprocess.run(
             ["lpstat", "-d"],
             stdout=subprocess.PIPE,
@@ -1263,7 +1263,7 @@ def cups_printer_dialog(stdscr, current_printer):
     while True:
         printers, default_printer, error = get_cups_printers()
         if error:
-            message_box(stdscr, "CUPS Fehler", error[:56])
+            message_box(stdscr, "Drucker Fehler", error[:56])
             return current_printer
 
         options = [{"name": "", "detail": "Keinen Drucker auswaehlen"}]
@@ -1292,7 +1292,7 @@ def cups_printer_dialog(stdscr, current_printer):
             win.bkgd(" ", curses.color_pair(1))
             win.erase()
             win.box()
-            win.addstr(0, 2, " CUPS Drucker ")
+            win.addstr(0, 2, " Drucker ")
 
             visible_rows = max(1, height - 4)
             if selected < top_index:
@@ -1388,8 +1388,8 @@ def settings_dialog(stdscr):
                 {"name": "location_regex_regal", "label": "Regex Regal", "value": values["location_regex_regal"]},
                 {"name": "location_regex_fach", "label": "Regex Fach", "value": values["location_regex_fach"]},
                 {"name": "location_regex_platz", "label": "Regex Platz", "value": values["location_regex_platz"]},
-                {"name": "picklist_printer", "label": "Pickliste CUPS", "value": values["picklist_printer"]},
-                {"name": "delivery_note_printer", "label": "Lieferschein CUPS", "value": values["delivery_note_printer"]},
+                {"name": "picklist_printer", "label": "Pickliste Drucker", "value": values["picklist_printer"]},
+                {"name": "delivery_note_printer", "label": "Lieferschein Drucker", "value": values["delivery_note_printer"]},
                 {"name": "pdf_output_dir", "label": "PDF Ordner", "value": values["pdf_output_dir"]},
                 {"name": "delivery_note_template_path", "label": "LS Vorlage", "value": values["delivery_note_template_path"]},
                 {"name": "delivery_note_logo_source", "label": "LS Logo URL/Pfad", "value": values["delivery_note_logo_source"]},
@@ -1399,7 +1399,7 @@ def settings_dialog(stdscr):
                 {"name": "delivery_note_sender_email", "label": "LS E-Mail", "value": values["delivery_note_sender_email"]},
             ],
             initial_active=active,
-            footer_text="Enter weiter  ↑↓ wechseln  F2 Speichern  F3 CUPS  F9 Abbrechen",
+            footer_text="Enter weiter  ↑↓ wechseln  F2 Speichern  F3 Drucker  F9 Abbrechen",
             extra_actions=[
                 {"name": "cups_printer_select", "keys": (curses.KEY_F3,)},
             ],
@@ -2085,7 +2085,7 @@ def print_picklist(stdscr, order, order_items):
     printer = SETTINGS["picklist_printer"].strip()
 
     if not printer:
-        message_box(stdscr, "Fehler", "Bitte zuerst F8: Pickliste CUPS setzen.")
+        message_box(stdscr, "Fehler", "Bitte zuerst Shift+F11: Pickliste Drucker setzen.")
         return
 
     document = build_picklist_text(order, order_items)
@@ -2096,7 +2096,7 @@ def print_picklist(stdscr, order, order_items):
 
     try:
         PRINT_LOGGER.debug(
-            "Sende Pickliste an CUPS printer=%s order=%s items=%s",
+            "Sende Pickliste an Drucker printer=%s order=%s items=%s",
             printer,
             order["order_name"],
             len(order_items),
@@ -2109,15 +2109,15 @@ def print_picklist(stdscr, order, order_items):
             check=True,
         )
     except FileNotFoundError:
-        PRINT_LOGGER.exception("lp/CUPS nicht verfuegbar fuer Pickliste order=%s", order["order_name"])
-        message_box(stdscr, "Druckfehler", "lp/CUPS ist auf diesem System nicht verfuegbar.")
+        PRINT_LOGGER.exception("lp/Drucksystem nicht verfuegbar fuer Pickliste order=%s", order["order_name"])
+        message_box(stdscr, "Druckfehler", "lp/Drucksystem ist auf diesem System nicht verfuegbar.")
     except subprocess.CalledProcessError as exc:
         PRINT_LOGGER.exception("Picklisten-Druck fehlgeschlagen order=%s printer=%s", order["order_name"], printer)
         error_text = (exc.stderr or str(exc)).strip()
         message_box(stdscr, "Druckfehler", f"{(error_text[:20] or 'Druckfehler')} {PRINT_LOG_PATH.name}"[:56])
     else:
         PRINT_LOGGER.info("Pickliste erfolgreich gedruckt order=%s printer=%s", order["order_name"], printer)
-        message_box(stdscr, "Druck", "Pickliste wurde an CUPS gesendet.")
+        message_box(stdscr, "Druck", "Pickliste wurde an Drucker gesendet.")
     finally:
         try:
             os.unlink(temp_path)
@@ -2150,7 +2150,7 @@ def export_delivery_note_pdf(stdscr, order, order_items):
 def print_delivery_note(stdscr, order, order_items):
     printer = SETTINGS["delivery_note_printer"].strip()
     if not printer:
-        message_box(stdscr, "Fehler", "Bitte zuerst F8: Lieferschein CUPS setzen.")
+        message_box(stdscr, "Fehler", "Bitte zuerst Shift+F11: Lieferschein Drucker setzen.")
         return
 
     temp_path = None
@@ -2158,7 +2158,7 @@ def print_delivery_note(stdscr, order, order_items):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path, rows = create_delivery_note_pdf(order, order_items, output_dir=temp_dir)
             PRINT_LOGGER.debug(
-                "Sende Lieferschein an CUPS printer=%s order=%s items=%s",
+                "Sende Lieferschein an Drucker printer=%s order=%s items=%s",
                 printer,
                 order["order_name"],
                 len(rows),
@@ -2185,7 +2185,7 @@ def print_delivery_note(stdscr, order, order_items):
         message_box(stdscr, "Druckfehler", f"Lieferschein fehlgeschlagen {PRINT_LOG_PATH.name}"[:56])
     else:
         PRINT_LOGGER.info("Lieferschein erfolgreich gedruckt order=%s printer=%s", order["order_name"], printer)
-        message_box(stdscr, "Druck", "Lieferschein wurde an CUPS gesendet.")
+        message_box(stdscr, "Druck", "Lieferschein wurde an Drucker gesendet.")
 
 
 def inventory_session_summary(lines):
@@ -2276,7 +2276,7 @@ def export_inventory_csv(session, lines):
 def print_inventory_list(stdscr, session, lines):
     printer = SETTINGS["picklist_printer"].strip()
     if not printer:
-        message_box(stdscr, "Fehler", "Bitte zuerst F8: Pickliste CUPS setzen.")
+        message_box(stdscr, "Fehler", "Bitte zuerst Shift+F11: Pickliste Drucker setzen.")
         return
 
     document = build_inventory_export_text(session, lines)
@@ -2286,7 +2286,7 @@ def print_inventory_list(stdscr, session, lines):
 
     try:
         PRINT_LOGGER.debug(
-            "Sende Inventurliste an CUPS printer=%s session=%s positions=%s",
+            "Sende Inventurliste an Drucker printer=%s session=%s positions=%s",
             printer,
             session["session_name"],
             len(lines),
@@ -2299,15 +2299,15 @@ def print_inventory_list(stdscr, session, lines):
             check=True,
         )
     except FileNotFoundError:
-        PRINT_LOGGER.exception("lp/CUPS nicht verfuegbar fuer Inventurliste session=%s", session["session_name"])
-        message_box(stdscr, "Druckfehler", "lp/CUPS ist auf diesem System nicht verfuegbar.")
+        PRINT_LOGGER.exception("lp/Drucksystem nicht verfuegbar fuer Inventurliste session=%s", session["session_name"])
+        message_box(stdscr, "Druckfehler", "lp/Drucksystem ist auf diesem System nicht verfuegbar.")
     except subprocess.CalledProcessError as exc:
         PRINT_LOGGER.exception("Inventurlisten-Druck fehlgeschlagen session=%s printer=%s", session["session_name"], printer)
         error_text = (exc.stderr or str(exc)).strip()
         message_box(stdscr, "Druckfehler", f"{(error_text[:20] or 'Druckfehler')} {PRINT_LOG_PATH.name}"[:56])
     else:
         PRINT_LOGGER.info("Inventurliste erfolgreich gedruckt session=%s printer=%s", session["session_name"], printer)
-        message_box(stdscr, "Druck", "Inventurliste wurde an CUPS gesendet.")
+        message_box(stdscr, "Druck", "Inventurliste wurde an Drucker gesendet.")
     finally:
         try:
             os.unlink(temp_path)
@@ -2744,44 +2744,6 @@ def main(stdscr):
             reload_items = True
 
         elif key == curses.KEY_F2:
-            add_item(stdscr)
-            reload_items = True
-
-        elif key == curses.KEY_F3 and selected_item:
-            change_qty(stdscr, selected_item)
-            reload_items = True
-            
-        elif key == curses.KEY_F4 and selected_item:
-            change_location(stdscr, selected_item)
-            reload_items = True
-
-        elif key == curses.KEY_F4 + 12 and selected_item:
-            toggle_external_fulfillment(stdscr, selected_item)
-            reload_items = True
-        
-        elif key == curses.KEY_F5 and selected_item:
-            print_label(stdscr, selected_item)
-        
-        elif key == curses.KEY_F5 + 12 and selected_item:
-            print_label_multiple(stdscr, selected_item)
-            
-        elif key == curses.KEY_F6:
-            filter_no_location = not filter_no_location
-            left_selected = 0
-            left_top_index = 0
-            right_selected = 0
-            right_top_index = 0
-            reload_items = True
-
-        elif key == curses.KEY_F6 + 12:
-            external_mode = "hide" if external_mode == "only" else "only"
-            left_selected = 0
-            left_top_index = 0
-            right_selected = 0
-            right_top_index = 0
-            reload_items = True
-
-        elif key == curses.KEY_F7:
             filter_local = not filter_local
             left_selected = 0
             left_top_index = 0
@@ -2789,26 +2751,45 @@ def main(stdscr):
             right_top_index = 0
             reload_items = True
 
-        elif key == curses.KEY_F7 + 12:
+        elif key == curses.KEY_F3:
+            filter_no_location = not filter_no_location
+            left_selected = 0
+            left_top_index = 0
+            right_selected = 0
+            right_top_index = 0
+            reload_items = True
+
+        elif key == curses.KEY_F4 and selected_item:
+            item_info_dialog(stdscr, selected_item)
+
+        elif key == curses.KEY_F5:
+            add_item(stdscr)
+            reload_items = True
+
+        elif key == curses.KEY_F6 and selected_item:
+            change_location(stdscr, selected_item)
+            reload_items = True
+
+        elif key == curses.KEY_F7 and selected_item:
+            change_qty(stdscr, selected_item)
+            reload_items = True
+
+        elif key == curses.KEY_F8 and selected_item:
+            print_label(stdscr, selected_item)
+
+        elif key == curses.KEY_F1 + 12:
             if inventory_dialog(stdscr):
                 reload_items = True
 
-        elif key == curses.KEY_F8 and selected_item:
-            item_info_dialog(stdscr, selected_item)
-            
-        elif key == curses.KEY_F8 + 12:
-            settings_dialog(stdscr)
-            
-        elif key == curses.KEY_F9 + 12 and selected_item:
-            delete_item(stdscr, selected_item)
-            reload_items = True
-        
-        elif key == curses.KEY_F2 + 12 and selected_item:
+        elif key == curses.KEY_F5 + 12 and selected_item:
             edit_item(stdscr, selected_item)
             reload_items = True
-            
-        elif key == curses.KEY_F3 + 12 and selected_item:
-            item_info_dialog(stdscr, selected_item)
+
+        elif key == curses.KEY_F8 + 12 and selected_item:
+            print_label_multiple(stdscr, selected_item)
+
+        elif key == curses.KEY_F11 + 12:
+            settings_dialog(stdscr)
 
         elif key == curses.KEY_F9:
             filter_text = None

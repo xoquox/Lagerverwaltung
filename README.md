@@ -14,8 +14,8 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 - Lagerplaetze nach `Regal / Fach / Platz` pflegen
 - Bestellungen aus Shopify synchronisieren
 - Zahlungs- und Fulfillment-Status im Auftragsfenster anzeigen
-- Picklisten per CUPS drucken
-- Lieferscheine als PDF erzeugen oder per CUPS drucken
+- Picklisten per Drucker drucken
+- Lieferscheine als PDF erzeugen oder per Drucker drucken
 - Brother-QL-Etiketten drucken
 - Inventur starten, zaehlen, exportieren und uebernehmen
 - extern gelagerte Fulfillment-Artikel ausblenden
@@ -41,7 +41,7 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 - PostgreSQL
 - `curses`
 - fuer Labeldruck: `Pillow`, `python-barcode`, `brother_ql`
-- fuer Listen-/Lieferschein-Druck: CUPS bzw. `lp`
+- fuer Listen-/Lieferschein-Druck: Drucksystem mit `lp`
 - fuer HTML/CSS-Lieferscheine: `WeasyPrint` (inkl. Systembibliotheken wie cairo/pango)
 
 Die Anwendung erweitert benoetigte Datenbankspalten und legt die Tabellen fuer Bestellungen und Inventur bei Bedarf selbst an.
@@ -130,7 +130,7 @@ Etiketten werden ueber [label_print.py](/home/chrisi/Lagerverwaltung/label_print
 
 ### Picklisten
 
-Picklisten werden textbasiert ueber den in den Einstellungen hinterlegten CUPS-Drucker gesendet.
+Picklisten werden textbasiert ueber den in den Einstellungen hinterlegten Drucker gesendet.
 
 ### Lieferscheine
 
@@ -150,7 +150,7 @@ Beispiel (`settings.local.json`):
 Unterstuetzt werden:
 
 - PDF-Export
-- getrennten CUPS-Drucker
+- getrennten Drucker
 - mehrseitige Ausgabe
 - Seitennummerierung
 
