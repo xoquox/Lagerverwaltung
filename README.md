@@ -60,7 +60,11 @@ Es gibt zwei Ebenen:
 Wichtige Einstellungen:
 
 - `db_host`, `db_name`, `db_user`, `db_pass`
+- `language` (`de` oder `en`)
+- `color_theme` (`blue`, `green`, `mono`, `megatrends`, `smoth`, `norton`, `gold-standard`, `subtile`, `monokai`)
+- `color_theme_file` (optional, Pfad zu eigener JSON-Datei mit Themes)
 - `printer_uri`, `printer_model`, `label_size`
+- `label_font_regular`, `label_font_condensed` (optional, lokale TrueType/OpenType Fonts fuer Labeldruck)
 - `location_regex_regal`, `location_regex_fach`, `location_regex_platz`
 - `picklist_printer`
 - `delivery_note_printer`
@@ -128,6 +132,17 @@ pip install psycopg2-binary pillow python-barcode brother_ql requests python-dot
 
 Etiketten werden ueber [label_print.py](/home/chrisi/Lagerverwaltung/label_print.py) erzeugt. Unterstuetzt werden Brother-QL-Netzwerkdrucker.
 
+Das Projekt liefert bewusst keine proprietaeren Fonts mit.
+Ohne eigene Font-Pfade nutzt der Labeldruck automatisch verfuegbare Systemfonts (z. B. DejaVu Sans).
+Wenn gewuenscht, koennen benutzerdefinierte lokale Fontdateien in den Einstellungen gesetzt werden:
+
+```json
+{
+  "label_font_regular": "/pfad/zu/deinem/font-regular.ttf",
+  "label_font_condensed": "/pfad/zu/deinem/font-condensed.ttf"
+}
+```
+
 ### Picklisten
 
 Picklisten werden textbasiert ueber den in den Einstellungen hinterlegten Drucker gesendet.
@@ -172,3 +187,24 @@ export LAGERVERWALTUNG_LOG_LEVEL=DEBUG
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+- In den Einstellungen koennen `language` und `color_theme` ueber eine Auswahl (F4) gewaehlt werden, ohne Werte manuell zu tippen.
+
+Beispiel fuer eigene Themes (`color_theme_file`):
+
+```json
+{
+  "themes": {
+    "my-blue": {
+      "pair_1_fg": "white",
+      "pair_1_bg": "blue",
+      "pair_2_fg": "black",
+      "pair_2_bg": "cyan",
+      "pair_3_fg": "white",
+      "pair_3_bg": "black"
+    }
+  }
+}
+```
+
+Erlaubte Farbnamen: `black`, `red`, `green`, `brown`, `yellow`, `blue`, `magenta`, `cyan`, `white`,
+`brightblack`, `brightred`, `brightgreen`, `brightyellow`, `brightblue`, `brightmagenta`, `brightcyan`, `brightwhite`.

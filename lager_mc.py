@@ -3,6 +3,7 @@ import curses
 import csv
 import datetime
 import html
+import json
 import os
 import psycopg2
 import psycopg2.extras
@@ -38,6 +39,417 @@ COLS = [
     ("Verfüg.", 7),
     ("S", 2),
 ]
+
+SUPPORTED_LANGUAGES = {"de", "en"}
+
+BASE_THEMES = {
+    "blue": {
+        "pair_1_fg": "white",
+        "pair_1_bg": "blue",
+        "pair_2_fg": "black",
+        "pair_2_bg": "cyan",
+        "pair_3_fg": "black",
+        "pair_3_bg": "white",
+    },
+    "green": {
+        "pair_1_fg": "black",
+        "pair_1_bg": "green",
+        "pair_2_fg": "black",
+        "pair_2_bg": "yellow",
+        "pair_3_fg": "black",
+        "pair_3_bg": "white",
+    },
+    "mono": {
+        "pair_1_fg": "white",
+        "pair_1_bg": "black",
+        "pair_2_fg": "black",
+        "pair_2_bg": "white",
+        "pair_3_fg": "white",
+        "pair_3_bg": "black",
+    },
+    "megatrends": {
+        "pair_1_fg": "brightyellow",
+        "pair_1_bg": "blue",
+        "pair_2_fg": "blue",
+        "pair_2_bg": "brightwhite",
+        "pair_3_fg": "brightblack",
+        "pair_3_bg": "black",
+    },
+    "smoth": {
+        "pair_1_fg": "white",
+        "pair_1_bg": "brightblue",
+        "pair_2_fg": "brightblue",
+        "pair_2_bg": "brightwhite",
+        "pair_3_fg": "brightblue",
+        "pair_3_bg": "blue",
+    },
+    "norton": {
+        "pair_1_fg": "brightcyan",
+        "pair_1_bg": "blue",
+        "pair_2_fg": "brightcyan",
+        "pair_2_bg": "black",
+        "pair_3_fg": "brightwhite",
+        "pair_3_bg": "black",
+    },
+    "gold-standard": {
+        "pair_1_fg": "brightyellow",
+        "pair_1_bg": "brown",
+        "pair_2_fg": "brown",
+        "pair_2_bg": "brightyellow",
+        "pair_3_fg": "brown",
+        "pair_3_bg": "black",
+    },
+    "subtile": {
+        "pair_1_fg": "brightwhite",
+        "pair_1_bg": "white",
+        "pair_2_fg": "brightblack",
+        "pair_2_bg": "white",
+        "pair_3_fg": "white",
+        "pair_3_bg": "brightblack",
+    },
+    "monokai": {
+        "pair_1_fg": "brightwhite",
+        "pair_1_bg": "brightblack",
+        "pair_2_fg": "brightwhite",
+        "pair_2_bg": "white",
+        "pair_3_fg": "white",
+        "pair_3_bg": "black",
+    },
+}
+
+CUSTOM_COLOR_RGB = {
+    "brown": (680, 340, 0),
+    "brightblack": (500, 500, 500),
+    "brightred": (1000, 200, 200),
+    "brightgreen": (200, 1000, 200),
+    "brightyellow": (1000, 1000, 300),
+    "brightblue": (300, 300, 1000),
+    "brightmagenta": (1000, 300, 1000),
+    "brightcyan": (300, 1000, 1000),
+    "brightwhite": (1000, 1000, 1000),
+}
+CUSTOM_COLOR_IDS = {}
+THEME_KEY_SET = {
+    "pair_1_fg",
+    "pair_1_bg",
+    "pair_2_fg",
+    "pair_2_bg",
+    "pair_3_fg",
+    "pair_3_bg",
+}
+
+TRANSLATIONS = {
+    "de": {
+        "app_title": "Lagerverwaltung",
+        "settings": "Einstellungen",
+        "focus_items": " Fokus: Artikel ",
+        "focus_locations": " Fokus: Regale ",
+        "view_external": " | Ansicht: Extern ",
+        "filter_prefix": " Filter: {value} ",
+        "status_primary": " Tab Fokus  F1 Sortieren  F2 Lokal  F3 Ohne  F4 Info  F5 Neu  F6 Platz  F7 Menge  F8 Label  F9 Reset  F10 Ende  F11 Mehr  F12 Auftraege ",
+        "status_secondary": " Shift+F1 Inventur  Shift+F5 Bearb.  Shift+F8 Multi-Label  Shift+F11 Einst.  F11 Standard  F12 Auftraege  F10 Ende ",
+        "no_locations": "Keine Lagerplaetze",
+        "locations_panel": "Regale",
+        "items_panel": "Artikel",
+        "press_key": "Taste druecken ...",
+        "confirm_yes_no": "[J]a / [N]ein",
+        "search": "Suche",
+        "search_footer": "Enter suchen  F9 Abbrechen",
+        "printer_dialog": "Drucker",
+        "printer_error": "Drucker Fehler",
+        "printer_none": "Keinen Drucker auswaehlen",
+        "printer_empty": "(leer)",
+        "printer_active": "aktiv",
+        "printer_default": "default",
+        "printer_reload_footer": "Enter waehlen  F5 Neu laden  F9 Zurueck",
+        "settings_footer": "Enter weiter  ↑↓ wechseln  F2 Speichern  F3 Drucker  F9 Abbrechen",
+        "settings_footer_select": "Enter weiter/Auswahl  ↑↓ wechseln  F2 Speichern  F3 Drucker  F9 Abbrechen",
+        "pick_language": "Sprache waehlen",
+        "pick_theme": "Farbthema waehlen",
+        "pick_cancel": "F9 Zurueck",
+        "field_db_host": "DB Host",
+        "field_db_name": "DB Name",
+        "field_db_user": "DB User",
+        "field_db_pass": "DB Passwort",
+        "field_language": "Sprache",
+        "field_theme": "Farbthema",
+        "field_theme_file": "Theme Datei",
+        "field_printer_uri": "Drucker URI",
+        "field_printer_model": "Drucker Modell",
+        "field_label_size": "Labelformat",
+        "field_label_font_regular": "Label Font (Reg)",
+        "field_label_font_condensed": "Label Font (Cond)",
+        "field_regex_regal": "Regex Regal",
+        "field_regex_fach": "Regex Fach",
+        "field_regex_platz": "Regex Platz",
+        "field_picklist_printer": "Pickliste Drucker",
+        "field_delivery_printer": "Lieferschein Drucker",
+        "field_pdf_dir": "PDF Ordner",
+        "field_template": "LS Vorlage",
+        "field_logo": "LS Logo URL/Pfad",
+        "field_sender_name": "LS Name",
+        "field_sender_street": "LS Strasse",
+        "field_sender_city": "LS Ort",
+        "field_sender_email": "LS E-Mail",
+        "col_shelf": "Regal",
+        "col_bin": "Fach",
+        "col_slot": "Platz",
+        "col_total": "Gesamt",
+        "col_unavailable": "N. verf.",
+        "col_committed": "Best.",
+        "col_available": "Verf.",
+        "error": "Fehler",
+        "saved": "Gespeichert",
+        "saved_settings": "Einstellungen wurden gespeichert.",
+        "theme_file_missing": "Theme-Datei existiert nicht.",
+        "theme_invalid": "Farbthema ungueltig. Erlaubt: {names}",
+        "lang_de": "Deutsch",
+        "lang_en": "Englisch",
+        "theme_blue": "Blau",
+        "theme_green": "Gruen",
+        "theme_mono": "Monochrom",
+        "theme_megatrends": "Megatrends (DOS)",
+        "theme_smoth": "Smoth (DOS)",
+        "theme_norton": "Norton (DOS)",
+        "theme_gold_standard": "Gold Standard (DOS)",
+        "theme_subtile": "Subtile (DOS)",
+        "theme_monokai": "Monokai (DOS)",
+    },
+    "en": {
+        "app_title": "Inventory Manager",
+        "settings": "Settings",
+        "focus_items": " Focus: Items ",
+        "focus_locations": " Focus: Shelves ",
+        "view_external": " | View: External ",
+        "filter_prefix": " Filter: {value} ",
+        "status_primary": " Tab Focus  F1 Sort  F2 Local  F3 Missing  F4 Info  F5 New  F6 Location  F7 Qty  F8 Label  F9 Reset  F10 Exit  F11 More  F12 Orders ",
+        "status_secondary": " Shift+F1 Stocktake  Shift+F5 Edit  Shift+F8 Multi-Label  Shift+F11 Settings  F11 Standard  F12 Orders  F10 Exit ",
+        "no_locations": "No storage locations",
+        "locations_panel": "Locations",
+        "items_panel": "Items",
+        "press_key": "Press any key ...",
+        "confirm_yes_no": "[Y]es / [N]o",
+        "search": "Search",
+        "search_footer": "Enter search  F9 Cancel",
+        "printer_dialog": "Printers",
+        "printer_error": "Printer Error",
+        "printer_none": "Select no printer",
+        "printer_empty": "(empty)",
+        "printer_active": "active",
+        "printer_default": "default",
+        "printer_reload_footer": "Enter select  F5 Reload  F9 Back",
+        "settings_footer": "Enter next  ↑↓ move  F2 Save  F3 Printer  F9 Cancel",
+        "settings_footer_select": "Enter next/select  ↑↓ move  F2 Save  F3 Printer  F9 Cancel",
+        "pick_language": "Select language",
+        "pick_theme": "Select color theme",
+        "pick_cancel": "F9 Back",
+        "field_db_host": "DB Host",
+        "field_db_name": "DB Name",
+        "field_db_user": "DB User",
+        "field_db_pass": "DB Password",
+        "field_language": "Language",
+        "field_theme": "Color Theme",
+        "field_theme_file": "Theme File",
+        "field_printer_uri": "Printer URI",
+        "field_printer_model": "Printer Model",
+        "field_label_size": "Label Format",
+        "field_label_font_regular": "Label Font (Reg)",
+        "field_label_font_condensed": "Label Font (Cond)",
+        "field_regex_regal": "Regex Shelf",
+        "field_regex_fach": "Regex Bin",
+        "field_regex_platz": "Regex Slot",
+        "field_picklist_printer": "Picklist Printer",
+        "field_delivery_printer": "Delivery Printer",
+        "field_pdf_dir": "PDF Folder",
+        "field_template": "Delivery Template",
+        "field_logo": "Delivery Logo URL/Path",
+        "field_sender_name": "Sender Name",
+        "field_sender_street": "Sender Street",
+        "field_sender_city": "Sender City",
+        "field_sender_email": "Sender E-Mail",
+        "col_shelf": "Shelf",
+        "col_bin": "Bin",
+        "col_slot": "Slot",
+        "col_total": "Total",
+        "col_unavailable": "Unav.",
+        "col_committed": "Comm.",
+        "col_available": "Avail.",
+        "error": "Error",
+        "saved": "Saved",
+        "saved_settings": "Settings were saved.",
+        "theme_file_missing": "Theme file does not exist.",
+        "theme_invalid": "Invalid color theme. Allowed: {names}",
+        "lang_de": "German",
+        "lang_en": "English",
+        "theme_blue": "Blue",
+        "theme_green": "Green",
+        "theme_mono": "Monochrome",
+        "theme_megatrends": "Megatrends (DOS)",
+        "theme_smoth": "Smoth (DOS)",
+        "theme_norton": "Norton (DOS)",
+        "theme_gold_standard": "Gold Standard (DOS)",
+        "theme_subtile": "Subtile (DOS)",
+        "theme_monokai": "Monokai (DOS)",
+    },
+}
+
+
+def current_language():
+    language = (SETTINGS.get("language") or DEFAULT_SETTINGS.get("language") or "de").lower().strip()
+    if language not in SUPPORTED_LANGUAGES:
+        return "de"
+    return language
+
+
+def t(key, **kwargs):
+    language = current_language()
+    value = TRANSLATIONS.get(language, {}).get(key)
+    if value is None:
+        value = TRANSLATIONS["de"].get(key, key)
+    if kwargs:
+        try:
+            return value.format(**kwargs)
+        except Exception:
+            return value
+    return value
+
+
+def get_active_theme_name():
+    themes = get_all_themes()
+    theme_name = (SETTINGS.get("color_theme") or DEFAULT_SETTINGS.get("color_theme") or "blue").strip().lower()
+    if theme_name not in themes:
+        return "blue"
+    return theme_name
+
+
+def get_theme_file_candidates():
+    configured = (SETTINGS.get("color_theme_file") or "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(os.path.expanduser(configured)))
+    else:
+        candidates.append(Path(__file__).resolve().parent / "themes.local.json")
+        candidates.append(Path(__file__).resolve().parent / "local_only" / "themes.json")
+    return candidates
+
+
+def _is_valid_theme_map(value):
+    if not isinstance(value, dict):
+        return False
+    return THEME_KEY_SET.issubset(set(value.keys()))
+
+
+def load_custom_themes_from_file(path):
+    candidate = Path(path)
+    try:
+        raw = candidate.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception as exc:
+        LOGGER.warning("Konnte Theme-Datei nicht lesen: %s (%s)", candidate, exc)
+        return {}
+
+    if isinstance(data, dict) and isinstance(data.get("themes"), dict):
+        data = data["themes"]
+
+    if not isinstance(data, dict):
+        LOGGER.warning("Theme-Datei hat ungueltiges Format: %s", candidate)
+        return {}
+
+    custom = {}
+    for name, theme in data.items():
+        theme_name = str(name).strip().lower()
+        if not theme_name:
+            continue
+        if _is_valid_theme_map(theme):
+            custom[theme_name] = {key: str(theme[key]).strip().lower() for key in THEME_KEY_SET}
+        else:
+            LOGGER.warning("Theme '%s' in %s ist unvollstaendig und wird ignoriert.", name, candidate)
+    return custom
+
+
+def load_custom_themes():
+    for candidate in get_theme_file_candidates():
+        if not candidate.exists():
+            continue
+        custom = load_custom_themes_from_file(candidate)
+        if custom:
+            return custom
+    return {}
+
+
+def get_all_themes():
+    themes = dict(BASE_THEMES)
+    themes.update(load_custom_themes())
+    return themes
+
+
+def _color_from_name(name):
+    color_name = (name or "white").lower()
+    custom_id = _custom_color_id(color_name)
+    if custom_id is not None:
+        return custom_id
+
+    return {
+        "black": curses.COLOR_BLACK,
+        "red": curses.COLOR_RED,
+        "green": curses.COLOR_GREEN,
+        "brown": curses.COLOR_RED,
+        "yellow": curses.COLOR_YELLOW,
+        "blue": curses.COLOR_BLUE,
+        "magenta": curses.COLOR_MAGENTA,
+        "cyan": curses.COLOR_CYAN,
+        "brightblack": curses.COLOR_BLACK,
+        "brightred": curses.COLOR_RED,
+        "brightgreen": curses.COLOR_GREEN,
+        "brightyellow": curses.COLOR_YELLOW,
+        "brightblue": curses.COLOR_BLUE,
+        "brightmagenta": curses.COLOR_MAGENTA,
+        "brightcyan": curses.COLOR_CYAN,
+        "brightwhite": curses.COLOR_WHITE,
+        "white": curses.COLOR_WHITE,
+    }.get(color_name, curses.COLOR_WHITE)
+
+
+def _custom_color_id(color_name):
+    if color_name not in CUSTOM_COLOR_RGB:
+        return None
+    if color_name in CUSTOM_COLOR_IDS:
+        return CUSTOM_COLOR_IDS[color_name]
+
+    can_customize = bool(getattr(curses, "can_change_color", lambda: False)())
+    color_slots = int(getattr(curses, "COLORS", 0) or 0)
+    if not can_customize or color_slots < 32:
+        return None
+
+    next_id = 16 + len(CUSTOM_COLOR_IDS)
+    if next_id >= color_slots:
+        return None
+
+    try:
+        curses.init_color(next_id, *CUSTOM_COLOR_RGB[color_name])
+    except curses.error:
+        return None
+    CUSTOM_COLOR_IDS[color_name] = next_id
+    return next_id
+
+
+def apply_color_theme(stdscr):
+    theme = get_all_themes()[get_active_theme_name()]
+    pair_1 = _resolve_pair_colors(theme["pair_1_fg"], theme["pair_1_bg"], fallback_fg="white", fallback_bg="blue")
+    pair_2 = _resolve_pair_colors(theme["pair_2_fg"], theme["pair_2_bg"], fallback_fg="black", fallback_bg="cyan")
+    pair_3 = _resolve_pair_colors(theme["pair_3_fg"], theme["pair_3_bg"], fallback_fg="black", fallback_bg="white")
+    curses.init_pair(1, pair_1[0], pair_1[1])
+    curses.init_pair(2, pair_2[0], pair_2[1])
+    curses.init_pair(3, pair_3[0], pair_3[1])
+    stdscr.bkgd(" ", curses.color_pair(1))
+
+
+def _resolve_pair_colors(fg_name, bg_name, fallback_fg, fallback_bg):
+    fg = _color_from_name(fg_name)
+    bg = _color_from_name(bg_name)
+    if fg == bg:
+        return _color_from_name(fallback_fg), _color_from_name(fallback_bg)
+    return fg, bg
 
 
 def init_db():
@@ -604,7 +1016,19 @@ def format_row(row):
 
 
 def format_header():
-    cells = [_fit(name, width) for name, width in COLS]
+    header_cols = [
+        ("SKU", 18),
+        ("Name", 60),
+        (t("col_shelf"), 7),
+        (t("col_bin"), 6),
+        (t("col_slot"), 7),
+        (t("col_total"), 7),
+        (t("col_unavailable"), 8),
+        (t("col_committed"), 7),
+        (t("col_available"), 7),
+        ("S", 2),
+    ]
+    cells = [_fit(name, width) for name, width in header_cols]
     return " ".join(cells)
 
 
@@ -833,7 +1257,7 @@ def draw_items_panel(win, items, selected, top_index, active):
 
     win.erase()
     win.box()
-    panel_title = " Artikel "
+    panel_title = f" {t('items_panel')} "
 
     if active:
         win.attrset(curses.color_pair(2))
@@ -866,7 +1290,7 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     stdscr.attrset(curses.color_pair(1))
     stdscr.erase()
     stdscr.box()
-    stdscr.addstr(0, 2, " Lagerverwaltung ")
+    stdscr.addstr(0, 2, f" {t('app_title')} ")
     inner_width = w - 4
     left_width = max(40, int(inner_width * 0.62))
     left_width = min(left_width, inner_width - 24)
@@ -882,10 +1306,10 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
 
     draw_items_panel(left_win, items, left_selected, left_top_index, active_pane == "left")
 
-    right_lines = [row["label"] for row in location_rows] if location_rows else ["Keine Lagerplaetze"]
+    right_lines = [row["label"] for row in location_rows] if location_rows else [t("no_locations")]
     draw_panel(
         right_win,
-        "Regale",
+        t("locations_panel"),
         right_lines,
         right_selected if location_rows else 0,
         right_top_index,
@@ -895,17 +1319,17 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     stdscr.attrset(curses.color_pair(3))
 
     if show_secondary_help:
-        status = " Shift+F1 Inventur  Shift+F5 Bearb.  Shift+F8 Multi-Label  Shift+F11 Einst.  F11 Standard  F12 Auftraege  F10 Ende "
+        status = t("status_secondary")
     else:
-        status = " Tab Fokus  F1 Sortieren  F2 Lokal  F3 Ohne  F4 Info  F5 Neu  F6 Platz  F7 Menge  F8 Label  F9 Reset  F10 Ende  F11 Mehr  F12 Auftraege "
-    focus = " Fokus: Artikel " if active_pane == "left" else " Fokus: Regale "
+        status = t("status_primary")
+    focus = t("focus_items") if active_pane == "left" else t("focus_locations")
     if external_mode == "only":
-        focus = focus[:-1] + " | Ansicht: Extern "
+        focus = focus[:-1] + t("view_external")
 
     stdscr.addstr(h-2, 0, " "*(w-1))
 
     if filter_text:
-        stdscr.addstr(h-2, 0, f" Filter: {filter_text} "[:w-1])
+        stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[:w-1])
     else:
         stdscr.addstr(h-2, 0, focus[:w-1])
 
@@ -933,7 +1357,7 @@ def message_box(stdscr, title, message):
 
     win.addstr(0, 2, f" {title} ")
     win.addstr(2, 2, message[:width-4])
-    win.addstr(4, 2, "Taste drücken …")
+    win.addstr(4, 2, t("press_key"))
 
     win.refresh()
     key = stdscr.get_wch()
@@ -959,7 +1383,7 @@ def confirm_box(stdscr, title, message):
 
     win.addstr(0, 2, f" {title} ")
     win.addstr(2, 2, message[:width-4])
-    win.addstr(4, 2, "[J]a / [N]ein")
+    win.addstr(4, 2, t("confirm_yes_no"))
 
     win.refresh()
 
@@ -1155,9 +1579,9 @@ def search_dialog(stdscr, initial):
         win.erase()
         win.box()
 
-        win.addstr(0, 2, " Suche ")
+        win.addstr(0, 2, f" {t('search')} ")
 
-        win.addstr(2, 2, "Suche:")
+        win.addstr(2, 2, f"{t('search')}:")
 
         win.attron(curses.color_pair(2))
 
@@ -1168,7 +1592,7 @@ def search_dialog(stdscr, initial):
         
         win.attroff(curses.color_pair(2))
 
-        win.addstr(height-1, 2, "Enter suchen  F9 Abbrechen")
+        win.addstr(height-1, 2, t("search_footer"))
 
         cursor_pos = min(len(value), field_width - 1)
         win.move(2, 10 + cursor_pos)
@@ -1263,10 +1687,10 @@ def cups_printer_dialog(stdscr, current_printer):
     while True:
         printers, default_printer, error = get_cups_printers()
         if error:
-            message_box(stdscr, "Drucker Fehler", error[:56])
+            message_box(stdscr, t("printer_error"), error[:56])
             return current_printer
 
-        options = [{"name": "", "detail": "Keinen Drucker auswaehlen"}]
+        options = [{"name": "", "detail": t("printer_none")}]
         options.extend(printers)
 
         selected = 0
@@ -1292,7 +1716,7 @@ def cups_printer_dialog(stdscr, current_printer):
             win.bkgd(" ", curses.color_pair(1))
             win.erase()
             win.box()
-            win.addstr(0, 2, " Drucker ")
+            win.addstr(0, 2, f" {t('printer_dialog')} ")
 
             visible_rows = max(1, height - 4)
             if selected < top_index:
@@ -1302,12 +1726,12 @@ def cups_printer_dialog(stdscr, current_printer):
 
             lines = []
             for printer in options:
-                name = printer["name"] or "(leer)"
+                name = printer["name"] or t("printer_empty")
                 markers = []
                 if printer["name"] == current_printer:
-                    markers.append("aktiv")
+                    markers.append(t("printer_active"))
                 if printer["name"] and printer["name"] == default_printer:
-                    markers.append("default")
+                    markers.append(t("printer_default"))
                 suffix = f" [{' / '.join(markers)}]" if markers else ""
                 lines.append(_fit(f"{name}{suffix}", width - 4))
 
@@ -1323,7 +1747,7 @@ def cups_printer_dialog(stdscr, current_printer):
                     win.addstr(y_pos, 1, line[:width - 2].ljust(width - 2))
 
             detail = options[selected]["detail"] if options else ""
-            footer = "Enter waehlen  F5 Neu laden  F9 Zurueck"
+            footer = t("printer_reload_footer")
             if detail:
                 footer = _fit(detail, width - 4)
             win.addstr(height - 2, 2, footer[:width - 4])
@@ -1347,6 +1771,89 @@ def cups_printer_dialog(stdscr, current_printer):
                 return options[selected]["name"]
 
 
+def get_language_options():
+    return [
+        {"value": "de", "label": t("lang_de")},
+        {"value": "en", "label": t("lang_en")},
+    ]
+
+
+def get_theme_options():
+    label_map = {
+        "blue": t("theme_blue"),
+        "green": t("theme_green"),
+        "mono": t("theme_mono"),
+        "megatrends": t("theme_megatrends"),
+        "smoth": t("theme_smoth"),
+        "norton": t("theme_norton"),
+        "gold-standard": t("theme_gold_standard"),
+        "subtile": t("theme_subtile"),
+        "monokai": t("theme_monokai"),
+    }
+    options = []
+    for name in sorted(get_all_themes()):
+        options.append({"value": name, "label": label_map.get(name, name)})
+    return options
+
+
+def choice_dialog(stdscr, title, options, current_value):
+    selected = 0
+    for index, option in enumerate(options):
+        if option["value"] == current_value:
+            selected = index
+            break
+
+    top_index = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(72, w - 4)
+        height = min(max(10, len(options) + 5), h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+
+        visible_rows = max(1, height - 4)
+        if selected < top_index:
+            top_index = selected
+        if selected >= top_index + visible_rows:
+            top_index = selected - visible_rows + 1
+
+        for row_index, option in enumerate(options[top_index:top_index + visible_rows]):
+            real_index = top_index + row_index
+            line = f"{option['label']} ({option['value']})"
+            y_pos = 2 + row_index
+            if real_index == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(y_pos, 1, _fit(line, width - 2))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(y_pos, 1, _fit(line, width - 2))
+
+        win.addstr(height - 2, 2, t("pick_cancel")[: width - 4])
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return current_value
+        if key == curses.KEY_DOWN:
+            selected = move_selection(options, selected, 1)
+        elif key == curses.KEY_UP:
+            selected = move_selection(options, selected, -1)
+        elif key == curses.KEY_NPAGE:
+            selected = move_selection(options, selected, visible_rows)
+        elif key == curses.KEY_PPAGE:
+            selected = move_selection(options, selected, -visible_rows)
+        elif key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            return options[selected]["value"]
+
+
 def settings_dialog(stdscr):
     global SETTINGS
 
@@ -1355,9 +1862,14 @@ def settings_dialog(stdscr):
         "db_name": SETTINGS["db_name"],
         "db_user": SETTINGS["db_user"],
         "db_pass": SETTINGS["db_pass"],
+        "language": (SETTINGS.get("language") or DEFAULT_SETTINGS["language"]).strip().lower(),
+        "color_theme": (SETTINGS.get("color_theme") or DEFAULT_SETTINGS["color_theme"]).strip().lower(),
+        "color_theme_file": SETTINGS.get("color_theme_file", ""),
         "printer_uri": SETTINGS["printer_uri"],
         "printer_model": SETTINGS["printer_model"],
         "label_size": SETTINGS["label_size"],
+        "label_font_regular": SETTINGS.get("label_font_regular", ""),
+        "label_font_condensed": SETTINGS.get("label_font_condensed", ""),
         "location_regex_regal": SETTINGS.get("location_regex_regal", DEFAULT_SETTINGS["location_regex_regal"]),
         "location_regex_fach": SETTINGS.get("location_regex_fach", DEFAULT_SETTINGS["location_regex_fach"]),
         "location_regex_platz": SETTINGS.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
@@ -1376,32 +1888,38 @@ def settings_dialog(stdscr):
     while True:
         res = form_dialog(
             stdscr,
-            "Einstellungen",
+            t("settings"),
             [
-                {"name": "db_host", "label": "DB Host", "value": values["db_host"]},
-                {"name": "db_name", "label": "DB Name", "value": values["db_name"]},
-                {"name": "db_user", "label": "DB User", "value": values["db_user"]},
-                {"name": "db_pass", "label": "DB Passwort", "value": values["db_pass"]},
-                {"name": "printer_uri", "label": "Drucker URI", "value": values["printer_uri"]},
-                {"name": "printer_model", "label": "Drucker Modell", "value": values["printer_model"]},
-                {"name": "label_size", "label": "Labelformat", "value": values["label_size"]},
-                {"name": "location_regex_regal", "label": "Regex Regal", "value": values["location_regex_regal"]},
-                {"name": "location_regex_fach", "label": "Regex Fach", "value": values["location_regex_fach"]},
-                {"name": "location_regex_platz", "label": "Regex Platz", "value": values["location_regex_platz"]},
-                {"name": "picklist_printer", "label": "Pickliste Drucker", "value": values["picklist_printer"]},
-                {"name": "delivery_note_printer", "label": "Lieferschein Drucker", "value": values["delivery_note_printer"]},
-                {"name": "pdf_output_dir", "label": "PDF Ordner", "value": values["pdf_output_dir"]},
-                {"name": "delivery_note_template_path", "label": "LS Vorlage", "value": values["delivery_note_template_path"]},
-                {"name": "delivery_note_logo_source", "label": "LS Logo URL/Pfad", "value": values["delivery_note_logo_source"]},
-                {"name": "delivery_note_sender_name", "label": "LS Name", "value": values["delivery_note_sender_name"]},
-                {"name": "delivery_note_sender_street", "label": "LS Strasse", "value": values["delivery_note_sender_street"]},
-                {"name": "delivery_note_sender_city", "label": "LS Ort", "value": values["delivery_note_sender_city"]},
-                {"name": "delivery_note_sender_email", "label": "LS E-Mail", "value": values["delivery_note_sender_email"]},
+                {"name": "db_host", "label": t("field_db_host"), "value": values["db_host"]},
+                {"name": "db_name", "label": t("field_db_name"), "value": values["db_name"]},
+                {"name": "db_user", "label": t("field_db_user"), "value": values["db_user"]},
+                {"name": "db_pass", "label": t("field_db_pass"), "value": values["db_pass"]},
+                {"name": "language", "label": t("field_language"), "value": values["language"]},
+                {"name": "color_theme", "label": t("field_theme"), "value": values["color_theme"]},
+                {"name": "color_theme_file", "label": t("field_theme_file"), "value": values["color_theme_file"]},
+                {"name": "printer_uri", "label": t("field_printer_uri"), "value": values["printer_uri"]},
+                {"name": "printer_model", "label": t("field_printer_model"), "value": values["printer_model"]},
+                {"name": "label_size", "label": t("field_label_size"), "value": values["label_size"]},
+                {"name": "label_font_regular", "label": t("field_label_font_regular"), "value": values["label_font_regular"]},
+                {"name": "label_font_condensed", "label": t("field_label_font_condensed"), "value": values["label_font_condensed"]},
+                {"name": "location_regex_regal", "label": t("field_regex_regal"), "value": values["location_regex_regal"]},
+                {"name": "location_regex_fach", "label": t("field_regex_fach"), "value": values["location_regex_fach"]},
+                {"name": "location_regex_platz", "label": t("field_regex_platz"), "value": values["location_regex_platz"]},
+                {"name": "picklist_printer", "label": t("field_picklist_printer"), "value": values["picklist_printer"]},
+                {"name": "delivery_note_printer", "label": t("field_delivery_printer"), "value": values["delivery_note_printer"]},
+                {"name": "pdf_output_dir", "label": t("field_pdf_dir"), "value": values["pdf_output_dir"]},
+                {"name": "delivery_note_template_path", "label": t("field_template"), "value": values["delivery_note_template_path"]},
+                {"name": "delivery_note_logo_source", "label": t("field_logo"), "value": values["delivery_note_logo_source"]},
+                {"name": "delivery_note_sender_name", "label": t("field_sender_name"), "value": values["delivery_note_sender_name"]},
+                {"name": "delivery_note_sender_street", "label": t("field_sender_street"), "value": values["delivery_note_sender_street"]},
+                {"name": "delivery_note_sender_city", "label": t("field_sender_city"), "value": values["delivery_note_sender_city"]},
+                {"name": "delivery_note_sender_email", "label": t("field_sender_email"), "value": values["delivery_note_sender_email"]},
             ],
             initial_active=active,
-            footer_text="Enter weiter  ↑↓ wechseln  F2 Speichern  F3 Drucker  F9 Abbrechen",
+            footer_text=t("settings_footer_select"),
             extra_actions=[
                 {"name": "cups_printer_select", "keys": (curses.KEY_F3,)},
+                {"name": "option_select", "keys": (10, 13, "\n", "\r", curses.KEY_ENTER)},
             ],
         )
 
@@ -1418,9 +1936,14 @@ def settings_dialog(stdscr):
                     "db_name",
                     "db_user",
                     "db_pass",
+                    "language",
+                    "color_theme",
+                    "color_theme_file",
                     "printer_uri",
                     "printer_model",
                     "label_size",
+                    "label_font_regular",
+                    "label_font_condensed",
                     "location_regex_regal",
                     "location_regex_fach",
                     "location_regex_platz",
@@ -1438,6 +1961,42 @@ def settings_dialog(stdscr):
                 if active_field not in {"picklist_printer", "delivery_note_printer"}:
                     active_field = "picklist_printer"
                 values[active_field] = cups_printer_dialog(stdscr, values[active_field])
+            elif res["__action__"] == "option_select":
+                field_names = [
+                    "db_host",
+                    "db_name",
+                    "db_user",
+                    "db_pass",
+                    "language",
+                    "color_theme",
+                    "color_theme_file",
+                    "printer_uri",
+                    "printer_model",
+                    "label_size",
+                    "label_font_regular",
+                    "label_font_condensed",
+                    "location_regex_regal",
+                    "location_regex_fach",
+                    "location_regex_platz",
+                    "picklist_printer",
+                    "delivery_note_printer",
+                    "pdf_output_dir",
+                    "delivery_note_template_path",
+                    "delivery_note_logo_source",
+                    "delivery_note_sender_name",
+                    "delivery_note_sender_street",
+                    "delivery_note_sender_city",
+                    "delivery_note_sender_email",
+                ]
+                active_field = field_names[active] if 0 <= active < len(field_names) else ""
+                if active_field == "language":
+                    values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
+                elif active_field == "color_theme":
+                    values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
+                elif active_field in {"picklist_printer", "delivery_note_printer"}:
+                    values[active_field] = cups_printer_dialog(stdscr, values[active_field])
+                else:
+                    active = (active + 1) % len(field_names)
 
             continue
 
@@ -1448,9 +2007,14 @@ def settings_dialog(stdscr):
         "db_name": res["db_name"].strip(),
         "db_user": res["db_user"].strip(),
         "db_pass": res["db_pass"],
+        "language": res["language"].strip().lower(),
+        "color_theme": res["color_theme"].strip().lower(),
+        "color_theme_file": os.path.expanduser(res["color_theme_file"].strip()),
         "printer_uri": res["printer_uri"].strip(),
         "printer_model": res["printer_model"].strip(),
         "label_size": res["label_size"].strip(),
+        "label_font_regular": os.path.expanduser(res["label_font_regular"].strip()),
+        "label_font_condensed": os.path.expanduser(res["label_font_condensed"].strip()),
         "location_regex_regal": res["location_regex_regal"].strip(),
         "location_regex_fach": res["location_regex_fach"].strip(),
         "location_regex_platz": res["location_regex_platz"].strip(),
@@ -1478,14 +2042,33 @@ def settings_dialog(stdscr):
     ]
 
     if missing:
-        message_box(stdscr, "Fehler", f"Felder fehlen: {', '.join(missing)}")
+        message_box(stdscr, t("error"), f"Felder fehlen: {', '.join(missing)}")
+        return
+
+    if updated["language"] not in SUPPORTED_LANGUAGES:
+        message_box(stdscr, t("error"), "Sprache muss 'de' oder 'en' sein.")
+        return
+    if updated["color_theme_file"] and not os.path.isfile(updated["color_theme_file"]):
+        message_box(stdscr, t("error"), t("theme_file_missing"))
+        return
+    available_theme_names = set(BASE_THEMES)
+    if updated["color_theme_file"]:
+        available_theme_names.update(load_custom_themes_from_file(updated["color_theme_file"]).keys())
+    else:
+        available_theme_names.update(load_custom_themes().keys())
+    if updated["color_theme"] not in available_theme_names:
+        message_box(stdscr, t("error"), t("theme_invalid", names=", ".join(sorted(available_theme_names)))[:56])
         return
 
     if updated["pdf_output_dir"] and not os.path.isdir(updated["pdf_output_dir"]):
-        message_box(stdscr, "Fehler", "PDF Ordner existiert nicht.")
+        message_box(stdscr, t("error"), "PDF Ordner existiert nicht.")
         return
+    for key in ("label_font_regular", "label_font_condensed"):
+        if updated[key] and not os.path.isfile(updated[key]):
+            message_box(stdscr, t("error"), f"{key} Datei existiert nicht."[:56])
+            return
     if updated["delivery_note_template_path"] and not os.path.isfile(updated["delivery_note_template_path"]):
-        message_box(stdscr, "Fehler", "LS Vorlage existiert nicht.")
+        message_box(stdscr, t("error"), "LS Vorlage existiert nicht.")
         return
     for key, label in [
         ("location_regex_regal", "Regex Regal"),
@@ -1493,19 +2076,19 @@ def settings_dialog(stdscr):
         ("location_regex_platz", "Regex Platz"),
     ]:
         if not updated[key]:
-            message_box(stdscr, "Fehler", f"{label} darf nicht leer sein.")
+            message_box(stdscr, t("error"), f"{label} darf nicht leer sein.")
             return
         try:
             re.compile(updated[key])
         except re.error as exc:
-            message_box(stdscr, "Fehler", f"{label} ungueltig: {exc}"[:56])
+            message_box(stdscr, t("error"), f"{label} ungueltig: {exc}"[:56])
             return
     if updated["delivery_note_logo_source"]:
         logo_source = updated["delivery_note_logo_source"]
         if not is_http_url(logo_source):
             logo_path = os.path.expanduser(logo_source)
             if not os.path.isfile(logo_path):
-                message_box(stdscr, "Fehler", "LS Logo Datei existiert nicht.")
+                message_box(stdscr, t("error"), "LS Logo Datei existiert nicht.")
                 return
             updated["delivery_note_logo_source"] = logo_path
 
@@ -1516,7 +2099,8 @@ def settings_dialog(stdscr):
         return
 
     SETTINGS = save_settings(updated)
-    message_box(stdscr, "Gespeichert", "Einstellungen wurden gespeichert.")
+    apply_color_theme(stdscr)
+    message_box(stdscr, t("saved"), t("saved_settings"))
 
 def parse_int_or_error(stdscr, raw_value, field_name):
 
@@ -2621,11 +3205,7 @@ def main(stdscr):
     curses.use_default_colors()
     stdscr.encoding = "utf-8"
 
-    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
-    curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_CYAN)
-    curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)
-
-    stdscr.bkgd(" ", curses.color_pair(1))
+    apply_color_theme(stdscr)
     stdscr.keypad(True)
 
     if not ensure_database_ready(stdscr):

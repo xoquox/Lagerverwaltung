@@ -100,6 +100,11 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(loaded["location_regex_regal"], app_settings.DEFAULT_SETTINGS["location_regex_regal"])
             self.assertEqual(loaded["location_regex_fach"], app_settings.DEFAULT_SETTINGS["location_regex_fach"])
             self.assertEqual(loaded["location_regex_platz"], app_settings.DEFAULT_SETTINGS["location_regex_platz"])
+            self.assertEqual(loaded["language"], app_settings.DEFAULT_SETTINGS["language"])
+            self.assertEqual(loaded["color_theme"], app_settings.DEFAULT_SETTINGS["color_theme"])
+            self.assertEqual(loaded["color_theme_file"], app_settings.DEFAULT_SETTINGS["color_theme_file"])
+            self.assertEqual(loaded["label_font_regular"], app_settings.DEFAULT_SETTINGS["label_font_regular"])
+            self.assertEqual(loaded["label_font_condensed"], app_settings.DEFAULT_SETTINGS["label_font_condensed"])
 
             self.assertFalse(local_settings_path.exists())
 
