@@ -55,7 +55,6 @@ Es gibt zwei Ebenen:
 - `settings.local.json`
   lokale, nicht versionierte Laufzeitwerte
 
-`lager_mc.py` schreibt Benutzeraenderungen aus `F8` nur noch in `settings.local.json`. Dadurch bleibt `settings.json` als saubere Projektvorlage im Git, waehrend lokale Werte kuenftig nicht mehr im Arbeitsbaum auftauchen.
 
 Wichtige Einstellungen:
 
@@ -132,8 +131,6 @@ pip install psycopg2-binary pillow python-barcode brother_ql requests python-dot
 
 Etiketten werden ueber [label_print.py](/home/chrisi/Lagerverwaltung/label_print.py) erzeugt. Unterstuetzt werden Brother-QL-Netzwerkdrucker.
 
-Das Projekt liefert bewusst keine proprietaeren Fonts mit.
-Ohne eigene Font-Pfade nutzt der Labeldruck automatisch verfuegbare Systemfonts (z. B. DejaVu Sans).
 Wenn gewuenscht, koennen benutzerdefinierte lokale Fontdateien in den Einstellungen gesetzt werden:
 
 ```json
