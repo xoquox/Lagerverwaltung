@@ -25,6 +25,8 @@ locale.setlocale(locale.LC_ALL, "")
 SETTINGS = load_settings()
 LOGGER = get_logger("lager_mc")
 PRINT_LOGGER = get_logger("print")
+BASE_DIR = Path(__file__).resolve().parent
+LABEL_PRINT_SCRIPT = str(BASE_DIR / "label_print.py")
 
 
 COLS = [
@@ -2135,6 +2137,19 @@ def summarize_subprocess_error(exc):
 
     return str(exc)[:120]
 
+
+def build_label_print_command(item):
+    return [
+        "python3",
+        LABEL_PRINT_SCRIPT,
+        item["sku"],
+        item["name"],
+        str(item["menge"]),
+        item["regal"] or "",
+        item["fach"] or "",
+        item["platz"] or "",
+    ]
+
 def add_item(stdscr):
 
     res = form_dialog(
@@ -2453,23 +2468,13 @@ def print_label(stdscr, item):
             SETTINGS.get("printer_model"),
             SETTINGS.get("printer_uri"),
         )
-        subprocess.run(
-            [
-                "python3",
-                "label_print.py",
-                item["sku"],
-                item["name"],
-                str(item["menge"]),
-                item["regal"] or "",
-                item["fach"] or "",
-                item["platz"] or "",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        subprocess.run(build_label_print_command(item), capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
         PRINT_LOGGER.exception("Labeldruck fehlgeschlagen fuer SKU=%s", item["sku"])
+        if exc.stderr:
+            PRINT_LOGGER.error("label_print.py stderr: %s", exc.stderr.strip()[:500])
+        if exc.stdout:
+            PRINT_LOGGER.error("label_print.py stdout: %s", exc.stdout.strip()[:500])
         short_error = summarize_subprocess_error(exc)
         message_box(stdscr, "Druckfehler", f"{short_error[:24]} Log: {PRINT_LOG_PATH.name}"[:56])
     except Exception as exc:
@@ -2497,23 +2502,13 @@ def print_label_multiple(stdscr, item):
     for _ in range(count):
         try:
             PRINT_LOGGER.debug("Mehrfachdruck Label sku=%s", item["sku"])
-            subprocess.run(
-                [
-                    "python3",
-                    "label_print.py",
-                    item["sku"],
-                    item["name"],
-                    str(item["menge"]),
-                    item["regal"] or "",
-                    item["fach"] or "",
-                    item["platz"] or "",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
+            subprocess.run(build_label_print_command(item), capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:
             PRINT_LOGGER.exception("Mehrfachdruck fehlgeschlagen fuer SKU=%s", item["sku"])
+            if exc.stderr:
+                PRINT_LOGGER.error("label_print.py stderr: %s", exc.stderr.strip()[:500])
+            if exc.stdout:
+                PRINT_LOGGER.error("label_print.py stdout: %s", exc.stdout.strip()[:500])
             short_error = summarize_subprocess_error(exc)
             message_box(stdscr, "Druckfehler", f"{short_error[:24]} Log: {PRINT_LOG_PATH.name}"[:56])
             return
