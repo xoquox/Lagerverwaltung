@@ -530,7 +530,7 @@ def get_inventory_item_unit_costs(inventory_item_ids):
 def get_all_orders():
     query = """
     query OrdersPage($after: String) {
-      orders(first: 50, after: $after, reverse: true, sortKey: PROCESSED_AT) {
+      orders(first: 50, after: $after, reverse: true, sortKey: CREATED_AT) {
         nodes {
           id
           name
