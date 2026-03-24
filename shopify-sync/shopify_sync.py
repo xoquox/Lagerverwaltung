@@ -1,7 +1,10 @@
 import os
 import time
+import json
+import argparse
 
 import psycopg2
+import psycopg2.extras
 import requests
 from dotenv import load_dotenv
 
@@ -72,6 +75,8 @@ def init_db():
             shipping_zip text,
             shipping_city text,
             shipping_country text,
+            shipping_email text,
+            shipping_phone text,
             fulfillment_status text,
             payment_status text,
             updated_at timestamptz NOT NULL DEFAULT NOW()
@@ -79,6 +84,8 @@ def init_db():
         """
     )
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_country text")
+    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_email text")
+    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_phone text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS payment_status text")
     cur.execute(
         """
@@ -91,11 +98,49 @@ def init_db():
         CREATE TABLE IF NOT EXISTS shopify_order_items (
             order_id text NOT NULL,
             line_index integer NOT NULL,
+            order_line_item_id text,
             sku text,
             title text NOT NULL,
             quantity integer NOT NULL,
+            fulfilled_quantity integer NOT NULL DEFAULT 0,
             PRIMARY KEY (order_id, line_index)
         )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
+    cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_fulfillment_jobs (
+            id serial PRIMARY KEY,
+            label_id integer,
+            order_id text NOT NULL,
+            tracking_number text NOT NULL,
+            carrier text NOT NULL,
+            line_items_json text,
+            notify_customer boolean NOT NULL DEFAULT FALSE,
+            status text NOT NULL DEFAULT 'pending',
+            attempts integer NOT NULL DEFAULT 0,
+            result_message text,
+            shopify_fulfillment_id text,
+            created_at timestamptz NOT NULL DEFAULT NOW(),
+            updated_at timestamptz NOT NULL DEFAULT NOW(),
+            processed_at timestamptz
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS label_id integer")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS line_items_json text")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS result_message text")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS processed_at timestamptz")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_status_created
+        ON shopify_fulfillment_jobs(status, created_at)
         """
     )
     con.commit()
@@ -535,6 +580,7 @@ def get_all_orders():
           id
           name
           createdAt
+          email
           displayFulfillmentStatus
           displayFinancialStatus
           shippingAddress {
@@ -543,12 +589,15 @@ def get_all_orders():
             zip
             city
             country
+            phone
           }
           lineItems(first: 100) {
             nodes {
+              id
               name
               sku
               quantity
+              unfulfilledQuantity
             }
           }
         }
@@ -597,11 +646,13 @@ def sync_orders():
                 shipping_zip,
                 shipping_city,
                 shipping_country,
+                shipping_email,
+                shipping_phone,
                 fulfillment_status,
                 payment_status,
                 updated_at
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
             """,
             (
                 order["id"],
@@ -612,6 +663,8 @@ def sync_orders():
                 shipping.get("zip"),
                 shipping.get("city"),
                 shipping.get("country"),
+                order.get("email"),
+                shipping.get("phone"),
                 order.get("displayFulfillmentStatus"),
                 order.get("displayFinancialStatus"),
             ),
@@ -623,18 +676,22 @@ def sync_orders():
                 INSERT INTO shopify_order_items (
                     order_id,
                     line_index,
+                    order_line_item_id,
                     sku,
                     title,
-                    quantity
+                    quantity,
+                    fulfilled_quantity
                 )
-                VALUES (%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     order["id"],
                     index,
+                    line_item.get("id"),
                     line_item.get("sku"),
                     line_item["name"],
                     line_item["quantity"],
+                    max(0, int(line_item.get("quantity") or 0) - int(line_item.get("unfulfilledQuantity") or 0)),
                 ),
             )
 
@@ -643,24 +700,375 @@ def sync_orders():
     print(f"Bestellungen synchronisiert: {len(orders)}")
 
 
-SYNC_INTERVAL = 60
+def get_open_fulfillment_order_targets(order_id):
+    query = """
+    query FulfillmentOrdersForOrder($orderId: ID!) {
+      order(id: $orderId) {
+        id
+        name
+        fulfillmentOrders(first: 50) {
+          nodes {
+            id
+            status
+            requestStatus
+            supportedActions {
+              action
+            }
+            lineItems(first: 100) {
+              nodes {
+                id
+                remainingQuantity
+                lineItem {
+                  id
+                  sku
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    data = graphql_request(query, {"orderId": order_id})
+    order = data.get("order")
+    if not order:
+        raise RuntimeError(f"Order nicht gefunden: {order_id}")
 
-if __name__ == "__main__":
-    init_db()
+    open_targets = []
+    for node in (order.get("fulfillmentOrders", {}) or {}).get("nodes", []):
+        status = (node.get("status") or "").upper()
+        if status in {"CANCELLED", "CLOSED", "FULFILLED"}:
+            continue
+        actions = {entry.get("action") for entry in (node.get("supportedActions") or [])}
+        if "CREATE_FULFILLMENT" in actions or not actions:
+            line_items = []
+            for li in (node.get("lineItems") or {}).get("nodes", []):
+                line_item = li.get("lineItem") or {}
+                line_items.append(
+                    {
+                        "fulfillment_order_line_item_id": li.get("id"),
+                        "order_line_item_id": line_item.get("id"),
+                        "sku": line_item.get("sku"),
+                        "remaining_quantity": int(li.get("remainingQuantity") or 0),
+                    }
+                )
+            open_targets.append({"fulfillment_order_id": node["id"], "line_items": line_items})
 
-    while True:
+    if not open_targets:
+        raise RuntimeError(f"Keine offenen FulfillmentOrders fuer {order.get('name') or order_id}.")
+    return open_targets
 
-        print("Starte Shopify Sync")
 
+def _build_line_items_by_fulfillment_order(open_targets, requested_items):
+    if not requested_items:
+        return [{"fulfillmentOrderId": target["fulfillment_order_id"]} for target in open_targets]
+
+    requests = {}
+    for item in requested_items:
+        line_item_id = (item.get("order_line_item_id") or "").strip()
+        quantity = int(item.get("quantity") or 0)
+        if not line_item_id or quantity <= 0:
+            continue
+        requests[line_item_id] = requests.get(line_item_id, 0) + quantity
+
+    if not requests:
+        raise RuntimeError("Keine gueltigen line items fuer Fulfillment uebergeben.")
+
+    by_fo = {}
+    for line_item_id, requested_qty in requests.items():
+        remaining_request = requested_qty
+        for target in open_targets:
+            fulfillment_order_id = target["fulfillment_order_id"]
+            for source in target["line_items"]:
+                if source.get("order_line_item_id") != line_item_id:
+                    continue
+                available = int(source.get("remaining_quantity") or 0)
+                if available <= 0:
+                    continue
+                take = min(available, remaining_request)
+                if take <= 0:
+                    continue
+                by_fo.setdefault(fulfillment_order_id, []).append(
+                    {
+                        "id": source["fulfillment_order_line_item_id"],
+                        "quantity": take,
+                    }
+                )
+                remaining_request -= take
+                if remaining_request <= 0:
+                    break
+            if remaining_request <= 0:
+                break
+
+        if remaining_request > 0:
+            raise RuntimeError(f"Menge fuer LineItem {line_item_id} nicht mehr offen (Rest {remaining_request}).")
+
+    payload = []
+    for fulfillment_order_id, rows in by_fo.items():
+        payload.append(
+            {
+                "fulfillmentOrderId": fulfillment_order_id,
+                "fulfillmentOrderLineItems": rows,
+            }
+        )
+    if not payload:
+        raise RuntimeError("Keine offenen FulfillmentOrder-Positionen gefunden.")
+    return payload
+
+
+def create_fulfillment(order_id, tracking_number, company, notify_customer=False, line_items=None):
+    open_targets = get_open_fulfillment_order_targets(order_id)
+    mutation = """
+    mutation CreateFulfillment($fulfillment: FulfillmentInput!, $message: String) {
+      fulfillmentCreate(fulfillment: $fulfillment, message: $message) {
+        fulfillment {
+          id
+          status
+          trackingInfo(first: 5) {
+            number
+            company
+            url
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+
+    line_items_payload = _build_line_items_by_fulfillment_order(open_targets, line_items)
+    variables = {
+        "fulfillment": {
+            "notifyCustomer": bool(notify_customer),
+            "lineItemsByFulfillmentOrder": line_items_payload,
+            "trackingInfo": {
+                "number": tracking_number,
+                "company": company,
+            },
+        },
+        "message": "Lagerverwaltung Versand abgeschlossen",
+    }
+    data = graphql_request(mutation, variables)
+    payload = (data.get("fulfillmentCreate") or {})
+    user_errors = payload.get("userErrors") or []
+    if user_errors:
+        raise RuntimeError(f"Fulfillment userErrors: {user_errors}")
+    fulfillment = payload.get("fulfillment")
+    if not fulfillment:
+        raise RuntimeError("Shopify hat kein Fulfillment zurueckgegeben.")
+    return {
+        "fulfillment_id": fulfillment.get("id"),
+        "status": fulfillment.get("status"),
+        "tracking": fulfillment.get("trackingInfo"),
+        "fulfillment_order_ids": [entry["fulfillmentOrderId"] for entry in line_items_payload],
+    }
+
+
+def claim_fulfillment_jobs(limit=20):
+    con = db()
+    cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """
+        WITH claimed AS (
+            SELECT id
+            FROM shopify_fulfillment_jobs
+            WHERE status = 'pending'
+            ORDER BY created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT %s
+        )
+        UPDATE shopify_fulfillment_jobs j
+        SET status = 'processing',
+            attempts = COALESCE(j.attempts, 0) + 1,
+            updated_at = NOW()
+        FROM claimed
+        WHERE j.id = claimed.id
+        RETURNING
+            j.id,
+            j.label_id,
+            j.order_id,
+            j.tracking_number,
+            j.carrier,
+            j.line_items_json,
+            j.notify_customer,
+            j.attempts
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    con.commit()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _update_label_status_from_job(cur, label_id, status, message=None):
+    if not label_id:
+        return
+    cur.execute(
+        """
+        UPDATE gls_labels
+        SET status = %s,
+            last_error = %s,
+            updated_at = NOW()
+        WHERE id = %s
+        """,
+        (status, message, label_id),
+    )
+
+
+def mark_fulfillment_job_done(job_id, label_id, fulfillment_id, status):
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT order_id, line_items_json FROM shopify_fulfillment_jobs WHERE id = %s", (job_id,))
+    job_row = cur.fetchone()
+    cur.execute(
+        """
+        UPDATE shopify_fulfillment_jobs
+        SET status = 'done',
+            shopify_fulfillment_id = %s,
+            result_message = %s,
+            processed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+        """,
+        (fulfillment_id, status, job_id),
+    )
+    if job_row and job_row[1]:
+        order_id = job_row[0]
         try:
+            payload = json.loads(job_row[1])
+        except json.JSONDecodeError:
+            payload = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            line_item_id = (item.get("order_line_item_id") or "").strip()
+            if not line_item_id:
+                continue
+            try:
+                qty = int(item.get("quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0:
+                continue
+            cur.execute(
+                """
+                UPDATE shopify_order_items
+                SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + %s)
+                WHERE order_id = %s
+                  AND order_line_item_id = %s
+                """,
+                (qty, order_id, line_item_id),
+            )
+    _update_label_status_from_job(cur, label_id, "SHOPIFY_FULFILLED", None)
+    con.commit()
+    cur.close()
+    con.close()
+
+
+def mark_fulfillment_job_failed(job_id, label_id, message):
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        UPDATE shopify_fulfillment_jobs
+        SET status = 'failed',
+            result_message = %s,
+            processed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+        """,
+        (message[:1000], job_id),
+    )
+    _update_label_status_from_job(cur, label_id, "SHOPIFY_FAILED", message[:160])
+    con.commit()
+    cur.close()
+    con.close()
+
+
+def process_fulfillment_jobs(limit=20):
+    jobs = claim_fulfillment_jobs(limit=limit)
+    if not jobs:
+        return 0, 0
+
+    success_count = 0
+    failed_count = 0
+    for job in jobs:
+        try:
+            line_items = None
+            if job.get("line_items_json"):
+                try:
+                    line_items = json.loads(job["line_items_json"])
+                except json.JSONDecodeError:
+                    raise RuntimeError(f"line_items_json ungueltig fuer Job {job['id']}")
+            result = create_fulfillment(
+                order_id=job["order_id"],
+                tracking_number=job["tracking_number"],
+                company=job["carrier"],
+                notify_customer=job["notify_customer"],
+                line_items=line_items,
+            )
+            mark_fulfillment_job_done(
+                job_id=job["id"],
+                label_id=job.get("label_id"),
+                fulfillment_id=result.get("fulfillment_id"),
+                status=result.get("status") or "OK",
+            )
+            success_count += 1
+        except Exception as exc:
+            error_text = str(exc)
+            mark_fulfillment_job_failed(job["id"], job.get("label_id"), error_text)
+            print(f"Fulfillment Job {job['id']} fehlgeschlagen: {error_text}")
+            failed_count += 1
+    return success_count, failed_count
+
+
+def run_sync_loop():
+    init_db()
+    while True:
+        print("Starte Shopify Sync")
+        try:
+            ok_jobs, failed_jobs = process_fulfillment_jobs(limit=20)
+            if ok_jobs or failed_jobs:
+                print(f"Fulfillment Jobs verarbeitet: ok={ok_jobs} failed={failed_jobs}")
             push_inventory_changes()
             sync_products()
             sync_inventory_levels()
             sync_orders()
         except Exception as e:
             print("Fehler:", e)
-
         print("Sync abgeschlossen")
         print(f"Warte {SYNC_INTERVAL} Sekunden")
-
         time.sleep(SYNC_INTERVAL)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Shopify Sync / Fulfillment Tool")
+    sub = parser.add_subparsers(dest="command")
+    fulfill_cmd = sub.add_parser("fulfill", help="Fulfillment fuer Bestellung erzeugen")
+    fulfill_cmd.add_argument("--order-id", required=True, help="Shopify Order GID")
+    fulfill_cmd.add_argument("--tracking-number", required=True, help="Trackingnummer")
+    fulfill_cmd.add_argument("--company", required=True, help="Versanddienstleister")
+    fulfill_cmd.add_argument("--notify-customer", action="store_true", help="Kundenbenachrichtigung aktivieren")
+
+    args = parser.parse_args()
+    if args.command == "fulfill":
+        result = create_fulfillment(
+            order_id=args.order_id,
+            tracking_number=args.tracking_number,
+            company=args.company,
+            notify_customer=args.notify_customer,
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return
+
+    run_sync_loop()
+
+
+SYNC_INTERVAL = 60
+
+if __name__ == "__main__":
+    main()

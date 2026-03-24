@@ -9,6 +9,12 @@ c-port/
 lagerverwaltung.log
 logs/
 settings.local.json
+gls/*.pdf
+gls/*.txt
+gls/*.env
+gls/*credentials*
+post/*.env
+post/*credentials*
 lieferschein_*.pdf
 delivery_note_template.pdf
 local_only/

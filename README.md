@@ -32,8 +32,12 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
   Laedt Projekt-Defaults und lokale Overrides.
 - [settings.json](/home/chrisi/Lagerverwaltung/settings.json)
   Versionierte Standardkonfiguration des Projekts.
-- [shpoify-sync/shopify_sync.py](/home/chrisi/Lagerverwaltung/shpoify-sync/shopify_sync.py)
+- [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md)
+  Laufende Aenderungshistorie nach Version.
+- [shopify-sync/shopify_sync.py](/home/chrisi/Lagerverwaltung/shopify-sync/shopify_sync.py)
   Separater Shopify-Sync fuer Produkte, Bestand und Bestellungen.
+- [post/internetmarke_client.py](/home/chrisi/Lagerverwaltung/post/internetmarke_client.py)
+  Vorbereitung fuer Deutsche Post INTERNETMARKE.
 
 ## Voraussetzungen
 
@@ -74,6 +78,13 @@ Wichtige Einstellungen:
 - `delivery_note_sender_street`
 - `delivery_note_sender_city`
 - `delivery_note_sender_email`
+- `shipping_carrier`
+- `shipping_label_printer_gls`, `shipping_label_printer_dhl`, `shipping_label_printer_post`
+- `shipping_label_format_gls`, `shipping_label_format_dhl`, `shipping_label_format_post`
+- `shipping_label_printer`, `shipping_label_format` (Fallback/Legacy)
+- `shipping_services`, `shipping_packaging_weight_grams`
+- `gls_api_url`, `gls_user`, `gls_password`, `gls_contact_id`
+- `post_api_url`, `post_user`, `post_password`, `post_partner_id`
 
 ## Shopify-Sync
 
