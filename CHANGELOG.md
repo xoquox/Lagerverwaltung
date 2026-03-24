@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.20.028] - 2026-03-24
+
+### Fixed
+- CUPS-Druckerliste setzt bei `lpstat` jetzt `LC_ALL=C` und `LANG=C`, damit Drucker auch auf deutsch lokalisierten Linux-/Fedora-Systemen korrekt erkannt werden.
+
+## [1.20.027] - 2026-03-24
+
+### Added
+- Skript `scripts/export_local_bundle.sh` erzeugt jetzt ein ZIP-Archiv mit lokalen/private Dateien fuer einen neuen PC.
+
+## [1.20.026] - 2026-03-24
+
+### Added
+- Shopify-Sync liest jetzt Fulfillments und Trackingnummern zurueck und speichert sie zentral in der Versandhistory.
+
+### Changed
+- Auftragsdetails zeigen jetzt alle bekannten Sendungen einer Bestellung statt nur der letzten.
+- Versandhistory speichert zusaetzlich Quelle, Shopify-Fulfillment-ID und Tracking-URL pro Sendung.
+
+### Fixed
+- Bereits aus Shopify rueckgelesene Sendungen koennen nicht mehr erneut ueber `F10 Shopify` eingereiht werden.
+
 ## [1.20.025] - 2026-03-24
 
 ### Fixed

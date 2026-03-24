@@ -2,6 +2,7 @@ import os
 import time
 import json
 import argparse
+import datetime
 
 import psycopg2
 import psycopg2.extras
@@ -109,6 +110,47 @@ def init_db():
     )
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gls_labels (
+            id serial PRIMARY KEY,
+            carrier text NOT NULL DEFAULT 'gls',
+            order_id text NOT NULL,
+            order_name text NOT NULL,
+            shipment_reference text NOT NULL,
+            track_id text NOT NULL UNIQUE,
+            parcel_number text,
+            weight_kg numeric(8,3) NOT NULL DEFAULT 1.0,
+            status text NOT NULL DEFAULT 'CREATED',
+            label_path text NOT NULL DEFAULT '',
+            last_error text,
+            source text NOT NULL DEFAULT 'local',
+            shopify_fulfillment_id text,
+            shopify_synced_at timestamptz,
+            tracking_url text,
+            created_at timestamptz NOT NULL DEFAULT NOW(),
+            updated_at timestamptz NOT NULL DEFAULT NOW(),
+            cancel_requested_at timestamptz,
+            cancelled_at timestamptz
+        )
+        """
+    )
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gls_labels_order_created
+        ON gls_labels(order_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gls_labels_shopify_fulfillment
+        ON gls_labels(shopify_fulfillment_id)
+        """
+    )
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS shopify_fulfillment_jobs (
@@ -600,6 +642,18 @@ def get_all_orders():
               unfulfilledQuantity
             }
           }
+          fulfillments(first: 25) {
+            nodes {
+              id
+              status
+              createdAt
+              trackingInfo(first: 10) {
+                number
+                company
+                url
+              }
+            }
+          }
         }
         pageInfo {
           hasNextPage
@@ -694,10 +748,99 @@ def sync_orders():
                     max(0, int(line_item.get("quantity") or 0) - int(line_item.get("unfulfilledQuantity") or 0)),
                 ),
             )
+        sync_order_shipments(cur, order)
 
     con.commit()
     con.close()
     print(f"Bestellungen synchronisiert: {len(orders)}")
+
+
+def _normalize_carrier_name(value):
+    raw = (value or "").strip()
+    if not raw:
+        return "shopify"
+    normalized = raw.lower()
+    if "gls" in normalized:
+        return "gls"
+    if "dhl" in normalized:
+        return "dhl"
+    if "post" in normalized:
+        return "post"
+    return normalized[:32]
+
+
+def upsert_shopify_shipment(cur, order, fulfillment, tracking):
+    tracking_number = (tracking.get("number") or "").strip()
+    if not tracking_number:
+        return
+    fulfillment_id = (fulfillment.get("id") or "").strip() or None
+    tracking_url = (tracking.get("url") or "").strip() or None
+    status = (fulfillment.get("status") or "SHOPIFY_SYNCED").strip() or "SHOPIFY_SYNCED"
+    carrier = _normalize_carrier_name(tracking.get("company"))
+    parcel_number = tracking_number if tracking_number.isdigit() else None
+    created_at = fulfillment.get("createdAt") or datetime.datetime.now(datetime.timezone.utc)
+    cur.execute(
+        """
+        INSERT INTO gls_labels (
+            carrier,
+            order_id,
+            order_name,
+            shipment_reference,
+            track_id,
+            parcel_number,
+            weight_kg,
+            status,
+            label_path,
+            last_error,
+            source,
+            shopify_fulfillment_id,
+            shopify_synced_at,
+            tracking_url,
+            created_at,
+            updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, 1.0, %s, '', NULL, 'shopify', %s, NOW(), %s, %s, NOW())
+        ON CONFLICT (track_id)
+        DO UPDATE
+           SET carrier = EXCLUDED.carrier,
+               order_id = EXCLUDED.order_id,
+               order_name = EXCLUDED.order_name,
+               shipment_reference = EXCLUDED.shipment_reference,
+               parcel_number = COALESCE(EXCLUDED.parcel_number, gls_labels.parcel_number),
+               status = EXCLUDED.status,
+               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), gls_labels.label_path),
+               source = CASE
+                   WHEN gls_labels.source = 'local' THEN gls_labels.source
+                   ELSE 'shopify'
+               END,
+               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, gls_labels.shopify_fulfillment_id),
+               shopify_synced_at = NOW(),
+               tracking_url = COALESCE(EXCLUDED.tracking_url, gls_labels.tracking_url),
+               updated_at = NOW()
+        """,
+        (
+            carrier,
+            order["id"],
+            order["name"],
+            order["name"],
+            tracking_number,
+            parcel_number,
+            status,
+            fulfillment_id,
+            tracking_url,
+            created_at,
+        ),
+    )
+
+
+def sync_order_shipments(cur, order):
+    fulfillments = ((order.get("fulfillments") or {}).get("nodes") or [])
+    for fulfillment in fulfillments:
+        tracking_rows = fulfillment.get("trackingInfo") or []
+        for tracking in tracking_rows or []:
+            if not isinstance(tracking, dict):
+                continue
+            upsert_shopify_shipment(cur, order, fulfillment, tracking)
 
 
 def get_open_fulfillment_order_targets(order_id):
@@ -936,6 +1079,17 @@ def mark_fulfillment_job_done(job_id, label_id, fulfillment_id, status):
         """,
         (fulfillment_id, status, job_id),
     )
+    if label_id:
+        cur.execute(
+            """
+            UPDATE gls_labels
+            SET shopify_fulfillment_id = COALESCE(%s, shopify_fulfillment_id),
+                shopify_synced_at = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (fulfillment_id, label_id),
+        )
     if job_row and job_row[1]:
         order_id = job_row[0]
         try:

@@ -40,7 +40,7 @@ POST_LABEL_DIR = POST_DIR / "labels"
 VERSION_MAJOR = 1
 VERSION_MINOR = 20
 # Increase patch for bugfix/small changes within the current feature phase.
-VERSION_PATCH = 25
+VERSION_PATCH = 28
 APP_VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH:03d}"
 
 SHIPPING_SERVICE_OPTIONS = [
@@ -723,6 +723,10 @@ def init_db():
     cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS last_error text")
     cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz")
     cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancelled_at timestamptz")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
+    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gls_labels_order_created
@@ -733,6 +737,12 @@ def init_db():
         """
         CREATE INDEX IF NOT EXISTS idx_gls_labels_created
         ON gls_labels(created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gls_labels_shopify_fulfillment
+        ON gls_labels(shopify_fulfillment_id)
         """
     )
     cur.execute(
@@ -1118,6 +1128,10 @@ def list_gls_labels(order_id=None):
                 weight_kg,
                 label_path,
                 last_error,
+                source,
+                shopify_fulfillment_id,
+                shopify_synced_at,
+                tracking_url,
                 created_at,
                 updated_at,
                 cancel_requested_at,
@@ -1143,6 +1157,10 @@ def list_gls_labels(order_id=None):
                 weight_kg,
                 label_path,
                 last_error,
+                source,
+                shopify_fulfillment_id,
+                shopify_synced_at,
+                tracking_url,
                 created_at,
                 updated_at,
                 cancel_requested_at,
@@ -1158,7 +1176,19 @@ def list_gls_labels(order_id=None):
     return rows
 
 
-def insert_gls_label_history(order, shipment_reference, track_id, parcel_number, label_path, status, weight_kg=1.0, carrier="gls"):
+def insert_gls_label_history(
+    order,
+    shipment_reference,
+    track_id,
+    parcel_number,
+    label_path,
+    status,
+    weight_kg=1.0,
+    carrier="gls",
+    source="local",
+    shopify_fulfillment_id=None,
+    tracking_url=None,
+):
     con = db()
     cur = con.cursor()
     cur.execute(
@@ -1172,9 +1202,13 @@ def insert_gls_label_history(order, shipment_reference, track_id, parcel_number,
             parcel_number,
             weight_kg,
             status,
-            label_path
+            label_path,
+            source,
+            shopify_fulfillment_id,
+            shopify_synced_at,
+            tracking_url
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (track_id)
         DO UPDATE
            SET carrier = EXCLUDED.carrier,
@@ -1184,7 +1218,14 @@ def insert_gls_label_history(order, shipment_reference, track_id, parcel_number,
                parcel_number = EXCLUDED.parcel_number,
                weight_kg = EXCLUDED.weight_kg,
                status = EXCLUDED.status,
-               label_path = EXCLUDED.label_path,
+               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), gls_labels.label_path),
+               source = CASE
+                   WHEN gls_labels.source = 'local' AND EXCLUDED.source = 'shopify' THEN gls_labels.source
+                   ELSE EXCLUDED.source
+               END,
+               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, gls_labels.shopify_fulfillment_id),
+               shopify_synced_at = COALESCE(EXCLUDED.shopify_synced_at, gls_labels.shopify_synced_at),
+               tracking_url = COALESCE(EXCLUDED.tracking_url, gls_labels.tracking_url),
                updated_at = NOW(),
                last_error = NULL
         RETURNING id
@@ -1199,6 +1240,10 @@ def insert_gls_label_history(order, shipment_reference, track_id, parcel_number,
             weight_kg,
             status,
             label_path,
+            (source or "local").strip().lower() or "local",
+            shopify_fulfillment_id,
+            datetime.datetime.now() if shopify_fulfillment_id else None,
+            (tracking_url or "").strip() or None,
         ),
     )
     row = cur.fetchone()
@@ -1300,6 +1345,43 @@ def get_latest_shopify_job_for_label(label_id):
     cur.close()
     con.close()
     return row
+
+
+def _shipment_number(row):
+    return ((row.get("parcel_number") or "").strip() or (row.get("track_id") or "").strip() or "-")
+
+
+def _shipment_source_label(value):
+    normalized = (value or "").strip().lower()
+    if current_language() == "de":
+        labels = {
+            "local": "Lokal",
+            "shopify": "Shopify",
+        }
+    else:
+        labels = {
+            "local": "Local",
+            "shopify": "Shopify",
+        }
+    return labels.get(normalized, value or "-")
+
+
+def _shipment_summary_lines(rows, width):
+    if not rows:
+        return ["Sendungen: -"]
+    entries = []
+    for row in rows:
+        carrier = (row.get("carrier") or "-").upper()
+        number = _shipment_number(row)
+        source = _shipment_source_label(row.get("source"))
+        status = row.get("status") or "-"
+        entries.append(f"{carrier} {number} [{source}/{status}]")
+    wrapped = textwrap.wrap(" | ".join(entries), width=max(12, width), break_long_words=False, break_on_hyphens=False)
+    if not wrapped:
+        return ["Sendungen: -"]
+    lines = [f"Sendungen: {wrapped[0]}"]
+    lines.extend(wrapped[1:])
+    return lines
 
 
 def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
@@ -3197,6 +3279,13 @@ def _parse_lpstat_printers(output):
     return printers
 
 
+def _lpstat_env():
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
 def get_cups_printers():
     try:
         PRINT_LOGGER.debug("Lade Drucker mit lpstat -p")
@@ -3206,6 +3295,7 @@ def get_cups_printers():
             stderr=subprocess.PIPE,
             text=True,
             check=True,
+            env=_lpstat_env(),
         )
     except FileNotFoundError:
         return [], None, "lpstat/Drucksystem ist auf diesem System nicht verfuegbar."
@@ -3224,6 +3314,7 @@ def get_cups_printers():
             stderr=subprocess.PIPE,
             text=True,
             check=True,
+            env=_lpstat_env(),
         )
         prefix = "system default destination: "
         for line in default_result.stdout.splitlines():
@@ -5368,7 +5459,7 @@ def _format_gls_history_line(row, width):
         ts = "-"
     order_name = (row.get("order_name") or "-").replace("#", "")
     carrier = (row.get("carrier") or "gls").upper()
-    track_id = row.get("track_id") or "-"
+    track_id = _shipment_number(row)
     status = row.get("status") or "-"
     text = f"{ts} {_fit(carrier, 4)} {_fit(order_name, 11)} {_fit(track_id, 10)} {status}"
     return _fit(text, width)
@@ -5426,9 +5517,12 @@ def shipping_history_dialog(stdscr, selected_order=None):
             detail_lines.append(_fit(f"Bestellung: {chosen.get('order_name') or '-'}", right_width - 2))
             detail_lines.append(_fit(f"Dienst: {(chosen.get('carrier') or 'gls').upper()}", right_width - 2))
             detail_lines.append(_fit(f"TrackID: {chosen.get('track_id') or '-'}", right_width - 2))
-            detail_lines.append(_fit(f"Paketnr: {chosen.get('parcel_number') or '-'}", right_width - 2))
+            detail_lines.append(_fit(f"Sendungsnr.: {_shipment_number(chosen)}", right_width - 2))
             detail_lines.append(_fit(f"Status: {chosen.get('status') or '-'}", right_width - 2))
+            detail_lines.append(_fit(f"Quelle: {_shipment_source_label(chosen.get('source'))}", right_width - 2))
             detail_lines.append(_fit(f"Ref: {chosen.get('shipment_reference') or '-'}", right_width - 2))
+            if chosen.get("shopify_fulfillment_id"):
+                detail_lines.append(_fit(f"Shopify Fulfillment: {chosen.get('shopify_fulfillment_id')}", right_width - 2))
             if job:
                 detail_lines.append(_fit(f"Shopify: {job.get('status') or '-'} (Versuch {job.get('attempts') or 0})", right_width - 2))
                 if job.get("result_message"):
@@ -5437,6 +5531,8 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 detail_lines.append(_fit("Shopify: -", right_width - 2))
             detail_lines.append("")
             detail_lines.append(_fit(f"PDF: {chosen.get('label_path') or '-'}", right_width - 2))
+            if chosen.get("tracking_url"):
+                detail_lines.append(_fit(f"Tracking URL: {chosen.get('tracking_url')}", right_width - 2))
             if chosen.get("last_error"):
                 detail_lines.append(_fit(f"Fehler: {chosen['last_error']}", right_width - 2))
         else:
@@ -5506,6 +5602,9 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 continue
             if (chosen.get("carrier") or "").strip().lower() == "test":
                 message_box(stdscr, "Shopify Queue", "Test-Labels duerfen nicht an Shopify gesendet werden.")
+                continue
+            if (chosen.get("source") or "").strip().lower() == "shopify":
+                message_box(stdscr, "Shopify Queue", "Diese Sendung ist bereits aus Shopify eingelesen.")
                 continue
             if not confirm_box(stdscr, "Shopify", f"Fulfillment senden fuer {chosen['track_id']}?"):
                 continue
@@ -5607,7 +5706,7 @@ def orders_dialog(stdscr):
         if selected_order:
             selected_weight_kg, selected_weight_grams = calculate_order_shipping_weight(selected_order, order_items)
             country = _localized_country_display(selected_order.get("shipping_country"))
-            latest_label = get_latest_label_for_order(selected_order["order_id"])
+            order_shipments = list_gls_labels(selected_order["order_id"])
             created_at = selected_order.get("created_at")
             if isinstance(created_at, datetime.datetime):
                 ordered_at_text = created_at.strftime("%d.%m.%Y %H:%M")
@@ -5626,10 +5725,7 @@ def orders_dialog(stdscr):
             detail_lines.append(_fit(f"Zahlung: {payment_status}", right_width - 2))
             detail_lines.append(_fit(f"Interne Pos.-Menge: {internal_qty}", right_width - 2))
             detail_lines.append(_fit(f"Versandgewicht: {selected_weight_grams} g ({selected_weight_kg:.3f} kg)", right_width - 2))
-            if latest_label:
-                sendungsnr = (latest_label.get("parcel_number") or latest_label.get("track_id") or "-").strip() or "-"
-                detail_lines.append(_fit(f"Sendungsnr.: {sendungsnr}", right_width - 2))
-                detail_lines.append(_fit(f"Label-Status: {latest_label.get('status') or '-'}", right_width - 2))
+            detail_lines.extend(_shipment_summary_lines(order_shipments, right_width - 13))
             detail_lines.append("")
             qty_width, sku_width, regal_width, fach_width, platz_width, title_width = format_order_item_header(right_width - 2)
             detail_lines.append(
