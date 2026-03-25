@@ -40,6 +40,8 @@ GLS_DIR = BASE_DIR / "gls"
 GLS_LABEL_DIR = GLS_DIR / "labels"
 POST_DIR = BASE_DIR / "post"
 POST_LABEL_DIR = POST_DIR / "labels"
+SHOPIFY_SYNC_SERVICE = "shopify-sync"
+_SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label": "FlexDelivery", "locked": True},
@@ -806,6 +808,31 @@ def init_db():
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS service_runtime_state (
+            service text PRIMARY KEY,
+            version text,
+            status text NOT NULL DEFAULT 'unknown',
+            last_seen_at timestamptz,
+            last_started_at timestamptz,
+            last_finished_at timestamptz,
+            last_pull_at timestamptz,
+            last_push_at timestamptz,
+            last_error text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_started_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_finished_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_pull_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_push_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_error text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS inventory_sessions (
             session_id serial PRIMARY KEY,
             session_name text NOT NULL,
@@ -844,6 +871,83 @@ def db():
         password=SETTINGS["db_pass"],
         cursor_factory=psycopg2.extras.RealDictCursor
     )
+
+
+def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=10.0, force=False):
+    now = time.monotonic()
+    cached = _SERVICE_RUNTIME_CACHE["rows"].get(service)
+    if not force and cached is not None and now - _SERVICE_RUNTIME_CACHE["loaded_at"] < max_age_seconds:
+        return cached
+
+    con = None
+    cur = None
+    try:
+        con = db()
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT
+                service,
+                version,
+                status,
+                last_seen_at,
+                last_started_at,
+                last_finished_at,
+                last_pull_at,
+                last_push_at,
+                last_error,
+                updated_at
+            FROM service_runtime_state
+            WHERE service = %s
+            """,
+            (service,),
+        )
+        row = cur.fetchone()
+        _SERVICE_RUNTIME_CACHE["rows"][service] = row
+        _SERVICE_RUNTIME_CACHE["loaded_at"] = now
+        return row
+    except Exception:
+        return cached
+    finally:
+        if cur is not None:
+            cur.close()
+        if con is not None:
+            con.close()
+
+
+def _format_runtime_time_short(value):
+    if not value:
+        return "-"
+    if not isinstance(value, datetime.datetime):
+        return str(value)
+    try:
+        localized = value.astimezone() if value.tzinfo is not None else value
+    except Exception:
+        localized = value
+    return localized.strftime("%H:%M")
+
+
+def format_shopify_sync_status_label(row=None, now=None):
+    data = row if row is not None else get_service_runtime_state()
+    if not data:
+        return "Sync: -"
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    last_seen = data.get("last_seen_at")
+    if isinstance(last_seen, datetime.datetime) and last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=datetime.timezone.utc)
+    stale = bool(isinstance(last_seen, datetime.datetime) and (current - last_seen).total_seconds() > 180)
+    prefix = "Sync!" if stale else "Sync:"
+    parts = []
+    if data.get("last_pull_at"):
+        parts.append(f"In {_format_runtime_time_short(data['last_pull_at'])}")
+    if data.get("last_push_at"):
+        parts.append(f"Out {_format_runtime_time_short(data['last_push_at'])}")
+    if not parts and last_seen:
+        parts.append(_format_runtime_time_short(last_seen))
+    label = f"{prefix} {' '.join(parts) if parts else '-'}"
+    if (data.get("status") or "").strip().lower() == "error":
+        label += " ERR"
+    return label
 
 
 def test_db_connection(settings):
@@ -3087,6 +3191,10 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
         stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[:w-1])
     else:
         stdscr.addstr(h-2, 0, focus[:w-1])
+    sync_label = format_shopify_sync_status_label()
+    sync_x = max(0, w - len(sync_label) - 1)
+    if sync_x > 4:
+        stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)])
 
     stdscr.addstr(h-1, 0, " "*(w-1))
     stdscr.addstr(h-1, 0, status[:w-1])
@@ -3886,6 +3994,11 @@ def settings_dialog(stdscr):
         win.erase()
         win.box()
         win.addstr(0, 2, f" {t('settings')} ")
+        sync_state = get_service_runtime_state()
+        sync_version = ((sync_state or {}).get("version") or "-").strip() or "-"
+        sync_label = f" Sync {sync_version} "
+        sync_x = max(2, width - len(sync_label) - 2)
+        win.addstr(0, sync_x, sync_label[: max(0, width - sync_x - 1)])
 
         tab_x = 2
         for i, entry in enumerate(tabs):

@@ -129,6 +129,77 @@ def build_sync_version_payload():
     }
 
 
+def update_service_runtime_state(
+    *,
+    status=None,
+    mark_seen=False,
+    mark_started=False,
+    mark_finished=False,
+    mark_pull=False,
+    mark_push=False,
+    last_error=None,
+    clear_error=False,
+):
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO service_runtime_state (
+            service,
+            version,
+            status,
+            last_seen_at,
+            last_started_at,
+            last_finished_at,
+            last_pull_at,
+            last_push_at,
+            last_error,
+            updated_at
+        )
+        VALUES (
+            'shopify-sync',
+            %s,
+            %s,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            %s,
+            NOW()
+        )
+        ON CONFLICT (service) DO UPDATE SET
+            version = COALESCE(EXCLUDED.version, service_runtime_state.version),
+            status = COALESCE(EXCLUDED.status, service_runtime_state.status),
+            last_seen_at = COALESCE(EXCLUDED.last_seen_at, service_runtime_state.last_seen_at),
+            last_started_at = COALESCE(EXCLUDED.last_started_at, service_runtime_state.last_started_at),
+            last_finished_at = COALESCE(EXCLUDED.last_finished_at, service_runtime_state.last_finished_at),
+            last_pull_at = COALESCE(EXCLUDED.last_pull_at, service_runtime_state.last_pull_at),
+            last_push_at = COALESCE(EXCLUDED.last_push_at, service_runtime_state.last_push_at),
+            last_error = CASE
+                WHEN %s THEN NULL
+                WHEN EXCLUDED.last_error IS NOT NULL THEN EXCLUDED.last_error
+                ELSE service_runtime_state.last_error
+            END,
+            updated_at = NOW()
+        """,
+        (
+            SYNC_VERSION,
+            status,
+            bool(mark_seen),
+            bool(mark_started),
+            bool(mark_finished),
+            bool(mark_pull),
+            bool(mark_push),
+            (last_error or "")[:1000] if last_error else None,
+            bool(clear_error),
+        ),
+    )
+    con.commit()
+    cur.close()
+    con.close()
+
+
 def ensure_runtime_dependencies():
     missing = []
     if psycopg2 is None:
@@ -302,6 +373,31 @@ def init_db():
         ON shopify_fulfillment_jobs(status, created_at)
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS service_runtime_state (
+            service text PRIMARY KEY,
+            version text,
+            status text NOT NULL DEFAULT 'unknown',
+            last_seen_at timestamptz,
+            last_started_at timestamptz,
+            last_finished_at timestamptz,
+            last_pull_at timestamptz,
+            last_push_at timestamptz,
+            last_error text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_started_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_finished_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_pull_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_push_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_error text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
     con.commit()
     cur.close()
     con.close()
@@ -399,7 +495,7 @@ def push_inventory_changes():
 
     if not rows:
         con.close()
-        return
+        return 0
 
     log_info("Push %s Lageraenderungen zu Shopify", len(rows))
 
@@ -408,6 +504,7 @@ def push_inventory_changes():
         "Content-Type": "application/json",
     }
 
+    pushed_count = 0
     for sku, available_qty, inventory_item_id in rows:
         payload = {
             "location_id": SHOPIFY_LOCATION_ID,
@@ -437,11 +534,13 @@ def push_inventory_changes():
         """,
         (sku,),
         )
+        pushed_count += 1
 
         time.sleep(0.5)
 
     con.commit()
     con.close()
+    return pushed_count
 
 
 def get_location_inventory_levels():
@@ -528,7 +627,7 @@ def sync_inventory_levels():
 
     if not inventory_by_sku:
         log_warning("Keine Inventory-Levels von Shopify geladen")
-        return
+        return 0
 
     con = db()
     cur = con.cursor()
@@ -584,6 +683,7 @@ def sync_inventory_levels():
     con.commit()
     con.close()
     log_info("Inventory-Levels synchronisiert: %s", len(inventory_by_sku))
+    return len(inventory_by_sku)
 
 
 def sync_products():
@@ -704,6 +804,7 @@ def sync_products():
 
     con.commit()
     con.close()
+    return len(products)
 
 
 def _chunks(values, size):
@@ -903,6 +1004,7 @@ def sync_orders():
         stats["latest_name"],
         stats["latest_created_at"],
     )
+    return len(orders)
 
 
 def _normalize_carrier_name(value):
@@ -1346,8 +1448,10 @@ def process_fulfillment_jobs(limit=20):
 
 def run_sync_loop():
     init_db()
+    update_service_runtime_state(status="idle", mark_seen=True, clear_error=True)
     while True:
         run_started_at = time.monotonic()
+        update_service_runtime_state(status="running", mark_seen=True, mark_started=True, clear_error=True)
         log_info(
             "Starte Shopify Sync version=%s shop=%s db_host=%s interval=%ss log=%s",
             SYNC_VERSION,
@@ -1360,11 +1464,15 @@ def run_sync_loop():
             ok_jobs, failed_jobs = process_fulfillment_jobs(limit=20)
             if ok_jobs or failed_jobs:
                 log_info("Fulfillment Jobs verarbeitet: ok=%s failed=%s", ok_jobs, failed_jobs)
-            push_inventory_changes()
+            pushed_inventory = push_inventory_changes()
+            if ok_jobs > 0 or pushed_inventory > 0:
+                update_service_runtime_state(mark_seen=True, mark_push=True)
             sync_products()
             sync_inventory_levels()
             sync_orders()
+            update_service_runtime_state(status="ok", mark_seen=True, mark_pull=True, mark_finished=True, clear_error=True)
         except Exception as exc:
+            update_service_runtime_state(status="error", mark_seen=True, mark_finished=True, last_error=str(exc))
             log_exception("Sync-Fehler: %s", exc)
         else:
             duration = time.monotonic() - run_started_at

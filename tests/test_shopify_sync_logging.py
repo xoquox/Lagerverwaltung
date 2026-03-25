@@ -92,6 +92,35 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(payload["version"], self.shopify_sync.SYNC_VERSION)
         self.assertEqual(payload["reported_at"], "2026-03-25T21:00:00+00:00")
 
+    def test_update_service_runtime_state_writes_version_and_status(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+            def close(self):
+                return None
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+            self.shopify_sync.update_service_runtime_state(status="running", mark_seen=True, mark_started=True, clear_error=True)
+
+        self.assertTrue(executed)
+        query, params = executed[0]
+        self.assertIn("INSERT INTO service_runtime_state", query)
+        self.assertEqual(params[0], self.shopify_sync.SYNC_VERSION)
+        self.assertEqual(params[1], "running")
+
     def test_iter_fulfillments_accepts_plain_list_shape(self):
         order = {
             "fulfillments": [

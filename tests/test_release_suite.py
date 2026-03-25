@@ -703,6 +703,39 @@ class LagerMcLogicTests(unittest.TestCase):
             service_codes=None,
         )
 
+    def test_format_shopify_sync_status_label_prefers_pull_and_push_times(self):
+        row = {
+            "status": "ok",
+            "last_seen_at": datetime.datetime(2026, 3, 25, 20, 5, tzinfo=datetime.timezone.utc),
+            "last_pull_at": datetime.datetime(2026, 3, 25, 20, 4, tzinfo=datetime.timezone.utc),
+            "last_push_at": datetime.datetime(2026, 3, 25, 20, 3, tzinfo=datetime.timezone.utc),
+        }
+
+        label = self.lager_mc.format_shopify_sync_status_label(
+            row=row,
+            now=datetime.datetime(2026, 3, 25, 20, 5, tzinfo=datetime.timezone.utc),
+        )
+
+        self.assertIn("Sync:", label)
+        self.assertIn("In", label)
+        self.assertIn("Out", label)
+
+    def test_format_shopify_sync_status_label_marks_stale_and_error(self):
+        row = {
+            "status": "error",
+            "last_seen_at": datetime.datetime(2026, 3, 25, 20, 0, tzinfo=datetime.timezone.utc),
+            "last_pull_at": None,
+            "last_push_at": None,
+        }
+
+        label = self.lager_mc.format_shopify_sync_status_label(
+            row=row,
+            now=datetime.datetime(2026, 3, 25, 20, 5, tzinfo=datetime.timezone.utc),
+        )
+
+        self.assertTrue(label.startswith("Sync!"))
+        self.assertTrue(label.endswith("ERR"))
+
 
 class LagerMcWorkflowTests(unittest.TestCase):
     @classmethod
