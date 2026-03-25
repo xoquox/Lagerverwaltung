@@ -7,10 +7,23 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import psycopg2
-import psycopg2.extras
-import requests
-from dotenv import load_dotenv
+try:
+    import psycopg2
+    import psycopg2.extras
+except ModuleNotFoundError:
+    psycopg2 = None
+
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv():
+        return None
+from sync_version import SYNC_VERSION
 
 load_dotenv()
 
@@ -107,7 +120,27 @@ def summarize_orders(orders):
         "line_items": line_items,
     }
 
+
+def build_sync_version_payload():
+    return {
+        "service": "shopify-sync",
+        "version": SYNC_VERSION,
+        "reported_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def ensure_runtime_dependencies():
+    missing = []
+    if psycopg2 is None:
+        missing.append("psycopg2")
+    if requests is None:
+        missing.append("requests")
+    if missing:
+        raise RuntimeError(f"Fehlende Python-Abhaengigkeiten: {', '.join(missing)}")
+
+
 def db():
+    ensure_runtime_dependencies()
     return psycopg2.connect(
         host=DB_HOST,
         database=DB_NAME,
@@ -275,6 +308,7 @@ def init_db():
 
 
 def graphql_request(query, variables=None):
+    ensure_runtime_dependencies()
     headers = {
         "X-Shopify-Access-Token": TOKEN,
         "Content-Type": "application/json",
@@ -311,6 +345,7 @@ def graphql_request(query, variables=None):
 
 
 def get_products_page(url):
+    ensure_runtime_dependencies()
     headers = {
         "X-Shopify-Access-Token": TOKEN,
     }
@@ -1314,7 +1349,8 @@ def run_sync_loop():
     while True:
         run_started_at = time.monotonic()
         log_info(
-            "Starte Shopify Sync shop=%s db_host=%s interval=%ss log=%s",
+            "Starte Shopify Sync version=%s shop=%s db_host=%s interval=%ss log=%s",
+            SYNC_VERSION,
             SHOP or "-",
             DB_HOST or "-",
             SYNC_INTERVAL,
@@ -1339,14 +1375,26 @@ def run_sync_loop():
 
 def main():
     parser = argparse.ArgumentParser(description="Shopify Sync / Fulfillment Tool")
+    parser.add_argument("--version", action="store_true", help="Aktuelle Shopify-Sync-Version ausgeben")
     sub = parser.add_subparsers(dest="command")
     fulfill_cmd = sub.add_parser("fulfill", help="Fulfillment fuer Bestellung erzeugen")
     fulfill_cmd.add_argument("--order-id", required=True, help="Shopify Order GID")
     fulfill_cmd.add_argument("--tracking-number", required=True, help="Trackingnummer")
     fulfill_cmd.add_argument("--company", required=True, help="Versanddienstleister")
     fulfill_cmd.add_argument("--notify-customer", action="store_true", help="Kundenbenachrichtigung aktivieren")
+    version_cmd = sub.add_parser("version", help="Shopify-Sync-Version ausgeben")
+    version_cmd.add_argument("--json", action="store_true", help="Version als JSON ausgeben")
 
     args = parser.parse_args()
+    if args.version:
+        print(SYNC_VERSION)
+        return
+    if args.command == "version":
+        if args.json:
+            print(json.dumps(build_sync_version_payload(), ensure_ascii=False))
+        else:
+            print(SYNC_VERSION)
+        return
     if args.command == "fulfill":
         result = create_fulfillment(
             order_id=args.order_id,

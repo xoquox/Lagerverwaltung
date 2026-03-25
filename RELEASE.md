@@ -32,6 +32,8 @@ Regeln:
 - `VERSION_STAGE` in [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py) ist
   - leer auf `main`
   - `dev` auf `develop`
+- der Shopify-Sync fuehrt seine eigene Version separat in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
+  und wird nicht ueber `app_version.py` mitversioniert
 
 Aktueller Uebergang:
 
@@ -44,6 +46,8 @@ Aktueller Uebergang:
 - [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) wird nur fuer Releases auf `main` gepflegt
 - kein Eintrag fuer unfertige Zwischenstaende auf `develop`
 - ein Changelog-Eintrag fasst alle relevanten Aenderungen seit dem letzten Release auf `main` zusammen
+- der Shopify-Sync pflegt zusaetzlich sein eigenes Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md)
+- kuenftige Eintraege im Haupt-Changelog sollen die zugehoerige Sync-Version nennen und auf das separate Sync-Changelog verweisen
 
 ## Empfohlener Ablauf
 
@@ -55,6 +59,7 @@ Aktueller Uebergang:
    - `app_version.py` auf finale Release-Version setzen
    - `VERSION_STAGE = ""`
    - Changelog fuer alle Aenderungen seit dem letzten Release ergaenzen
+   - zugehoerige Shopify-Sync-Version notieren und auf `shopify-sync/CHANGELOG.md` verweisen
 6. `develop` nach `main` mergen
 7. Git-Tag fuer den Release setzen, z. B. `v1.21.0`
 8. `develop` danach auf die naechste Zielversion bzw. wieder auf `-dev` stellen

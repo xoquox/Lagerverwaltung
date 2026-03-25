@@ -40,6 +40,10 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
   Branching-, Release- und Changelog-Regeln.
 - [shopify-sync/shopify_sync.py](/home/chrisi/Lagerverwaltung/shopify-sync/shopify_sync.py)
   Separater Shopify-Sync fuer Produkte, Bestand und Bestellungen.
+- [shopify-sync/sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
+  Eigene Versionsquelle fuer den separaten Shopify-Sync.
+- [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md)
+  Release-Historie nur fuer den Shopify-Sync.
 - [post/internetmarke_client.py](/home/chrisi/Lagerverwaltung/post/internetmarke_client.py)
   Vorbereitung fuer Deutsche Post INTERNETMARKE.
 
@@ -99,10 +103,18 @@ Wichtige Einstellungen:
 - `app_version.py` fuehrt die sichtbare Versionsnummer:
   - Release auf `main`: z. B. `1.21.0`
   - Entwicklungsstand auf `develop`: z. B. `1.21.0-dev`
+- Der Shopify-Sync hat zusaetzlich eine eigene Versionsquelle in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
+  und ein eigenes Sync-Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md).
+- Kuenftige Eintraege in [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) sollen fuer jeden Release zusaetzlich die dazugehoerige Sync-Version nennen
+  und auf das separate Sync-Changelog verweisen.
 
 ## Shopify-Sync
 
 Der Sync laeuft getrennt von der TUI und kann direkt oder im Container gestartet werden.
+Er hat eine eigene Versionierung und ein eigenes Changelog:
+
+- [shopify-sync/sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
+- [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md)
 
 Mindestens benoetigte Shopify-Scopes:
 
@@ -122,6 +134,23 @@ Der Sync schreibt unter anderem:
 - Bestellungen und Positionen
 - Fulfillment-Status
 - Zahlungsstatus
+
+Version der laufenden Sync-Instanz abfragen:
+
+```bash
+python3 shopify-sync/shopify_sync.py --version
+python3 shopify-sync/shopify_sync.py version --json
+```
+
+Im Docker-Container typischerweise:
+
+```bash
+docker exec -it shopify-sync python /app/shopify_sync.py --version
+docker exec -it shopify-sync python /app/shopify_sync.py version --json
+```
+
+Die JSON-Ausgabe ist bewusst so aufgebaut, dass spaeter dieselbe Nutzlast in die Datenbank geschrieben werden kann,
+damit das Hauptprogramm die laufende Sync-Version direkt abfragen kann.
 
 ## Installation
 
