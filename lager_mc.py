@@ -16,6 +16,7 @@ import subprocess
 import string
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
@@ -130,6 +131,7 @@ COUNTRY_NAME_DE = {
 
 FULFILLMENT_FILTER_SEQUENCE = ["all", "open", "unfulfilled", "partial", "fulfilled"]
 PAYMENT_FILTER_SEQUENCE = ["all", "paid", "pending", "authorized", "partially_paid", "refunded", "voided"]
+ORDERS_AUTO_REFRESH_SECONDS = 10.0
 
 
 COLS = [
@@ -1040,6 +1042,13 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
     cur.close()
     con.close()
     return rows
+
+
+def should_refresh_orders(last_refresh_at, now=None, interval_seconds=ORDERS_AUTO_REFRESH_SECONDS):
+    if last_refresh_at is None:
+        return True
+    current = time.monotonic() if now is None else now
+    return (current - last_refresh_at) >= max(0.0, float(interval_seconds))
 
 
 def get_order_items(order_id):
@@ -3413,7 +3422,7 @@ def _parse_cups_media_options(output):
         if ":" not in line:
             continue
         key, remainder = line.split(":", 1)
-        key = key.strip()
+        key = key.strip().split("/", 1)[0]
         if key not in {"PageSize", "PageRegion", "media"}:
             continue
         for token in remainder.strip().split():
@@ -5910,9 +5919,10 @@ def orders_dialog(stdscr):
     selected_order_ids = set()
     reload_orders = True
     current_order_id = None
+    last_orders_refresh_at = None
 
     while True:
-        if reload_orders:
+        if reload_orders or should_refresh_orders(last_orders_refresh_at):
             orders = get_orders(
                 order_filter,
                 only_pending=only_pending,
@@ -5922,6 +5932,7 @@ def orders_dialog(stdscr):
             order_items_cache = {}
             selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
             reload_orders = False
+            last_orders_refresh_at = time.monotonic()
 
         if selected >= len(orders):
             selected = len(orders) - 1
@@ -5947,6 +5958,7 @@ def orders_dialog(stdscr):
 
         win = curses.newwin(height, width, y, x)
         win.keypad(True)
+        win.timeout(1000)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
         win.box()
@@ -6032,7 +6044,10 @@ def orders_dialog(stdscr):
         win.addstr(height - 1, 1, footer[:width - 2])
         win.refresh()
 
-        key = win.get_wch()
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
 
         if key in (27, curses.KEY_F9, curses.KEY_F12):
             if key in (27, curses.KEY_F9):

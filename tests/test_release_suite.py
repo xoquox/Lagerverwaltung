@@ -6,11 +6,13 @@ import tempfile
 import types
 import unittest
 import datetime
+import time
 import struct
 import zlib
 from pathlib import Path
 from unittest import mock
 import subprocess
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,6 +109,105 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(loaded["label_font_condensed"], app_settings.DEFAULT_SETTINGS["label_font_condensed"])
 
             self.assertFalse(local_settings_path.exists())
+
+
+class InternetmarkeClientTests(unittest.TestCase):
+    def _client(self):
+        from post.internetmarke_client import InternetmarkeClient
+
+        return InternetmarkeClient(
+            api_url="https://api-eu.dhl.com/post/de/shipping/im/v1",
+            partner_id="A00629B8F2",
+            api_key="key123",
+            api_secret="secret456",
+            user="post@example.com",
+            password="secretpw",
+        )
+
+    def test_authorize_uses_form_payload_and_stores_token(self):
+        client = self._client()
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"access_token": "tok123", "expires_in": 3000}).encode("utf-8")
+
+        with mock.patch("post.internetmarke_client.urlopen", return_value=FakeResponse()) as urlopen_mock:
+            result = client.authorize(force=True)
+
+        self.assertEqual(result["access_token"], "tok123")
+        request = urlopen_mock.call_args.args[0]
+        body = request.data.decode("utf-8")
+        parsed = parse_qs(body)
+        self.assertEqual(parsed["grant_type"], ["client_credentials"])
+        self.assertEqual(parsed["client_id"], ["key123"])
+        self.assertEqual(parsed["client_secret"], ["secret456"])
+        self.assertEqual(parsed["username"], ["post@example.com"])
+        self.assertEqual(parsed["password"], ["secretpw"])
+        self.assertEqual(request.headers["Content-type"], "application/x-www-form-urlencoded; charset=UTF-8")
+
+    def test_get_catalog_repeats_types_query_parameter(self):
+        client = self._client()
+        client._access_token = "tok123"
+        client._token_expires_at = time.time() + 3600
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"pageFormats":[]}'
+
+        with mock.patch("post.internetmarke_client.urlopen", return_value=FakeResponse()) as urlopen_mock:
+            client.get_catalog(types=("PUBLIC", "PAGE_FORMATS"))
+
+        request = urlopen_mock.call_args.args[0]
+        parsed = parse_qs(urlparse(request.full_url).query)
+        self.assertEqual(parsed["types"], ["PUBLIC", "PAGE_FORMATS"])
+        self.assertEqual(request.headers["Authorization"], "Bearer tok123")
+        self.assertEqual(request.headers["X-partner-id"], "A00629B8F2")
+
+    def test_preview_pdf_builds_validate_request(self):
+        client = self._client()
+        client._access_token = "tok123"
+        client._token_expires_at = time.time() + 3600
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"link":"https://example.invalid/preview.pdf"}'
+
+        with mock.patch("post.internetmarke_client.urlopen", return_value=FakeResponse()) as urlopen_mock:
+            result = client.preview_pdf(product_code=101, page_format_id=7, voucher_layout="FRANKING_ZONE", dpi="DPI203")
+
+        self.assertEqual(result["link"], "https://example.invalid/preview.pdf")
+        request = urlopen_mock.call_args.args[0]
+        self.assertIn("validate=true", request.full_url)
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["type"], "AppShoppingCartPreviewPDFRequest")
+        self.assertEqual(payload["productCode"], 101)
+        self.assertEqual(payload["pageFormatId"], 7)
+        self.assertEqual(payload["voucherLayout"], "FRANKING_ZONE")
+        self.assertEqual(payload["dpi"], "DPI203")
 
 
 class LagerMcLogicTests(unittest.TestCase):
@@ -437,6 +538,13 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(self.lager_mc.jump_to_order(orders, "12"), 0)
         self.assertIsNone(self.lager_mc.jump_to_order(orders, "9999"))
 
+    def test_should_refresh_orders_when_never_loaded(self):
+        self.assertTrue(self.lager_mc.should_refresh_orders(None, now=100.0, interval_seconds=10.0))
+
+    def test_should_refresh_orders_respects_interval(self):
+        self.assertFalse(self.lager_mc.should_refresh_orders(100.0, now=109.9, interval_seconds=10.0))
+        self.assertTrue(self.lager_mc.should_refresh_orders(100.0, now=110.0, interval_seconds=10.0))
+
     def test_parse_lpstat_printers_extracts_names_and_details(self):
         output = (
             "printer OFFICE_A4 is idle. enabled since Sun 16 Mar 2026 09:00:00 CET\n"
@@ -460,6 +568,139 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(
             self.lager_mc.summarize_subprocess_error(exc),
             "Traceback",
+        )
+
+    def test_parse_cups_media_options_extracts_values_and_labels(self):
+        output = (
+            "PageSize/Media Size: *A4/A4 A6/A6 PCard100x148/Postcard\n"
+            "PageRegion/PageRegion: *A4/A4\n"
+            "media/Media: Custom.100x62mm/100x62mm\n"
+        )
+
+        values = self.lager_mc._parse_cups_media_options(output)
+
+        self.assertEqual(
+            values,
+            [
+                {"value": "A4", "label": "A4"},
+                {"value": "A6", "label": "A6"},
+                {"value": "PCard100x148", "label": "Postcard"},
+                {"value": "Custom.100x62mm", "label": "100x62mm"},
+            ],
+        )
+
+    def test_get_cups_printer_media_options_uses_c_locale_and_parses_lpoptions(self):
+        completed = subprocess.CompletedProcess(
+            ["lpoptions", "-p", "Xerox", "-l"],
+            0,
+            stdout="PageSize/Media Size: *A4/A4 A6/A6\n",
+            stderr="",
+        )
+
+        with mock.patch.object(self.lager_mc.subprocess, "run", return_value=completed) as run_mock:
+            values, error = self.lager_mc.get_cups_printer_media_options("Xerox")
+
+        self.assertIsNone(error)
+        self.assertEqual(values, [{"value": "A4", "label": "A4"}, {"value": "A6", "label": "A6"}])
+        self.assertEqual(run_mock.call_args.args[0], ["lpoptions", "-p", "Xerox", "-l"])
+        self.assertEqual(run_mock.call_args.kwargs["env"]["LC_ALL"], "C")
+        self.assertEqual(run_mock.call_args.kwargs["env"]["LANG"], "C")
+
+    def test_active_shipping_carrier_falls_back_to_gls_for_unknown_values(self):
+        with mock.patch.dict(self.lager_mc.SETTINGS, {"shipping_carrier": "kaputt"}, clear=False):
+            self.assertEqual(self.lager_mc.active_shipping_carrier(), "gls")
+
+    def test_shipping_printer_for_carrier_uses_specific_private_and_fallback(self):
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "shipping_label_printer": "FALLBACK",
+                "shipping_label_printer_dhl": "DHL-LEGACY",
+                "shipping_label_printer_dhl_private": "DHL-PRIVATE",
+            },
+            clear=False,
+        ):
+            self.assertEqual(self.lager_mc._shipping_printer_for_carrier("dhl_private"), "DHL-PRIVATE")
+
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "shipping_label_printer": "FALLBACK",
+                "shipping_label_printer_gls": "",
+                "shipping_label_printer_dhl": "DHL-LEGACY",
+                "shipping_label_printer_dhl_private": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(self.lager_mc._shipping_printer_for_carrier("dhl_private"), "DHL-LEGACY")
+            self.assertEqual(self.lager_mc._shipping_printer_for_carrier("gls"), "FALLBACK")
+
+    def test_shipping_format_for_carrier_uses_private_fallback_and_normalizes(self):
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "shipping_label_format": "A6",
+                "shipping_label_format_dhl": "A5",
+                "shipping_label_format_dhl_private": "",
+                "shipping_label_format_post": "62x100",
+            },
+            clear=False,
+        ):
+            self.assertEqual(self.lager_mc._shipping_format_for_carrier("dhl_private"), "A5")
+            self.assertEqual(self.lager_mc._shipping_format_for_carrier("post"), "100x62")
+
+    def test_cups_label_print_options_include_media_pagesize_and_scaling_flags(self):
+        self.assertEqual(
+            self.lager_mc._cups_label_print_options("100x62"),
+            [
+                "-o",
+                "media=Custom.100x62mm",
+                "-o",
+                "PageSize=Custom.100x62mm",
+                "-o",
+                "print-scaling=none",
+                "-o",
+                "fit-to-page=false",
+                "-o",
+                "scaling=100",
+                "-o",
+                "page-border=none",
+                "-o",
+                "number-up=1",
+            ],
+        )
+
+    def test_enqueue_shopify_fulfillment_job_blocks_test_carrier(self):
+        with self.assertRaisesRegex(RuntimeError, "Test-Labels duerfen nicht an Shopify uebertragen werden"):
+            self.lager_mc.enqueue_shopify_fulfillment_job(
+                {
+                    "id": 7,
+                    "order_id": "gid://shopify/Order/1",
+                    "track_id": "TEST123",
+                    "carrier": "test",
+                }
+            )
+
+    def test_create_shipping_label_routes_to_requested_carrier(self):
+        order = {
+            "order_id": "gid://shopify/Order/1",
+            "order_name": "#1001",
+            "shipping_name": "Max Mustermann",
+            "shipping_address1": "Musterstr. 1",
+            "shipping_zip": "12345",
+            "shipping_city": "Berlin",
+            "shipping_country": "DE",
+        }
+
+        with mock.patch.object(self.lager_mc, "dhl_private_create_label", return_value={"ok": True}) as handler:
+            result = self.lager_mc.create_shipping_label(order, weight_kg=1.2, carrier="dhl_private")
+
+        self.assertEqual(result, {"ok": True})
+        handler.assert_called_once_with(
+            order,
+            weight_kg=1.2,
+            shipment_reference=None,
+            service_codes=None,
         )
 
 
