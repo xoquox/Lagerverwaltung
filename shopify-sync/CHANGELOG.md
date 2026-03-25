@@ -8,7 +8,7 @@ Nur Releases des separaten Shopify-Syncs. Entwicklungszwischenstaende werden ueb
 - Eigenes rotierendes Logging fuer den Shopify-Sync mit Datei `shopify-sync.log`.
 - Eigene Sync-Versionsquelle in `shopify-sync/sync_version.py`.
 - CLI-Abfrage der laufenden Sync-Version ueber `python shopify_sync.py --version` und `python shopify_sync.py version --json`.
-- Vorbereitete Versions-Nutzlast im Code, damit spaeter eine Ablage der laufenden Sync-Version in der Datenbank angebunden werden kann.
+- JSON-Ausgabe der laufenden Sync-Version mit Service, Version und Zeitstempel.
 
 ### Fixed
 - Order-Sync an die aktuelle Shopify-GraphQL-Struktur fuer `fulfillments` angepasst.

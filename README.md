@@ -105,8 +105,8 @@ Wichtige Einstellungen:
   - Entwicklungsstand auf `develop`: z. B. `1.21.0-dev`
 - Der Shopify-Sync hat zusaetzlich eine eigene Versionsquelle in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
   und ein eigenes Sync-Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md).
-- Kuenftige Eintraege in [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) sollen fuer jeden Release zusaetzlich die dazugehoerige Sync-Version nennen
-  und auf das separate Sync-Changelog verweisen.
+- Release-Eintraege in [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) enthalten die zugehoerige Sync-Version
+  und verweisen auf das separate Sync-Changelog.
 
 ## Shopify-Sync
 
@@ -149,8 +149,7 @@ docker exec -it shopify-sync python /app/shopify_sync.py --version
 docker exec -it shopify-sync python /app/shopify_sync.py version --json
 ```
 
-Die JSON-Ausgabe ist bewusst so aufgebaut, dass spaeter dieselbe Nutzlast in die Datenbank geschrieben werden kann,
-damit das Hauptprogramm die laufende Sync-Version direkt abfragen kann.
+Die JSON-Ausgabe liefert Service, Version und Zeitstempel der laufenden Sync-Instanz.
 
 ## Installation
 

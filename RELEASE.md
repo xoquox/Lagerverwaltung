@@ -47,7 +47,7 @@ Aktueller Uebergang:
 - kein Eintrag fuer unfertige Zwischenstaende auf `develop`
 - ein Changelog-Eintrag fasst alle relevanten Aenderungen seit dem letzten Release auf `main` zusammen
 - der Shopify-Sync pflegt zusaetzlich sein eigenes Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md)
-- kuenftige Eintraege im Haupt-Changelog sollen die zugehoerige Sync-Version nennen und auf das separate Sync-Changelog verweisen
+- Eintraege im Haupt-Changelog nennen die zugehoerige Sync-Version und verweisen auf das separate Sync-Changelog
 
 ## Empfohlener Ablauf
 
