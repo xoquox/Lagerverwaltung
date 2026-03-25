@@ -1,5 +1,9 @@
 # Changelog
 
+Nur Releases auf `main`. Entwicklungszwischenstaende werden ueber Git-Branches und Commits nachvollzogen.
+Release-Eintraege nennen die zugehoerige Shopify-Sync-Version und verweisen auf
+[shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md).
+
 ## [1.20.028] - 2026-03-24
 
 ### Fixed

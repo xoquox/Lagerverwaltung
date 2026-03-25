@@ -1,8 +1,10 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +30,9 @@ def load_shopify_sync_module():
     sys.modules["psycopg2.extras"] = extras_module
     sys.modules["requests"] = requests_module
     sys.modules["dotenv"] = dotenv_module
+
+    if str(MODULE_PATH.parent) not in sys.path:
+        sys.path.insert(0, str(MODULE_PATH.parent))
 
     spec = importlib.util.spec_from_file_location("shopify_sync_test_module", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -74,6 +79,19 @@ class ShopifySyncLoggingTests(unittest.TestCase):
             {"count": 0, "latest_name": "-", "latest_created_at": "-", "line_items": 0},
         )
 
+    def test_build_sync_version_payload_contains_service_and_version(self):
+        with mock.patch.object(
+            self.shopify_sync.datetime,
+            "datetime",
+            wraps=self.shopify_sync.datetime.datetime,
+        ) as datetime_mock:
+            datetime_mock.now.return_value = self.shopify_sync.datetime.datetime(2026, 3, 25, 21, 0, tzinfo=self.shopify_sync.datetime.timezone.utc)
+            payload = self.shopify_sync.build_sync_version_payload()
+
+        self.assertEqual(payload["service"], "shopify-sync")
+        self.assertEqual(payload["version"], self.shopify_sync.SYNC_VERSION)
+        self.assertEqual(payload["reported_at"], "2026-03-25T21:00:00+00:00")
+
     def test_iter_fulfillments_accepts_plain_list_shape(self):
         order = {
             "fulfillments": [
@@ -119,6 +137,23 @@ class ShopifySyncLoggingTests(unittest.TestCase):
 
         self.assertEqual(fulfillments[0]["id"], "f1")
         self.assertEqual(tracking_rows[0]["number"], "123")
+
+    def test_main_prints_version_for_flag(self):
+        with mock.patch.object(self.shopify_sync.argparse.ArgumentParser, "parse_args", return_value=types.SimpleNamespace(version=True, command=None)):
+            with mock.patch("builtins.print") as print_mock:
+                self.shopify_sync.main()
+
+        print_mock.assert_called_once_with(self.shopify_sync.SYNC_VERSION)
+
+    def test_main_prints_version_payload_for_subcommand(self):
+        args = types.SimpleNamespace(version=False, command="version", json=True)
+        with mock.patch.object(self.shopify_sync.argparse.ArgumentParser, "parse_args", return_value=args):
+            with mock.patch("builtins.print") as print_mock:
+                self.shopify_sync.main()
+
+        payload = json.loads(print_mock.call_args.args[0])
+        self.assertEqual(payload["service"], "shopify-sync")
+        self.assertEqual(payload["version"], self.shopify_sync.SYNC_VERSION)
 
 
 if __name__ == "__main__":
