@@ -3,6 +3,9 @@ import time
 import json
 import argparse
 import datetime
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
@@ -10,6 +13,10 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+LOG_DIR = BASE_DIR / "logs"
+SYNC_LOG_PATH = LOG_DIR / "shopify-sync.log"
 
 SHOP = os.getenv("SHOP")
 TOKEN = os.getenv("TOKEN")
@@ -22,6 +29,83 @@ DB_PASS = os.getenv("DB_PASS")
 API_VERSION = "2026-01"
 SHOPIFY_LOCATION_ID = 67402989753
 GRAPHQL_URL = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+SYNC_INTERVAL = 60
+REQUEST_TIMEOUT_SECONDS = 45
+_LOGGER = None
+
+
+def configure_logging():
+    global _LOGGER
+    if _LOGGER is not None:
+        return _LOGGER
+
+    LOG_DIR.mkdir(exist_ok=True)
+    logger = logging.getLogger("lagerverwaltung.shopify_sync")
+    logger.setLevel(getattr(logging, os.getenv("LAGERVERWALTUNG_LOG_LEVEL", "INFO").strip().upper(), logging.INFO))
+    logger.propagate = False
+
+    if not logger.handlers:
+        handler = RotatingFileHandler(SYNC_LOG_PATH, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+        logger.addHandler(handler)
+
+    _LOGGER = logger
+    return logger
+
+
+def log_info(message, *args):
+    rendered = message % args if args else message
+    print(rendered)
+    configure_logging().info(rendered)
+
+
+def log_warning(message, *args):
+    rendered = message % args if args else message
+    print(rendered)
+    configure_logging().warning(rendered)
+
+
+def log_error(message, *args):
+    rendered = message % args if args else message
+    print(rendered)
+    configure_logging().error(rendered)
+
+
+def log_exception(message, *args):
+    rendered = message % args if args else message
+    print(rendered)
+    configure_logging().exception(rendered)
+
+
+def shorten_text(value, limit=400):
+    text = "" if value is None else str(value).replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def summarize_orders(orders):
+    count = len(orders or [])
+    if not orders:
+        return {"count": 0, "latest_name": "-", "latest_created_at": "-", "line_items": 0}
+
+    latest_order = None
+    latest_key = None
+    line_items = 0
+    for order in orders:
+        line_items += len(((order.get("lineItems") or {}).get("nodes") or []))
+        created_at = order.get("createdAt")
+        candidate = (created_at or "", order.get("name") or "")
+        if latest_key is None or candidate > latest_key:
+            latest_key = candidate
+            latest_order = order
+
+    return {
+        "count": count,
+        "latest_name": (latest_order or {}).get("name") or "-",
+        "latest_created_at": (latest_order or {}).get("createdAt") or "-",
+        "line_items": line_items,
+    }
 
 def db():
     return psycopg2.connect(
@@ -196,13 +280,31 @@ def graphql_request(query, variables=None):
         "Content-Type": "application/json",
     }
     payload = {"query": query, "variables": variables or {}}
-    response = requests.post(GRAPHQL_URL, json=payload, headers=headers)
-    response.raise_for_status()
+    try:
+        response = requests.post(
+            GRAPHQL_URL,
+            json=payload,
+            headers=headers,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", "-")
+        body = shorten_text(getattr(response, "text", ""))
+        log_error("GraphQL HTTP-Fehler status=%s body=%s", status, body or "-")
+        raise
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        body = shorten_text(response.text)
+        log_error("GraphQL JSON-Fehler body=%s", body or "-")
+        raise RuntimeError("Shopify GraphQL Antwort war kein gueltiges JSON.") from exc
     errors = data.get("errors")
 
     if errors:
+        log_error("Shopify GraphQL Fehler: %s", shorten_text(json.dumps(errors, ensure_ascii=False)))
         raise RuntimeError(f"Shopify GraphQL Fehler: {errors}")
 
     return data["data"]
@@ -213,7 +315,7 @@ def get_products_page(url):
         "X-Shopify-Access-Token": TOKEN,
     }
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response
 
@@ -227,7 +329,7 @@ def get_all_products():
         data = response.json()
         products.extend(data["products"])
 
-        print(f"Geladen: {len(products)} Produkte")
+        log_info("Geladen: %s Produkte", len(products))
 
         link = response.headers.get("Link")
         next_url = None
@@ -264,7 +366,7 @@ def push_inventory_changes():
         con.close()
         return
 
-    print(f"Push {len(rows)} Lageränderungen zu Shopify")
+    log_info("Push %s Lageraenderungen zu Shopify", len(rows))
 
     headers = {
         "X-Shopify-Access-Token": TOKEN,
@@ -282,13 +384,14 @@ def push_inventory_changes():
             f"https://{SHOP}/admin/api/{API_VERSION}/inventory_levels/set.json",
             json=payload,
             headers=headers,
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
 
         if response.status_code != 200:
-            print("Shopify Fehler:", response.text)
+            log_error("Shopify Fehler sku=%s status=%s body=%s", sku, response.status_code, shorten_text(response.text))
             continue
 
-        print("Shopify Update:", sku, available_qty)
+        log_info("Shopify Update sku=%s available=%s", sku, available_qty)
 
         cur.execute("""
             UPDATE items
@@ -389,7 +492,7 @@ def sync_inventory_levels():
     inventory_by_sku = get_location_inventory_levels()
 
     if not inventory_by_sku:
-        print("Keine Inventory-Levels von Shopify geladen")
+        log_warning("Keine Inventory-Levels von Shopify geladen")
         return
 
     con = db()
@@ -445,7 +548,7 @@ def sync_inventory_levels():
 
     con.commit()
     con.close()
-    print(f"Inventory-Levels synchronisiert: {len(inventory_by_sku)}")
+    log_info("Inventory-Levels synchronisiert: %s", len(inventory_by_sku))
 
 
 def sync_products():
@@ -483,7 +586,7 @@ def sync_products():
             weight_grams = variant.get("grams")
             unit_cost = unit_cost_by_inventory_item_id.get(inventory_item_id, {})
             qty = variant["inventory_quantity"]
-            print("Import:", sku, qty)
+            log_info("Import sku=%s qty=%s", sku, qty)
 
             cur.execute("""
             INSERT INTO items(
@@ -642,16 +745,14 @@ def get_all_orders():
               unfulfilledQuantity
             }
           }
-          fulfillments(first: 25) {
-            nodes {
-              id
-              status
-              createdAt
-              trackingInfo(first: 10) {
-                number
-                company
-                url
-              }
+          fulfillments {
+            id
+            status
+            createdAt
+            trackingInfo {
+              number
+              company
+              url
             }
           }
         }
@@ -670,6 +771,7 @@ def get_all_orders():
         data = graphql_request(query, {"after": after})
         page = data["orders"]
         orders.extend(page["nodes"])
+        log_info("Orders-Seite geladen: gesamt=%s has_next=%s", len(orders), page["pageInfo"]["hasNextPage"])
 
         if not page["pageInfo"]["hasNextPage"]:
             return orders
@@ -680,6 +782,14 @@ def get_all_orders():
 
 def sync_orders():
     orders = get_all_orders()
+    stats = summarize_orders(orders)
+    log_info(
+        "Order-Import gestartet: count=%s latest=%s created_at=%s line_items=%s",
+        stats["count"],
+        stats["latest_name"],
+        stats["latest_created_at"],
+        stats["line_items"],
+    )
 
     con = db()
     cur = con.cursor()
@@ -752,7 +862,12 @@ def sync_orders():
 
     con.commit()
     con.close()
-    print(f"Bestellungen synchronisiert: {len(orders)}")
+    log_info(
+        "Bestellungen synchronisiert: count=%s latest=%s created_at=%s",
+        stats["count"],
+        stats["latest_name"],
+        stats["latest_created_at"],
+    )
 
 
 def _normalize_carrier_name(value):
@@ -767,6 +882,24 @@ def _normalize_carrier_name(value):
     if "post" in normalized:
         return "post"
     return normalized[:32]
+
+
+def _iter_fulfillments(order):
+    rows = order.get("fulfillments") or []
+    if isinstance(rows, dict):
+        rows = rows.get("nodes") or []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _iter_tracking_rows(fulfillment):
+    rows = fulfillment.get("trackingInfo") or []
+    if isinstance(rows, dict):
+        rows = rows.get("nodes") or []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def upsert_shopify_shipment(cur, order, fulfillment, tracking):
@@ -834,12 +967,8 @@ def upsert_shopify_shipment(cur, order, fulfillment, tracking):
 
 
 def sync_order_shipments(cur, order):
-    fulfillments = ((order.get("fulfillments") or {}).get("nodes") or [])
-    for fulfillment in fulfillments:
-        tracking_rows = fulfillment.get("trackingInfo") or []
-        for tracking in tracking_rows or []:
-            if not isinstance(tracking, dict):
-                continue
+    for fulfillment in _iter_fulfillments(order):
+        for tracking in _iter_tracking_rows(fulfillment):
             upsert_shopify_shipment(cur, order, fulfillment, tracking)
 
 
@@ -1175,7 +1304,7 @@ def process_fulfillment_jobs(limit=20):
         except Exception as exc:
             error_text = str(exc)
             mark_fulfillment_job_failed(job["id"], job.get("label_id"), error_text)
-            print(f"Fulfillment Job {job['id']} fehlgeschlagen: {error_text}")
+            log_error("Fulfillment Job %s fehlgeschlagen: %s", job["id"], error_text)
             failed_count += 1
     return success_count, failed_count
 
@@ -1183,19 +1312,28 @@ def process_fulfillment_jobs(limit=20):
 def run_sync_loop():
     init_db()
     while True:
-        print("Starte Shopify Sync")
+        run_started_at = time.monotonic()
+        log_info(
+            "Starte Shopify Sync shop=%s db_host=%s interval=%ss log=%s",
+            SHOP or "-",
+            DB_HOST or "-",
+            SYNC_INTERVAL,
+            SYNC_LOG_PATH,
+        )
         try:
             ok_jobs, failed_jobs = process_fulfillment_jobs(limit=20)
             if ok_jobs or failed_jobs:
-                print(f"Fulfillment Jobs verarbeitet: ok={ok_jobs} failed={failed_jobs}")
+                log_info("Fulfillment Jobs verarbeitet: ok=%s failed=%s", ok_jobs, failed_jobs)
             push_inventory_changes()
             sync_products()
             sync_inventory_levels()
             sync_orders()
-        except Exception as e:
-            print("Fehler:", e)
-        print("Sync abgeschlossen")
-        print(f"Warte {SYNC_INTERVAL} Sekunden")
+        except Exception as exc:
+            log_exception("Sync-Fehler: %s", exc)
+        else:
+            duration = time.monotonic() - run_started_at
+            log_info("Sync abgeschlossen in %.2fs", duration)
+        log_info("Warte %s Sekunden", SYNC_INTERVAL)
         time.sleep(SYNC_INTERVAL)
 
 
@@ -1220,9 +1358,6 @@ def main():
         return
 
     run_sync_loop()
-
-
-SYNC_INTERVAL = 60
 
 if __name__ == "__main__":
     main()
