@@ -10,6 +10,7 @@ lagerverwaltung.log
 logs/
 settings.local.json
 gls/*.pdf
+gls/
 exports/
 gls/*.txt
 gls/*.env
