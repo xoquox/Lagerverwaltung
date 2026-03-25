@@ -1,5 +1,7 @@
 # Changelog
 
+Nur Releases auf `main`. Entwicklungszwischenstaende werden ueber Git-Branches und Commits nachvollzogen.
+
 ## [1.20.028] - 2026-03-24
 
 ### Fixed

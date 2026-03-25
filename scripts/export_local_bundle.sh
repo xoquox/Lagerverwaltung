@@ -9,7 +9,7 @@ ZIP_PATH="$EXPORT_DIR/lager_mc_local_bundle_$STAMP.zip"
 
 mkdir -p "$EXPORT_DIR"
 rm -rf "$STAGE_DIR"
-mkdir -p "$STAGE_DIR/gls" "$STAGE_DIR/shopify-sync"
+mkdir -p "$STAGE_DIR/gls" "$STAGE_DIR/shopify-sync" "$STAGE_DIR/fonts" "$STAGE_DIR/assets"
 
 copy_if_exists() {
   local src="$1"
@@ -41,6 +41,9 @@ copy_gls_credentials() {
 copy_if_exists "$ROOT_DIR/settings.json" "$STAGE_DIR/settings.json"
 copy_if_exists "$ROOT_DIR/settings.local.json" "$STAGE_DIR/settings.local.json"
 copy_if_exists "$ROOT_DIR/shopify-sync/.env" "$STAGE_DIR/shopify-sync/.env"
+copy_if_exists "$ROOT_DIR/fonts/bahnschrift.ttf" "$STAGE_DIR/fonts/bahnschrift.ttf"
+copy_if_exists "$ROOT_DIR/fonts/bahnschrift-condensed.ttf" "$STAGE_DIR/fonts/bahnschrift-condensed.ttf"
+copy_if_exists "$ROOT_DIR/assets/lager-mc.svg" "$STAGE_DIR/assets/lager-mc.svg"
 copy_gls_credentials || true
 
 cat > "$STAGE_DIR/README.txt" <<'EOF'
@@ -50,6 +53,9 @@ Enthalten:
 - settings.json
 - settings.local.json
 - shopify-sync/.env
+- fonts/bahnschrift.ttf
+- fonts/bahnschrift-condensed.ttf
+- assets/lager-mc.svg
 - gls/*.pdf (ohne gls/labels/)
 
 Nicht enthalten:

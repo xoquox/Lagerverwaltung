@@ -23,7 +23,9 @@ from urllib.request import Request, urlopen
 
 from app_logging import MAIN_LOG_PATH, PRINT_LOG_PATH, get_logger
 from app_settings import DEFAULT_SETTINGS, load_settings, save_settings
+from app_version import APP_VERSION
 from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
+from dhl.private_client import DHLPrivateClient
 from post.internetmarke_client import InternetmarkeClient
 
 locale.setlocale(locale.LC_ALL, "")
@@ -37,11 +39,6 @@ GLS_DIR = BASE_DIR / "gls"
 GLS_LABEL_DIR = GLS_DIR / "labels"
 POST_DIR = BASE_DIR / "post"
 POST_LABEL_DIR = POST_DIR / "labels"
-VERSION_MAJOR = 1
-VERSION_MINOR = 20
-# Increase patch for bugfix/small changes within the current feature phase.
-VERSION_PATCH = 28
-APP_VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH:03d}"
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label": "FlexDelivery", "locked": True},
@@ -51,7 +48,7 @@ SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_smsservice", "label": "SMS Service", "locked": False},
 ]
 
-IMPLEMENTED_SHIPPING_CARRIERS = {"gls", "test"}
+IMPLEMENTED_SHIPPING_CARRIERS = {"gls", "post", "dhl_private", "test"}
 
 MANUAL_LABEL_COUNTRY_OPTIONS = [
     {"value": "AD", "label": "Andorra"},
@@ -298,9 +295,11 @@ TRANSLATIONS = {
         "field_regex_platz": "Regex Platz",
         "field_picklist_printer": "Pickliste Drucker",
         "field_delivery_printer": "Lieferschein Drucker",
+        "field_delivery_format": "Lieferschein Format",
         "field_shipping_printer": "Versandlabel Drucker",
         "field_shipping_printer_gls": "GLS Label Drucker",
         "field_shipping_printer_dhl": "DHL Label Drucker",
+        "field_shipping_printer_dhl_private": "DHL Privat Label Drucker",
         "field_shipping_printer_post": "POST Label Drucker",
         "field_shipping_printer_fallback": "Label Drucker Fallback",
         "field_shipping_carrier": "Versand Dienstleister",
@@ -308,6 +307,7 @@ TRANSLATIONS = {
         "field_shipping_format": "Versand Labelformat",
         "field_shipping_format_gls": "GLS Labelformat",
         "field_shipping_format_dhl": "DHL Labelformat",
+        "field_shipping_format_dhl_private": "DHL Privat Labelformat",
         "field_shipping_format_post": "POST Labelformat",
         "field_shipping_services": "Versand Services",
         "field_shipping_packaging_weight": "Verpackung Gewicht (g)",
@@ -316,9 +316,16 @@ TRANSLATIONS = {
         "field_gls_password": "GLS Passwort",
         "field_gls_contact_id": "GLS ContactID",
         "field_post_api_url": "POST API URL",
+        "field_post_api_key": "POST API Key",
+        "field_post_api_secret": "POST API Secret",
         "field_post_user": "POST User",
         "field_post_password": "POST Passwort",
         "field_post_partner_id": "POST Partner-ID",
+        "field_dhl_private_api_url": "DHL Privat API URL",
+        "field_dhl_private_api_test_url": "DHL Privat Test API URL",
+        "field_dhl_private_api_key": "DHL Privat API Key",
+        "field_dhl_private_api_secret": "DHL Privat API Secret",
+        "field_dhl_private_use_test_api": "DHL Privat Testmodus",
         "field_pdf_dir": "PDF Ordner",
         "field_template": "LS Vorlage",
         "field_logo": "LS Logo URL/Pfad",
@@ -395,9 +402,11 @@ TRANSLATIONS = {
         "field_regex_platz": "Regex Slot",
         "field_picklist_printer": "Picklist Printer",
         "field_delivery_printer": "Delivery Printer",
+        "field_delivery_format": "Delivery Format",
         "field_shipping_printer": "Shipping Label Printer",
         "field_shipping_printer_gls": "GLS Label Printer",
         "field_shipping_printer_dhl": "DHL Label Printer",
+        "field_shipping_printer_dhl_private": "DHL Private Label Printer",
         "field_shipping_printer_post": "POST Label Printer",
         "field_shipping_printer_fallback": "Label Printer Fallback",
         "field_shipping_carrier": "Shipping Carrier",
@@ -405,6 +414,7 @@ TRANSLATIONS = {
         "field_shipping_format": "Shipping Label Format",
         "field_shipping_format_gls": "GLS Label Format",
         "field_shipping_format_dhl": "DHL Label Format",
+        "field_shipping_format_dhl_private": "DHL Private Label Format",
         "field_shipping_format_post": "POST Label Format",
         "field_shipping_services": "Shipping Services",
         "field_shipping_packaging_weight": "Packaging Weight (g)",
@@ -413,9 +423,16 @@ TRANSLATIONS = {
         "field_gls_password": "GLS Password",
         "field_gls_contact_id": "GLS ContactID",
         "field_post_api_url": "POST API URL",
+        "field_post_api_key": "POST API Key",
+        "field_post_api_secret": "POST API Secret",
         "field_post_user": "POST User",
         "field_post_password": "POST Password",
         "field_post_partner_id": "POST Partner ID",
+        "field_dhl_private_api_url": "DHL Private API URL",
+        "field_dhl_private_api_test_url": "DHL Private Test API URL",
+        "field_dhl_private_api_key": "DHL Private API Key",
+        "field_dhl_private_api_secret": "DHL Private API Secret",
+        "field_dhl_private_use_test_api": "DHL Private Test Mode",
         "field_pdf_dir": "PDF Folder",
         "field_template": "Delivery Template",
         "field_logo": "Delivery Logo URL/Path",
@@ -1577,13 +1594,47 @@ def load_gls_credentials():
 def load_post_credentials():
     creds = {
         "api_url": (SETTINGS.get("post_api_url") or "").strip(),
+        "api_key": (SETTINGS.get("post_api_key") or "").strip(),
+        "api_secret": (SETTINGS.get("post_api_secret") or "").strip(),
         "user": (SETTINGS.get("post_user") or "").strip(),
         "password": (SETTINGS.get("post_password") or "").strip(),
         "partner_id": (SETTINGS.get("post_partner_id") or "").strip(),
     }
-    missing = [key for key, value in creds.items() if not value]
+    missing = []
+    if not creds["api_url"]:
+        missing.append("api_url")
+    if not creds["partner_id"]:
+        missing.append("partner_id")
+    has_oauth = bool(creds["api_key"] and creds["api_secret"])
+    has_legacy = bool(creds["user"] and creds["password"])
+    if not has_oauth and not has_legacy:
+        missing.append("api_key/api_secret oder user/password")
     if missing:
         raise RuntimeError(f"POST INTERNETMARKE Daten fehlen: {', '.join(missing)}")
+    return creds
+
+
+def load_dhl_private_credentials():
+    creds = {
+        "api_url": (SETTINGS.get("dhl_private_api_url") or "").strip(),
+        "test_api_url": (SETTINGS.get("dhl_private_api_test_url") or "").strip(),
+        "api_key": (SETTINGS.get("dhl_private_api_key") or "").strip(),
+        "api_secret": (SETTINGS.get("dhl_private_api_secret") or "").strip(),
+        "use_test_api": bool(SETTINGS.get("dhl_private_use_test_api", True)),
+    }
+    missing = []
+    if creds["use_test_api"]:
+        if not creds["test_api_url"]:
+            missing.append("test_api_url")
+    else:
+        if not creds["api_url"]:
+            missing.append("api_url")
+    if not creds["api_key"]:
+        missing.append("api_key")
+    if not creds["api_secret"]:
+        missing.append("api_secret")
+    if missing:
+        raise RuntimeError(f"DHL Privat Daten fehlen: {', '.join(missing)}")
     return creds
 
 
@@ -1958,27 +2009,74 @@ def _save_shipping_label_pdf(carrier, order_name, track_id, pdf_bytes, suffix=""
 
 
 def _normalize_shipping_label_format(value):
-    raw = (value or "").strip().upper().replace(" ", "")
-    if raw in {"A4", "A5", "A6"}:
-        return raw
-    if raw in {"100X62", "62X100"}:
+    raw = (value or "").strip()
+    if not raw:
+        return "A6"
+    compact = raw.upper().replace(" ", "")
+    if compact in {"A4", "A5", "A6"}:
+        return compact
+    if compact in {"100X62", "62X100"}:
         return "100x62"
-    return "A6"
+    return raw
 
 
 def _shipping_printer_for_carrier(carrier):
     c = (carrier or "").strip().lower()
     specific = (SETTINGS.get(f"shipping_label_printer_{c}") or "").strip() if c else ""
+    if not specific and c == "dhl_private":
+        specific = (SETTINGS.get("shipping_label_printer_dhl") or "").strip()
     fallback = (SETTINGS.get("shipping_label_printer") or "").strip()
     return specific or fallback
 
 
 def _shipping_format_for_carrier(carrier):
     c = (carrier or "").strip().lower()
-    defaults = {"gls": "A6", "dhl": "A5", "post": "100x62"}
+    defaults = {"gls": "A6", "dhl": "A5", "dhl_private": "A5", "post": "100x62"}
     specific = SETTINGS.get(f"shipping_label_format_{c}") if c else None
+    if not specific and c == "dhl_private":
+        specific = SETTINGS.get("shipping_label_format_dhl")
     fallback = SETTINGS.get("shipping_label_format", defaults.get(c, "A6"))
     return _normalize_shipping_label_format(specific or fallback or defaults.get(c, "A6"))
+
+
+def _delivery_note_format():
+    return _normalize_shipping_label_format(SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4")))
+
+
+def _cups_media_value_for_format(label_format):
+    normalized = _normalize_shipping_label_format(label_format)
+    if normalized == "A6":
+        return "A6"
+    if normalized == "A5":
+        return "A5"
+    if normalized == "A4":
+        return "A4"
+    if normalized == "100x62":
+        return "Custom.100x62mm"
+    return (label_format or "").strip() or None
+
+
+def _cups_label_print_options(label_format):
+    media = _cups_media_value_for_format(label_format)
+    options = []
+    if media:
+        options.extend(["-o", f"media={media}"])
+        options.extend(["-o", f"PageSize={media}"])
+    options.extend(
+        [
+            "-o",
+            "print-scaling=none",
+            "-o",
+            "fit-to-page=false",
+            "-o",
+            "scaling=100",
+            "-o",
+            "page-border=none",
+            "-o",
+            "number-up=1",
+        ]
+    )
+    return options
 
 
 def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
@@ -1989,14 +2087,7 @@ def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
         return False
     label_format = _shipping_format_for_carrier(carrier_key)
     cmd = ["lp", "-d", printer, "-t", title]
-    if label_format == "A6":
-        cmd.extend(["-o", "media=A6"])
-    elif label_format == "A5":
-        cmd.extend(["-o", "media=A5"])
-    elif label_format == "A4":
-        cmd.extend(["-o", "media=A4"])
-    elif label_format == "100x62":
-        cmd.extend(["-o", "media=Custom.100x62mm"])
+    cmd.extend(_cups_label_print_options(label_format))
     cmd.append(pdf_path)
     try:
         subprocess.run(
@@ -2138,14 +2229,33 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     _creds = load_post_credentials()
     client = InternetmarkeClient(
         api_url=_creds["api_url"],
+        partner_id=_creds["partner_id"],
+        api_key=_creds["api_key"],
+        api_secret=_creds["api_secret"],
         user=_creds["user"],
         password=_creds["password"],
-        partner_id=_creds["partner_id"],
     )
     client.validate()
     _weight_value = float(weight_kg)
     _reference = _sanitize_order_reference(shipment_reference or order["order_name"])
     raise RuntimeError("POST INTERNETMARKE ist vorbereitet, API-Call folgt im naechsten Schritt.")
+
+
+def dhl_private_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
+    _validate_order_for_gls(order)
+    _creds = load_dhl_private_credentials()
+    client = DHLPrivateClient(
+        api_url=_creds["api_url"],
+        test_api_url=_creds["test_api_url"],
+        api_key=_creds["api_key"],
+        api_secret=_creds["api_secret"],
+        use_test_api=_creds["use_test_api"],
+    )
+    client.validate()
+    _weight_value = float(weight_kg)
+    _reference = _sanitize_order_reference(shipment_reference or order["order_name"])
+    mode = "Test" if _creds["use_test_api"] else "Produktion"
+    raise RuntimeError(f"DHL Private Shipping ({mode}) ist vorbereitet, API-Call folgt im naechsten Schritt.")
 
 
 def test_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
@@ -2319,7 +2429,7 @@ def shipping_services_dialog(stdscr, current_services):
 
 def active_shipping_carrier():
     carrier = (SETTINGS.get("shipping_carrier") or "gls").strip().lower()
-    if carrier not in {"gls", "dhl", "post"}:
+    if carrier not in {"gls", "dhl_private", "post", "test"}:
         return "gls"
     return carrier
 
@@ -2344,6 +2454,13 @@ def create_shipping_label(order, weight_kg=None, shipment_reference=None, servic
         )
     if selected_carrier == "post":
         return post_create_label(
+            order,
+            weight_kg=weight_kg,
+            shipment_reference=shipment_reference,
+            service_codes=service_codes,
+        )
+    if selected_carrier == "dhl_private":
+        return dhl_private_create_label(
             order,
             weight_kg=weight_kg,
             shipment_reference=shipment_reference,
@@ -3286,6 +3403,37 @@ def _lpstat_env():
     return env
 
 
+def _parse_cups_media_options(output):
+    values = []
+    seen = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            continue
+        key, remainder = line.split(":", 1)
+        key = key.strip()
+        if key not in {"PageSize", "PageRegion", "media"}:
+            continue
+        for token in remainder.strip().split():
+            raw_value = token.lstrip("*").strip()
+            if not raw_value:
+                continue
+            if "/" in raw_value:
+                value, label = raw_value.split("/", 1)
+            else:
+                value, label = raw_value, raw_value
+            value = value.strip()
+            label = label.strip() or value
+            if not value:
+                continue
+            if value not in seen:
+                seen.add(value)
+                values.append({"value": value, "label": label})
+    return values
+
+
 def get_cups_printers():
     try:
         PRINT_LOGGER.debug("Lade Drucker mit lpstat -p")
@@ -3325,6 +3473,39 @@ def get_cups_printers():
         default_printer = None
 
     return printers, default_printer, None
+
+
+def get_cups_printer_media_options(printer_name):
+    printer = (printer_name or "").strip()
+    if not printer:
+        return [], "Bitte zuerst einen Drucker waehlen."
+    try:
+        result = subprocess.run(
+            ["lpoptions", "-p", printer, "-l"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            env=_lpstat_env(),
+        )
+    except FileNotFoundError:
+        return [], "lpoptions/CUPS ist auf diesem System nicht verfuegbar."
+    except subprocess.CalledProcessError as exc:
+        error_text = (exc.stderr or str(exc)).strip()
+        return [], error_text or "Druckerformate konnten nicht geladen werden."
+    options = _parse_cups_media_options(result.stdout)
+    return options, None
+
+
+def cups_media_dialog(stdscr, printer_name, current_value, title):
+    options, error = get_cups_printer_media_options(printer_name)
+    if error:
+        message_box(stdscr, "Formate", error[:56])
+        return current_value
+    if not options:
+        message_box(stdscr, "Formate", "Keine CUPS-Formate fuer Drucker gefunden.")
+        return current_value
+    return choice_dialog(stdscr, title, options, current_value)
 
 
 def cups_printer_dialog(stdscr, current_printer):
@@ -3523,9 +3704,13 @@ def settings_dialog(stdscr):
         "location_regex_platz": SETTINGS.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
         "picklist_printer": SETTINGS["picklist_printer"],
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
+        "delivery_note_format": _normalize_shipping_label_format(
+            SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))
+        ),
         "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
         "shipping_label_printer_gls": SETTINGS.get("shipping_label_printer_gls", ""),
         "shipping_label_printer_dhl": SETTINGS.get("shipping_label_printer_dhl", ""),
+        "shipping_label_printer_dhl_private": SETTINGS.get("shipping_label_printer_dhl_private", SETTINGS.get("shipping_label_printer_dhl", "")),
         "shipping_label_printer_post": SETTINGS.get("shipping_label_printer_post", ""),
         "shipping_carrier": (SETTINGS.get("shipping_carrier") or "gls").strip().lower(),
         "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
@@ -3535,6 +3720,9 @@ def settings_dialog(stdscr):
         ),
         "shipping_label_format_dhl": _normalize_shipping_label_format(
             SETTINGS.get("shipping_label_format_dhl", "A5")
+        ),
+        "shipping_label_format_dhl_private": _normalize_shipping_label_format(
+            SETTINGS.get("shipping_label_format_dhl_private", SETTINGS.get("shipping_label_format_dhl", "A5"))
         ),
         "shipping_label_format_post": _normalize_shipping_label_format(
             SETTINGS.get("shipping_label_format_post", "100x62")
@@ -3549,9 +3737,16 @@ def settings_dialog(stdscr):
         "gls_password": SETTINGS.get("gls_password", ""),
         "gls_contact_id": SETTINGS.get("gls_contact_id", ""),
         "post_api_url": SETTINGS.get("post_api_url", ""),
+        "post_api_key": SETTINGS.get("post_api_key", ""),
+        "post_api_secret": SETTINGS.get("post_api_secret", ""),
         "post_user": SETTINGS.get("post_user", ""),
         "post_password": SETTINGS.get("post_password", ""),
         "post_partner_id": SETTINGS.get("post_partner_id", ""),
+        "dhl_private_api_url": SETTINGS.get("dhl_private_api_url", ""),
+        "dhl_private_api_test_url": SETTINGS.get("dhl_private_api_test_url", ""),
+        "dhl_private_api_key": SETTINGS.get("dhl_private_api_key", ""),
+        "dhl_private_api_secret": SETTINGS.get("dhl_private_api_secret", ""),
+        "dhl_private_use_test_api": "ja" if SETTINGS.get("dhl_private_use_test_api", True) else "nein",
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
         "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
         "delivery_note_logo_source": SETTINGS.get("delivery_note_logo_source", ""),
@@ -3591,8 +3786,9 @@ def settings_dialog(stdscr):
             "fields": [
                 ("picklist_printer", "field_picklist_printer"),
                 ("delivery_note_printer", "field_delivery_printer"),
+                ("delivery_note_format", "field_delivery_format"),
                 ("shipping_label_printer_gls", "field_shipping_printer_gls"),
-                ("shipping_label_printer_dhl", "field_shipping_printer_dhl"),
+                ("shipping_label_printer_dhl_private", "field_shipping_printer_dhl_private"),
                 ("shipping_label_printer_post", "field_shipping_printer_post"),
                 ("shipping_label_printer", "field_shipping_printer_fallback"),
             ],
@@ -3603,7 +3799,7 @@ def settings_dialog(stdscr):
                 ("shipping_carrier", "field_shipping_carrier"),
                 ("shipping_label_output_dir", "field_shipping_label_output_dir"),
                 ("shipping_label_format_gls", "field_shipping_format_gls"),
-                ("shipping_label_format_dhl", "field_shipping_format_dhl"),
+                ("shipping_label_format_dhl_private", "field_shipping_format_dhl_private"),
                 ("shipping_label_format_post", "field_shipping_format_post"),
                 ("shipping_services_display", "field_shipping_services"),
                 ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
@@ -3612,9 +3808,16 @@ def settings_dialog(stdscr):
                 ("gls_password", "field_gls_password"),
                 ("gls_contact_id", "field_gls_contact_id"),
                 ("post_api_url", "field_post_api_url"),
+                ("post_api_key", "field_post_api_key"),
+                ("post_api_secret", "field_post_api_secret"),
                 ("post_user", "field_post_user"),
                 ("post_password", "field_post_password"),
                 ("post_partner_id", "field_post_partner_id"),
+                ("dhl_private_api_url", "field_dhl_private_api_url"),
+                ("dhl_private_api_test_url", "field_dhl_private_api_test_url"),
+                ("dhl_private_api_key", "field_dhl_private_api_key"),
+                ("dhl_private_api_secret", "field_dhl_private_api_secret"),
+                ("dhl_private_use_test_api", "field_dhl_private_use_test_api"),
             ],
         },
         {
@@ -3710,7 +3913,7 @@ def settings_dialog(stdscr):
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "F5 <- Tab  F6 Tab ->  F3 Drucker  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "F5 <- Tab  F6 Tab ->  F3 Drucker  F4 Format  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 2, 1, " " * (width - 2))
         win.addstr(height - 2, 1, _fit(footer, width - 2))
@@ -3779,9 +3982,38 @@ def settings_dialog(stdscr):
             "shipping_label_printer",
             "shipping_label_printer_gls",
             "shipping_label_printer_dhl",
+            "shipping_label_printer_dhl_private",
             "shipping_label_printer_post",
         }:
             values[active_name] = cups_printer_dialog(stdscr, values[active_name])
+            cursor_positions[active_name] = len(str(values[active_name]))
+            continue
+
+        if key == curses.KEY_F4 and active_name in {
+            "delivery_note_format",
+            "shipping_label_format_gls",
+            "shipping_label_format_dhl",
+            "shipping_label_format_dhl_private",
+            "shipping_label_format_post",
+        }:
+            printer_name = ""
+            title = "Druckformat"
+            if active_name == "delivery_note_format":
+                printer_name = values.get("delivery_note_printer", "")
+                title = "Lieferschein Format"
+            elif active_name == "shipping_label_format_gls":
+                printer_name = values.get("shipping_label_printer_gls") or values.get("shipping_label_printer")
+                title = "GLS Labelformat"
+            elif active_name == "shipping_label_format_dhl":
+                printer_name = values.get("shipping_label_printer_dhl") or values.get("shipping_label_printer")
+                title = "DHL Labelformat"
+            elif active_name == "shipping_label_format_dhl_private":
+                printer_name = values.get("shipping_label_printer_dhl_private") or values.get("shipping_label_printer")
+                title = "DHL Privat Labelformat"
+            elif active_name == "shipping_label_format_post":
+                printer_name = values.get("shipping_label_printer_post") or values.get("shipping_label_printer")
+                title = "POST Labelformat"
+            values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
             cursor_positions[active_name] = len(str(values[active_name]))
             continue
 
@@ -3796,6 +4028,7 @@ def settings_dialog(stdscr):
                 "shipping_label_printer",
                 "shipping_label_printer_gls",
                 "shipping_label_printer_dhl",
+                "shipping_label_printer_dhl_private",
                 "shipping_label_printer_post",
             }:
                 values[active_name] = cups_printer_dialog(stdscr, values[active_name])
@@ -3805,23 +4038,44 @@ def settings_dialog(stdscr):
                     "Versand Dienstleister",
                     [
                         {"value": "gls", "label": "GLS"},
-                        {"value": "dhl", "label": "DHL"},
+                        {"value": "dhl_private", "label": "DHL Privat"},
                         {"value": "post", "label": "POST (INTERNETMARKE)"},
                         {"value": "test", "label": "TEST"},
                     ],
                     values["shipping_carrier"],
                 )
-            elif active_name in {"shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_post"}:
-                values[active_name] = choice_dialog(
+            elif active_name in {"shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post"}:
+                printer_name = ""
+                title = "Labelformat"
+                if active_name == "shipping_label_format_gls":
+                    printer_name = values.get("shipping_label_printer_gls") or values.get("shipping_label_printer")
+                    title = "GLS Labelformat"
+                elif active_name == "shipping_label_format_dhl":
+                    printer_name = values.get("shipping_label_printer_dhl") or values.get("shipping_label_printer")
+                    title = "DHL Labelformat"
+                elif active_name == "shipping_label_format_dhl_private":
+                    printer_name = values.get("shipping_label_printer_dhl_private") or values.get("shipping_label_printer")
+                    title = "DHL Privat Labelformat"
+                elif active_name == "shipping_label_format_post":
+                    printer_name = values.get("shipping_label_printer_post") or values.get("shipping_label_printer")
+                    title = "POST Labelformat"
+                values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
+            elif active_name == "delivery_note_format":
+                values[active_name] = cups_media_dialog(
                     stdscr,
-                    "Labelformat",
-                    [
-                        {"value": "A6", "label": "A6"},
-                        {"value": "A5", "label": "A5"},
-                        {"value": "A4", "label": "A4"},
-                        {"value": "100x62", "label": "100x62 mm"},
-                    ],
+                    values.get("delivery_note_printer", ""),
                     values[active_name],
+                    "Lieferschein Format",
+                )
+            elif active_name == "dhl_private_use_test_api":
+                values["dhl_private_use_test_api"] = choice_dialog(
+                    stdscr,
+                    "DHL Privat Testmodus",
+                    [
+                        {"value": "ja", "label": "Ja"},
+                        {"value": "nein", "label": "Nein"},
+                    ],
+                    values["dhl_private_use_test_api"],
                 )
             elif active_name == "shipping_services_display":
                 values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
@@ -3857,15 +4111,18 @@ def settings_dialog(stdscr):
         "location_regex_platz": values["location_regex_platz"].strip(),
         "picklist_printer": values["picklist_printer"].strip(),
         "delivery_note_printer": values["delivery_note_printer"].strip(),
+        "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
         "shipping_label_printer": values["shipping_label_printer"].strip(),
         "shipping_label_printer_gls": values["shipping_label_printer_gls"].strip(),
         "shipping_label_printer_dhl": values["shipping_label_printer_dhl"].strip(),
+        "shipping_label_printer_dhl_private": values["shipping_label_printer_dhl_private"].strip(),
         "shipping_label_printer_post": values["shipping_label_printer_post"].strip(),
         "shipping_carrier": values["shipping_carrier"].strip().lower(),
         "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
         "shipping_label_format_gls": _normalize_shipping_label_format(values["shipping_label_format_gls"].strip()),
         "shipping_label_format_dhl": _normalize_shipping_label_format(values["shipping_label_format_dhl"].strip()),
+        "shipping_label_format_dhl_private": _normalize_shipping_label_format(values["shipping_label_format_dhl_private"].strip()),
         "shipping_label_format_post": _normalize_shipping_label_format(values["shipping_label_format_post"].strip()),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
@@ -3874,9 +4131,16 @@ def settings_dialog(stdscr):
         "gls_password": values["gls_password"],
         "gls_contact_id": values["gls_contact_id"].strip(),
         "post_api_url": values["post_api_url"].strip(),
+        "post_api_key": values["post_api_key"].strip(),
+        "post_api_secret": values["post_api_secret"].strip(),
         "post_user": values["post_user"].strip(),
         "post_password": values["post_password"],
         "post_partner_id": values["post_partner_id"].strip(),
+        "dhl_private_api_url": values["dhl_private_api_url"].strip(),
+        "dhl_private_api_test_url": values["dhl_private_api_test_url"].strip(),
+        "dhl_private_api_key": values["dhl_private_api_key"].strip(),
+        "dhl_private_api_secret": values["dhl_private_api_secret"].strip(),
+        "dhl_private_use_test_api": values["dhl_private_use_test_api"] == "ja",
         "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
         "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
         "delivery_note_logo_source": values["delivery_note_logo_source"].strip(),
@@ -3948,17 +4212,19 @@ def settings_dialog(stdscr):
                 message_box(stdscr, t("error"), "LS Logo Datei existiert nicht.")
                 return
             updated["delivery_note_logo_source"] = logo_path
-    if updated["shipping_carrier"] not in {"gls", "dhl", "post", "test"}:
-        message_box(stdscr, t("error"), "Versand Dienstleister nur 'gls', 'dhl', 'post' oder 'test'.")
+    if updated["shipping_carrier"] not in {"gls", "dhl_private", "post", "test"}:
+        message_box(stdscr, t("error"), "Versand Dienstleister nur 'gls', 'dhl_private', 'post' oder 'test'.")
         return
     if updated["shipping_label_output_dir"] and not os.path.isdir(updated["shipping_label_output_dir"]):
         message_box(stdscr, t("error"), "Versandlabel Ordner existiert nicht.")
         return
     allowed_formats = {"A6", "A5", "A4", "100x62"}
+    if not updated["delivery_note_format"]:
+        updated["delivery_note_format"] = "A4"
     if updated["shipping_label_format"] not in allowed_formats:
         message_box(stdscr, t("error"), "Labelformat nur A6, A5, A4 oder 100x62.")
         return
-    for key in ("shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_post"):
+    for key in ("shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post"):
         if updated[key] not in allowed_formats:
             message_box(stdscr, t("error"), f"{key} ungueltig.")
             return
@@ -3966,6 +4232,8 @@ def settings_dialog(stdscr):
         updated["shipping_label_format_gls"] = "A6"
     if not updated.get("shipping_label_format_dhl"):
         updated["shipping_label_format_dhl"] = "A5"
+    if not updated.get("shipping_label_format_dhl_private"):
+        updated["shipping_label_format_dhl_private"] = "A5"
     if not updated.get("shipping_label_format_post"):
         updated["shipping_label_format_post"] = "100x62"
     if not updated.get("shipping_label_format"):
@@ -3989,12 +4257,16 @@ def settings_dialog(stdscr):
             message_box(stdscr, t("error"), "GLS Daten fehlen (Settings oder PDF).")
             return
     if updated["shipping_carrier"] == "post":
-        has_post_settings = all(
-            updated[key]
-            for key in ("post_api_url", "post_user", "post_password", "post_partner_id")
-        )
-        if not has_post_settings:
+        has_post_settings = bool(updated["post_api_url"] and updated["post_partner_id"])
+        has_post_oauth = bool(updated["post_api_key"] and updated["post_api_secret"])
+        has_post_legacy = bool(updated["post_user"] and updated["post_password"])
+        if not has_post_settings or (not has_post_oauth and not has_post_legacy):
             message_box(stdscr, t("error"), "POST INTERNETMARKE Daten fehlen.")
+            return
+    if updated["shipping_carrier"] == "dhl_private":
+        active_url = updated["dhl_private_api_test_url"] if updated["dhl_private_use_test_api"] else updated["dhl_private_api_url"]
+        if not active_url or not updated["dhl_private_api_key"] or not updated["dhl_private_api_secret"]:
+            message_box(stdscr, t("error"), "DHL Privat Daten fehlen.")
             return
 
     try:
@@ -5202,8 +5474,11 @@ def _print_delivery_note_pdf_path(order, pdf_path):
     printer = SETTINGS["delivery_note_printer"].strip()
     if not printer:
         raise RuntimeError("Lieferschein Drucker nicht gesetzt.")
+    cmd = ["lp", "-d", printer, "-t", f"Lieferschein {order['order_name']}"]
+    cmd.extend(_cups_label_print_options(_delivery_note_format()))
+    cmd.append(pdf_path)
     subprocess.run(
-        ["lp", "-d", printer, "-t", f"Lieferschein {order['order_name']}", pdf_path],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,

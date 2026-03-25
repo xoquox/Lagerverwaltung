@@ -24,6 +24,7 @@ DEFAULT_SETTINGS = {
     "location_regex_platz": "^([1-9][0-9]?)$",
     "picklist_printer": "",
     "delivery_note_printer": "",
+    "delivery_note_format": "A4",
     "pdf_output_dir": "",
     "delivery_note_template_path": "",
     "delivery_note_logo_source": "",
@@ -48,9 +49,16 @@ DEFAULT_SETTINGS = {
     "gls_password": "",
     "gls_contact_id": "",
     "post_api_url": "",
+    "post_api_key": "",
+    "post_api_secret": "",
     "post_user": "",
     "post_password": "",
     "post_partner_id": "",
+    "dhl_private_api_url": "",
+    "dhl_private_api_test_url": "",
+    "dhl_private_api_key": "",
+    "dhl_private_api_secret": "",
+    "dhl_private_use_test_api": True,
 }
 
 

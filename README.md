@@ -30,10 +30,14 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
   PDF-Erzeugung fuer Lieferscheine auf Basis der Vorlage.
 - [app_settings.py](/home/chrisi/Lagerverwaltung/app_settings.py)
   Laedt Projekt-Defaults und lokale Overrides.
+- [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py)
+  Zentrale Versionsdefinition fuer Release- und Entwicklungsstaende.
 - [settings.json](/home/chrisi/Lagerverwaltung/settings.json)
   Versionierte Standardkonfiguration des Projekts.
 - [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md)
-  Laufende Aenderungshistorie nach Version.
+  Release-Historie fuer Stande auf `main`.
+- [RELEASE.md](/home/chrisi/Lagerverwaltung/RELEASE.md)
+  Branching-, Release- und Changelog-Regeln.
 - [shopify-sync/shopify_sync.py](/home/chrisi/Lagerverwaltung/shopify-sync/shopify_sync.py)
   Separater Shopify-Sync fuer Produkte, Bestand und Bestellungen.
 - [post/internetmarke_client.py](/home/chrisi/Lagerverwaltung/post/internetmarke_client.py)
@@ -85,6 +89,16 @@ Wichtige Einstellungen:
 - `shipping_services`, `shipping_packaging_weight_grams`
 - `gls_api_url`, `gls_user`, `gls_password`, `gls_contact_id`
 - `post_api_url`, `post_user`, `post_password`, `post_partner_id`
+
+## Entwicklung und Releases
+
+- `main` bleibt produktiv und enthaelt nur getestete Releases.
+- `develop` ist der Integrationsbranch fuer neue Arbeit.
+- Neue Aufgaben starten in `feature/*` und werden erst nach `develop`, dann nach `main` uebernommen.
+- `CHANGELOG.md` wird nur beim Merge eines fertigen Stands nach `main` ergaenzt.
+- `app_version.py` fuehrt die sichtbare Versionsnummer:
+  - Release auf `main`: z. B. `1.21.0`
+  - Entwicklungsstand auf `develop`: z. B. `1.21.0-dev`
 
 ## Shopify-Sync
 
