@@ -14,6 +14,7 @@ import re
 import ssl
 import subprocess
 import string
+import shutil
 import tempfile
 import textwrap
 import time
@@ -28,6 +29,7 @@ from app_version import APP_VERSION
 from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
 from dhl.private_client import DHLPrivateClient
 from post.internetmarke_client import InternetmarkeClient
+from post.product_catalog import find_post_product, list_post_base_products
 
 locale.setlocale(locale.LC_ALL, "")
 
@@ -42,13 +44,16 @@ POST_DIR = BASE_DIR / "post"
 POST_LABEL_DIR = POST_DIR / "labels"
 SHOPIFY_SYNC_SERVICE = "shopify-sync"
 _SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
+_POST_PAGE_FORMAT_CACHE = {"loaded_at": 0.0, "formats": []}
+_POST_SELECTION_CACHE = {}
+_SHIPPING_CARRIER_CACHE = "gls"
 
 SHIPPING_SERVICE_OPTIONS = [
-    {"code": "service_flexdelivery", "label": "FlexDelivery", "locked": True},
-    {"code": "service_addresseeonly", "label": "AddresseeOnly", "locked": False},
-    {"code": "service_guaranteed24", "label": "Guaranteed24", "locked": False},
-    {"code": "service_preadvice", "label": "PreAdvice", "locked": False},
-    {"code": "service_smsservice", "label": "SMS Service", "locked": False},
+    {"code": "service_flexdelivery", "label": "FlexDelivery - Zustelloptionen fuer den Empfaenger", "locked": False},
+    {"code": "service_addresseeonly", "label": "AddresseeOnly - Nur an den Empfaenger persoenlich", "locked": False},
+    {"code": "service_guaranteed24", "label": "Guaranteed24 - Garantierte Zustellung am naechsten Werktag", "locked": False},
+    {"code": "service_preadvice", "label": "PreAdvice - Vorabankuendigung an den Empfaenger", "locked": False},
+    {"code": "service_smsservice", "label": "SMS Service - Versandinfo per SMS", "locked": False},
 ]
 
 IMPLEMENTED_SHIPPING_CARRIERS = {"gls", "post", "dhl_private", "test"}
@@ -129,6 +134,45 @@ COUNTRY_NAME_DE = {
     "SK": "Slowakei",
     "SM": "San Marino",
     "VA": "Vatikanstadt",
+}
+
+COUNTRY_ALPHA3 = {
+    "AD": "AND",
+    "AT": "AUT",
+    "BE": "BEL",
+    "BG": "BGR",
+    "CH": "CHE",
+    "CY": "CYP",
+    "CZ": "CZE",
+    "DE": "DEU",
+    "DK": "DNK",
+    "EE": "EST",
+    "ES": "ESP",
+    "FI": "FIN",
+    "FR": "FRA",
+    "GB": "GBR",
+    "GR": "GRC",
+    "HR": "HRV",
+    "HU": "HUN",
+    "IE": "IRL",
+    "IS": "ISL",
+    "IT": "ITA",
+    "LI": "LIE",
+    "LT": "LTU",
+    "LU": "LUX",
+    "LV": "LVA",
+    "MC": "MCO",
+    "MT": "MLT",
+    "NL": "NLD",
+    "NO": "NOR",
+    "PL": "POL",
+    "PT": "PRT",
+    "RO": "ROU",
+    "SE": "SWE",
+    "SI": "SVN",
+    "SK": "SVK",
+    "SM": "SMR",
+    "VA": "VAT",
 }
 
 FULFILLMENT_FILTER_SEQUENCE = ["all", "open", "unfulfilled", "partial", "fulfilled"]
@@ -1727,6 +1771,180 @@ def load_post_credentials():
     return creds
 
 
+def _country_to_alpha3(country_value):
+    raw = (country_value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) == 3 and raw.isalpha():
+        return raw.upper()
+    if len(raw) == 2 and raw.isalpha():
+        return COUNTRY_ALPHA3.get(raw.upper(), "")
+    code2 = _gls_country_code(raw)
+    if code2:
+        return COUNTRY_ALPHA3.get(code2, "")
+    return ""
+
+
+def _post_sender_address(client):
+    profile = client.get_profile()
+    firstname = (profile.get("firstname") or "").strip()
+    lastname = (profile.get("lastname") or "").strip()
+    company = (profile.get("company") or "").strip()
+    street = " ".join(part for part in [(profile.get("street") or "").strip(), (profile.get("houseNo") or "").strip()] if part).strip()
+    sender_name = " ".join(part for part in [firstname, lastname] if part).strip() or company
+    address = {
+        "name": sender_name[:50],
+        "addressLine1": street[:50],
+        "postalCode": (profile.get("zip") or "").strip()[:5],
+        "city": (profile.get("city") or "").strip()[:40],
+        "country": (profile.get("country") or "DEU").strip().upper()[:3],
+    }
+    if company:
+        address["additionalName"] = company[:40]
+    return address
+
+
+def _post_receiver_address(order):
+    country = _country_to_alpha3(order.get("shipping_country"))
+    if not country:
+        raise ValueError("Empfaenger Land ungueltig oder fehlt (ISO2/ISO3 erwartet).")
+    address = {
+        "name": (order.get("shipping_name") or "").strip()[:50],
+        "addressLine1": (order.get("shipping_address1") or "").strip()[:50],
+        "postalCode": (order.get("shipping_zip") or "").strip()[:10],
+        "city": (order.get("shipping_city") or "").strip()[:40],
+        "country": country,
+    }
+    company = (order.get("shipping_company") or "").strip()
+    if company:
+        address["additionalName"] = company[:40]
+    address_line2 = (order.get("shipping_address2") or "").strip()
+    if address_line2:
+        address["addressLine2"] = address_line2[:60]
+    return address
+
+
+def _normalize_post_option_codes(option_codes):
+    result = []
+    for code in option_codes or []:
+        normalized = str(code or "").strip().lower()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return sorted(result)
+
+
+def _post_selection_summary(selection):
+    if not selection:
+        return "-"
+    label = (selection.get("selection_label") or selection.get("name") or "").strip()
+    price = str(selection.get("price_eur") or "").strip()
+    if label and price:
+        return f"{label} - {price} EUR"
+    return label or "-"
+
+
+def _post_selection_dialog(stdscr, scope="domestic"):
+    current = dict(_POST_SELECTION_CACHE.get(scope) or {})
+    selection = post_product_dialog(stdscr, current_selection=current, scope=scope)
+    if selection:
+        _POST_SELECTION_CACHE[scope] = dict(selection)
+    return selection
+
+
+def _get_post_page_formats(client, max_age_seconds=1800):
+    now = time.time()
+    if _POST_PAGE_FORMAT_CACHE["formats"] and now - _POST_PAGE_FORMAT_CACHE["loaded_at"] < max_age_seconds:
+        return _POST_PAGE_FORMAT_CACHE["formats"]
+    formats = client.get_page_formats()
+    _POST_PAGE_FORMAT_CACHE["formats"] = formats
+    _POST_PAGE_FORMAT_CACHE["loaded_at"] = now
+    return formats
+
+
+def _resolve_post_page_format_id(client, desired_format):
+    formats = _get_post_page_formats(client)
+    desired = _normalize_shipping_label_format(desired_format)
+    compact = desired.lower().replace(" ", "")
+    if compact.isdigit():
+        return int(compact)
+    for item in formats:
+        if str(item.get("id")) == compact:
+            return int(item["id"])
+
+    candidates = []
+    for item in formats:
+        name = (item.get("name") or "").strip()
+        layout = item.get("pageLayout") or {}
+        size = layout.get("size") or {}
+        width = size.get("x")
+        height = size.get("y")
+        dims = {int(round(width or 0)), int(round(height or 0))}
+        item_type = (item.get("pageType") or "").strip().upper()
+        address_possible = bool(item.get("isAddressPossible"))
+        score = 0
+        if compact in {"100x62", "62x100"}:
+            if dims == {62, 100}:
+                score += 100
+            if "BROTHER" in name.upper():
+                score += 50
+            if item_type == "LABELPRINTER":
+                score += 10
+            if address_possible:
+                score += 5
+        elif compact == "A4":
+            if "A4" in name.upper():
+                score += 100
+            if item_type == "REGULARPAGE":
+                score += 10
+            if address_possible:
+                score += 5
+        elif compact == "A5":
+            if "A5" in name.upper():
+                score += 100
+            if item_type == "LABELPRINTER":
+                score += 10
+            if address_possible:
+                score += 5
+        else:
+            if compact and compact in name.lower().replace(" ", ""):
+                score += 100
+        if score > 0:
+            candidates.append((score, int(item["id"])))
+    if candidates:
+        candidates.sort(key=lambda entry: (-entry[0], entry[1]))
+        return candidates[0][1]
+    raise RuntimeError(f"POST Seitenformat nicht gefunden: {desired_format}")
+
+
+def _resolve_post_product_selection(selection):
+    if not isinstance(selection, dict):
+        raise ValueError("POST Produkt fehlt.")
+    product_code = str(selection.get("product_code") or "").strip()
+    if product_code:
+        product = find_post_product(product_code)
+        if not product:
+            raise ValueError(f"POST Produktcode unbekannt: {product_code}")
+        return product
+
+    scope = str(selection.get("scope") or "domestic").strip()
+    base_key = str(selection.get("base_key") or "").strip()
+    option_codes = _normalize_post_option_codes(selection.get("option_codes") or [])
+    if not base_key:
+        raise ValueError("POST Grundprodukt fehlt.")
+
+    for group in list_post_base_products(scope=scope):
+        if group.get("base_key") != base_key:
+            continue
+        for bucket in ("untracked_variants", "tracked_variants"):
+            for variant in group.get(bucket, []):
+                if _normalize_post_option_codes(variant.get("addons") or []) == option_codes:
+                    product = find_post_product(variant["product_code"])
+                    if product:
+                        return product
+        break
+    raise ValueError("POST Produktkombination ist nicht verfuegbar.")
+
+
 def load_dhl_private_credentials():
     creds = {
         "api_url": (SETTINGS.get("dhl_private_api_url") or "").strip(),
@@ -2107,7 +2325,14 @@ def _build_test_label_pdf(order_name, shipment_reference, track_id):
 
 def _save_shipping_label_pdf(carrier, order_name, track_id, pdf_bytes, suffix=""):
     configured_dir = os.path.expanduser((SETTINGS.get("shipping_label_output_dir") or "").strip())
-    output_dir = Path(configured_dir) if configured_dir else GLS_LABEL_DIR
+    if configured_dir:
+        output_dir = Path(configured_dir)
+    else:
+        normalized_carrier = (carrier or "").strip().lower()
+        if normalized_carrier == "post":
+            output_dir = POST_LABEL_DIR
+        else:
+            output_dir = GLS_LABEL_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_order = _sanitize_order_reference(order_name)
     safe_track = "".join(ch for ch in (track_id or "unknown") if ch.isalnum() or ch in "-_") or "unknown"
@@ -2119,6 +2344,55 @@ def _save_shipping_label_pdf(carrier, order_name, track_id, pdf_bytes, suffix=""
     output_path.write_bytes(pdf_bytes)
     os.chmod(output_path, 0o600)
     return str(output_path)
+
+
+def _merge_pdf_files(pdf_paths, output_path):
+    valid_paths = [str(Path(path)) for path in pdf_paths if path and os.path.isfile(path)]
+    if not valid_paths:
+        raise RuntimeError("Keine PDF-Dateien zum Zusammenfassen gefunden.")
+    if len(valid_paths) == 1:
+        shutil.copyfile(valid_paths[0], output_path)
+        return output_path
+
+    try:
+        from pypdf import PdfWriter, PdfReader  # type: ignore
+
+        writer = PdfWriter()
+        for path in valid_paths:
+            reader = PdfReader(path)
+            for page in reader.pages:
+                writer.add_page(page)
+        with open(output_path, "wb") as handle:
+            writer.write(handle)
+        return output_path
+    except Exception:
+        pass
+
+    try:
+        from PyPDF2 import PdfWriter, PdfReader  # type: ignore
+
+        writer = PdfWriter()
+        for path in valid_paths:
+            reader = PdfReader(path)
+            for page in reader.pages:
+                writer.add_page(page)
+        with open(output_path, "wb") as handle:
+            writer.write(handle)
+        return output_path
+    except Exception:
+        pass
+
+    if shutil.which("pdfunite"):
+        subprocess.run(
+            ["pdfunite", *valid_paths, output_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        return output_path
+
+    raise RuntimeError("PDF-Zusammenfuehrung nicht verfuegbar (pypdf/PyPDF2/pdfunite fehlt).")
 
 
 def _normalize_shipping_label_format(value):
@@ -2193,7 +2467,7 @@ def _cups_label_print_options(label_format):
 
 
 def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
-    carrier_key = (carrier or active_shipping_carrier() or "gls").strip().lower()
+    carrier_key = effective_shipping_carrier(carrier)
     printer = _shipping_printer_for_carrier(carrier_key)
     if not printer:
         message_box(stdscr, "Fehler", f"Bitte Shift+F11: {carrier_key.upper()} Label Drucker setzen.")
@@ -2349,9 +2623,67 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
         password=_creds["password"],
     )
     client.validate()
-    _weight_value = float(weight_kg)
+    try:
+        _weight_value = float(weight_kg)
+    except (TypeError, ValueError):
+        raise ValueError("Gewicht ist ungueltig.")
+    if _weight_value <= 0:
+        raise ValueError("Gewicht muss groesser als 0 sein.")
+    _weight_value = round(_weight_value, 3)
     _reference = _sanitize_order_reference(shipment_reference or order["order_name"])
-    raise RuntimeError("POST INTERNETMARKE ist vorbereitet, API-Call folgt im naechsten Schritt.")
+    product = _resolve_post_product_selection(service_codes)
+    page_format_id = _resolve_post_page_format_id(client, _shipping_format_for_carrier("post"))
+    sender = _post_sender_address(client)
+    receiver = _post_receiver_address(order)
+    total_cents = int(product.get("price_cents") or 0)
+    if total_cents <= 0:
+        raise RuntimeError("POST Produktpreis fehlt oder ist ungueltig.")
+
+    position = {
+        "productCode": int(product["product_code"]),
+        "voucherLayout": "ADDRESS_ZONE",
+        "positionType": "AppShoppingCartPDFPosition",
+        "position": {"page": 1, "labelX": 1, "labelY": 1},
+        "address": {
+            "sender": sender,
+            "receiver": receiver,
+        },
+    }
+    response, pdf_blob = client.checkout_pdf_binary(
+        shop_order_id=_reference[:18],
+        total_cents=total_cents,
+        page_format_id=page_format_id,
+        positions=[position],
+        create_manifest=False,
+        create_shipping_list="0",
+        dpi="DPI300",
+        direct_checkout=True,
+    )
+    shopping_cart = response.get("shoppingCart") if isinstance(response.get("shoppingCart"), dict) else {}
+    voucher_list = shopping_cart.get("voucherList") if isinstance(shopping_cart.get("voucherList"), list) else []
+    first_voucher = voucher_list[0] if voucher_list else {}
+    track_id = (first_voucher.get("trackId") or "").strip() or (first_voucher.get("voucherId") or "").strip()
+    parcel_number = (first_voucher.get("trackId") or "").strip() or None
+    label_path = _save_shipping_label_pdf("post", order["order_name"], track_id or _reference, pdf_blob)
+    label_id = insert_gls_label_history(
+        order=order,
+        shipment_reference=_reference,
+        track_id=track_id or _reference,
+        parcel_number=parcel_number,
+        label_path=label_path,
+        status="CREATED",
+        weight_kg=_weight_value,
+        carrier="post",
+    )
+    return {
+        "label_id": label_id,
+        "track_id": track_id or _reference,
+        "parcel_number": parcel_number,
+        "label_path": label_path,
+        "shipment_reference": _reference,
+        "post_product_code": product["product_code"],
+        "post_product_name": product["name"],
+    }
 
 
 def dhl_private_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
@@ -2463,8 +2795,6 @@ def _normalize_shipping_services(raw_value):
         if code in allowed and code not in normalized:
             normalized.append(code)
 
-    if "service_flexdelivery" not in normalized:
-        normalized.insert(0, "service_flexdelivery")
     return normalized
 
 
@@ -2474,7 +2804,7 @@ def _shipping_services_summary(service_codes):
     return ", ".join(labels)
 
 
-def shipping_services_dialog(stdscr, current_services):
+def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False):
     selected_codes = set(_normalize_shipping_services(current_services))
     selected = 0
     top_index = 0
@@ -2512,7 +2842,7 @@ def shipping_services_dialog(stdscr, current_services):
             else:
                 win.addstr(y_pos, 1, line.ljust(width - 2))
 
-        footer = "Space/Enter umschalten  F2 Speichern  F9 Zurueck"
+        footer = "Space umschalten  Enter Uebernehmen  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 1, 1, _fit(footer, width - 2))
         win.attrset(curses.color_pair(1))
@@ -2520,8 +2850,10 @@ def shipping_services_dialog(stdscr, current_services):
 
         key = win.get_wch()
         if key in (27, curses.KEY_F9):
+            if cancel_returns_none:
+                return None
             return _normalize_shipping_services(current_services)
-        if key == curses.KEY_F2:
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return _normalize_shipping_services(list(selected_codes))
         if key == curses.KEY_DOWN:
             selected = move_selection(SHIPPING_SERVICE_OPTIONS, selected, 1)
@@ -2529,7 +2861,7 @@ def shipping_services_dialog(stdscr, current_services):
         if key == curses.KEY_UP:
             selected = move_selection(SHIPPING_SERVICE_OPTIONS, selected, -1)
             continue
-        if key in (" ", 10, 13, "\n", "\r", curses.KEY_ENTER):
+        if key == " ":
             option = SHIPPING_SERVICE_OPTIONS[selected]
             if option.get("locked"):
                 continue
@@ -2540,22 +2872,29 @@ def shipping_services_dialog(stdscr, current_services):
                 selected_codes.add(code)
 
 
-def active_shipping_carrier():
-    carrier = (SETTINGS.get("shipping_carrier") or "gls").strip().lower()
-    if carrier not in {"gls", "dhl_private", "post", "test"}:
-        return "gls"
-    return carrier
+def remember_shipping_carrier(carrier):
+    global _SHIPPING_CARRIER_CACHE
+    normalized = (carrier or "").strip().lower()
+    if normalized in {"gls", "post", "test"}:
+        _SHIPPING_CARRIER_CACHE = normalized
+
+
+def last_shipping_carrier():
+    cached = (_SHIPPING_CARRIER_CACHE or "").strip().lower()
+    if cached in {"gls", "post", "test"}:
+        return cached
+    return "gls"
 
 
 def effective_shipping_carrier(requested_carrier=None):
-    carrier = (requested_carrier or active_shipping_carrier() or "gls").strip().lower()
+    carrier = (requested_carrier or last_shipping_carrier() or "gls").strip().lower()
     if carrier in IMPLEMENTED_SHIPPING_CARRIERS:
         return carrier
     return "gls"
 
 
 def create_shipping_label(order, weight_kg=None, shipment_reference=None, service_codes=None, carrier=None):
-    selected_carrier = (carrier or active_shipping_carrier()).strip().lower()
+    selected_carrier = effective_shipping_carrier(carrier)
     if weight_kg is None:
         weight_kg, _total_grams = calculate_order_shipping_weight(order)
     if selected_carrier == "gls":
@@ -3290,7 +3629,7 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
     active = max(0, min(initial_active, len(fields) - 1))
     cursor_positions = [len(value) for value in values]
     scroll_offsets = [0 for _ in values]
-    footer = footer_text or "Enter weiter  ↑↓ wechseln  F2 Speichern  F9 Abbrechen"
+    footer = footer_text or "Enter weiter/speichern  ↑↓ wechseln  F9 Abbrechen"
     extra_actions = extra_actions or []
     field_validators = field_validators or {}
 
@@ -3371,10 +3710,13 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
                     "__active__": active,
                 }
 
-        if key == curses.KEY_F2:
-            return {fields[i]["name"]: values[i] for i in range(len(fields))}
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            if active >= len(fields) - 1:
+                return {fields[i]["name"]: values[i] for i in range(len(fields))}
+            active = (active + 1) % len(fields)
+            continue
 
-        if key in (curses.KEY_DOWN, '\n'):
+        if key == curses.KEY_DOWN:
             active = (active + 1) % len(fields)
             continue
 
@@ -3771,7 +4113,7 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
 
         for row_index, option in enumerate(options[top_index:top_index + visible_rows]):
             real_index = top_index + row_index
-            line = f"{option['label']} ({option['value']})"
+            line = str(option.get("label") or option.get("value") or "")
             y_pos = 2 + row_index
             if real_index == selected:
                 win.attrset(curses.color_pair(2))
@@ -3798,6 +4140,167 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
             selected = move_selection(options, selected, -visible_rows)
         elif key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return options[selected]["value"]
+
+
+def toggle_choice_dialog(stdscr, title, options, selected_values, footer_text=None):
+    selected_set = {str(value) for value in (selected_values or [])}
+    selected = 0
+    top_index = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(86, w - 4)
+        height = min(max(10, len(options) + 5), h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+
+        visible_rows = max(1, height - 4)
+        if selected < top_index:
+            top_index = selected
+        if selected >= top_index + visible_rows:
+            top_index = selected - visible_rows + 1
+
+        for row_index, option in enumerate(options[top_index:top_index + visible_rows]):
+            real_index = top_index + row_index
+            marker = "[x]" if str(option["value"]) in selected_set else "[ ]"
+            line = f"{marker} {option['label']}"
+            y_pos = 2 + row_index
+            if real_index == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(y_pos, 1, _fit(line, width - 2).ljust(width - 2))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(y_pos, 1, _fit(line, width - 2).ljust(width - 2))
+
+        footer = footer_text or "Space umschalten  Enter Uebernehmen  F9 Zurueck"
+        win.addstr(height - 2, 2, _fit(footer, width - 4))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return None
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            return [option["value"] for option in options if str(option["value"]) in selected_set]
+        if key == curses.KEY_DOWN:
+            selected = move_selection(options, selected, 1)
+            continue
+        if key == curses.KEY_UP:
+            selected = move_selection(options, selected, -1)
+            continue
+        if key == " ":
+            value = str(options[selected]["value"])
+            if value in selected_set:
+                selected_set.remove(value)
+            else:
+                selected_set.add(value)
+
+
+def _post_base_product_options(scope="domestic"):
+    options = []
+    for group in list_post_base_products(scope=scope):
+        label = group.get("base_label") or group.get("base_key") or "-"
+        prices = [item.get("price_cents") for item in group.get("untracked_variants", []) + group.get("tracked_variants", []) if item.get("price_cents") is not None]
+        if prices:
+            min_price = min(prices) / 100.0
+            label = f"{label} ab {min_price:.2f} EUR"
+        options.append({"value": group["base_key"], "label": label})
+    return options
+
+
+def _post_group_for_base_key(base_key, scope="domestic"):
+    for group in list_post_base_products(scope=scope):
+        if group.get("base_key") == base_key:
+            return group
+    return None
+
+
+def post_product_dialog(stdscr, current_selection=None, scope="domestic"):
+    current_selection = current_selection or {}
+    base_key = str(current_selection.get("base_key") or "").strip()
+    options = _post_base_product_options(scope=scope)
+    if not options:
+        message_box(stdscr, "POST", "Keine POST-Produkte verfuegbar.")
+        return None
+    if not base_key:
+        base_key = options[0]["value"]
+
+    while True:
+        chosen_base = choice_dialog(
+            stdscr,
+            "POST Grundprodukt",
+            options,
+            base_key,
+            cancel_returns_none=True,
+        )
+        if chosen_base is None:
+            return None
+        group = _post_group_for_base_key(chosen_base, scope=scope)
+        if not group:
+            message_box(stdscr, "POST", "POST Grundprodukt nicht gefunden.")
+            return None
+
+        selected_option_codes = _normalize_post_option_codes(current_selection.get("option_codes") or [])
+        available_option_codes = group.get("option_codes") or []
+        selected_option_codes = [code for code in selected_option_codes if code in available_option_codes]
+        if available_option_codes:
+            option_items = []
+            option_label_map = {}
+            for variant in group.get("untracked_variants", []) + group.get("tracked_variants", []):
+                for code, label in zip(variant.get("addons") or [], variant.get("addon_labels") or []):
+                    option_label_map.setdefault(code, label)
+            for code in available_option_codes:
+                option_label = option_label_map.get(code, code)
+                matching_prices = [
+                    (variant.get("price_cents") or 0) / 100.0
+                    for variant in group.get("untracked_variants", []) + group.get("tracked_variants", [])
+                    if code in (variant.get("addons") or [])
+                ]
+                if matching_prices:
+                    option_label = f"{option_label} ab {min(matching_prices):.2f} EUR"
+                option_items.append({"value": code, "label": option_label})
+            toggled = toggle_choice_dialog(
+                stdscr,
+                f"POST Optionen: {group.get('base_label')}",
+                option_items,
+                selected_option_codes,
+                footer_text="Space umschalten  Enter Weiter  F9 Zurueck",
+            )
+            if toggled is None:
+                base_key = chosen_base
+                continue
+            selected_option_codes = _normalize_post_option_codes(toggled)
+        else:
+            selected_option_codes = []
+
+        try:
+            product = _resolve_post_product_selection(
+                {
+                    "scope": scope,
+                    "base_key": chosen_base,
+                    "option_codes": selected_option_codes,
+                }
+            )
+        except Exception as exc:
+            message_box(stdscr, "POST", str(exc)[:56])
+            base_key = chosen_base
+            continue
+
+        return {
+            "scope": scope,
+            "base_key": chosen_base,
+            "option_codes": selected_option_codes,
+            "product_code": product["product_code"],
+            "selection_label": product["selection_label"],
+            "name": product["name"],
+            "price_eur": product["price_eur"],
+        }
 
 
 def settings_dialog(stdscr):
@@ -3829,7 +4332,6 @@ def settings_dialog(stdscr):
         "shipping_label_printer_dhl": SETTINGS.get("shipping_label_printer_dhl", ""),
         "shipping_label_printer_dhl_private": SETTINGS.get("shipping_label_printer_dhl_private", SETTINGS.get("shipping_label_printer_dhl", "")),
         "shipping_label_printer_post": SETTINGS.get("shipping_label_printer_post", ""),
-        "shipping_carrier": (SETTINGS.get("shipping_carrier") or "gls").strip().lower(),
         "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
         "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
         "shipping_label_format_gls": _normalize_shipping_label_format(
@@ -3913,7 +4415,6 @@ def settings_dialog(stdscr):
         {
             "title": "Versand",
             "fields": [
-                ("shipping_carrier", "field_shipping_carrier"),
                 ("shipping_label_output_dir", "field_shipping_label_output_dir"),
                 ("shipping_label_format_gls", "field_shipping_format_gls"),
                 ("shipping_label_format_dhl_private", "field_shipping_format_dhl_private"),
@@ -4035,7 +4536,7 @@ def settings_dialog(stdscr):
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "F5 <- Tab  F6 Tab ->  F3 Drucker  F4 Format  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "Tab naechster Tab  Shift+Tab vorheriger Tab  F3 Drucker  F4 Format  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 2, 1, " " * (width - 2))
         win.addstr(height - 2, 1, _fit(footer, width - 2))
@@ -4052,11 +4553,11 @@ def settings_dialog(stdscr):
             return
         if key == curses.KEY_F2:
             break
-        if key == curses.KEY_F5:
-            active_tab = (active_tab - 1) % len(tabs)
-            continue
-        if key == curses.KEY_F6:
+        if key == "\t":
             active_tab = (active_tab + 1) % len(tabs)
+            continue
+        if key == curses.KEY_BTAB:
+            active_tab = (active_tab - 1) % len(tabs)
             continue
         if key == curses.KEY_DOWN:
             active_field_by_tab[active_tab] = (active_index + 1) % max(1, len(tab_fields))
@@ -4154,18 +4655,6 @@ def settings_dialog(stdscr):
                 "shipping_label_printer_post",
             }:
                 values[active_name] = cups_printer_dialog(stdscr, values[active_name])
-            elif active_name == "shipping_carrier":
-                values["shipping_carrier"] = choice_dialog(
-                    stdscr,
-                    "Versand Dienstleister",
-                    [
-                        {"value": "gls", "label": "GLS"},
-                        {"value": "dhl_private", "label": "DHL Privat"},
-                        {"value": "post", "label": "POST (INTERNETMARKE)"},
-                        {"value": "test", "label": "TEST"},
-                    ],
-                    values["shipping_carrier"],
-                )
             elif active_name in {"shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post"}:
                 printer_name = ""
                 title = "Labelformat"
@@ -4239,7 +4728,6 @@ def settings_dialog(stdscr):
         "shipping_label_printer_dhl": values["shipping_label_printer_dhl"].strip(),
         "shipping_label_printer_dhl_private": values["shipping_label_printer_dhl_private"].strip(),
         "shipping_label_printer_post": values["shipping_label_printer_post"].strip(),
-        "shipping_carrier": values["shipping_carrier"].strip().lower(),
         "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
         "shipping_label_format_gls": _normalize_shipping_label_format(values["shipping_label_format_gls"].strip()),
@@ -4334,9 +4822,6 @@ def settings_dialog(stdscr):
                 message_box(stdscr, t("error"), "LS Logo Datei existiert nicht.")
                 return
             updated["delivery_note_logo_source"] = logo_path
-    if updated["shipping_carrier"] not in {"gls", "dhl_private", "post", "test"}:
-        message_box(stdscr, t("error"), "Versand Dienstleister nur 'gls', 'dhl_private', 'post' oder 'test'.")
-        return
     if updated["shipping_label_output_dir"] and not os.path.isdir(updated["shipping_label_output_dir"]):
         message_box(stdscr, t("error"), "Versandlabel Ordner existiert nicht.")
         return
@@ -4369,27 +4854,6 @@ def settings_dialog(stdscr):
         message_box(stdscr, t("error"), "Verpackung Gewicht darf nicht negativ sein.")
         return
     updated["shipping_packaging_weight_grams"] = packaging_weight
-    if updated["shipping_carrier"] == "gls":
-        has_gls_settings = all(
-            updated[key]
-            for key in ("gls_api_url", "gls_user", "gls_password", "gls_contact_id")
-        )
-        has_gls_pdf = any(GLS_DIR.glob("*.pdf"))
-        if not has_gls_settings and not has_gls_pdf:
-            message_box(stdscr, t("error"), "GLS Daten fehlen (Settings oder PDF).")
-            return
-    if updated["shipping_carrier"] == "post":
-        has_post_settings = bool(updated["post_api_url"] and updated["post_partner_id"])
-        has_post_oauth = bool(updated["post_api_key"] and updated["post_api_secret"])
-        has_post_legacy = bool(updated["post_user"] and updated["post_password"])
-        if not has_post_settings or (not has_post_oauth and not has_post_legacy):
-            message_box(stdscr, t("error"), "POST INTERNETMARKE Daten fehlen.")
-            return
-    if updated["shipping_carrier"] == "dhl_private":
-        active_url = updated["dhl_private_api_test_url"] if updated["dhl_private_use_test_api"] else updated["dhl_private_api_url"]
-        if not active_url or not updated["dhl_private_api_key"] or not updated["dhl_private_api_secret"]:
-            message_box(stdscr, t("error"), "DHL Privat Daten fehlen.")
-            return
 
     try:
         test_db_connection(updated)
@@ -5360,7 +5824,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         for row_idx, order in enumerate(selected_orders[top_index:top_index + visible_rows]):
             real_idx = top_index + row_idx
             order_id = order["order_id"]
-            carrier = effective_shipping_carrier(assignments.get(order_id, active_shipping_carrier()))
+            carrier = effective_shipping_carrier(assignments.get(order_id))
             line = _fit(f"{_fit(order['order_name'], 12)}  {carrier.upper()}  {format_address(order)}", width - 3)
             y_pos = 2 + row_idx
             if real_idx == selected:
@@ -5370,7 +5834,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
             else:
                 win.addstr(y_pos, 1, line.ljust(width - 2))
 
-        footer = "↑↓ Auftrag  ←/→ oder Space Carrier wechseln  F2 Uebernehmen  F9 Zurueck"
+        footer = "↑↓ Auftrag  ←/→ oder Space Carrier wechseln  Enter Uebernehmen  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 1, 1, _fit(footer, width - 2))
         win.attrset(curses.color_pair(1))
@@ -5379,7 +5843,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         key = win.get_wch()
         if key in (27, curses.KEY_F9):
             return current_map
-        if key == curses.KEY_F2:
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return assignments
         if key == curses.KEY_DOWN:
             selected = move_selection(selected_orders, selected, 1)
@@ -5389,7 +5853,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
             continue
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, " ", 10, 13, "\n", "\r", curses.KEY_ENTER):
             order_id = selected_orders[selected]["order_id"]
-            current = effective_shipping_carrier(assignments.get(order_id, active_shipping_carrier()))
+            current = effective_shipping_carrier(assignments.get(order_id))
             current_index = options.index(current) if current in options else 0
             if key == curses.KEY_LEFT:
                 new_index = (current_index - 1) % len(options)
@@ -5399,17 +5863,21 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
 
 
 def _execution_carrier_dialog(stdscr, current_carrier=None):
-    fallback = effective_shipping_carrier(current_carrier or active_shipping_carrier() or "gls")
-    return choice_dialog(
+    fallback = effective_shipping_carrier(current_carrier or last_shipping_carrier() or "gls")
+    chosen = choice_dialog(
         stdscr,
         "Versand Dienstleister",
         [
             {"value": "gls", "label": "GLS"},
+            {"value": "post", "label": "POST"},
             {"value": "test", "label": "TEST"},
         ],
         fallback,
         cancel_returns_none=True,
     )
+    if chosen:
+        remember_shipping_carrier(chosen)
+    return chosen
 
 
 def select_partial_items_dialog(stdscr, order, order_items):
@@ -5470,7 +5938,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
             else:
                 win.addstr(y_pos, 1, line.ljust(width - 2))
 
-        footer = "↑↓ Position  ←/→ Menge  Space Voll/0  F2 Weiter  F9 Zurück"
+        footer = "↑↓ Position  ←/→ Menge  Space Voll/0  Enter Weiter  F9 Zurück"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 1, 1, _fit(footer, width - 2))
         win.attrset(curses.color_pair(1))
@@ -5502,7 +5970,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
             if row["remaining_quantity"] > 0:
                 row["selected_quantity"] = 0 if int(row["selected_quantity"]) > 0 else row["remaining_quantity"]
             continue
-        if key == curses.KEY_F2:
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             picked = [row for row in editable if int(row.get("selected_quantity") or 0) > 0]
             if not picked:
                 message_box(stdscr, "Teilausfuehrung", "Bitte mindestens eine Menge > 0 waehlen.")
@@ -5544,9 +6012,22 @@ def run_partial_execution_for_order(stdscr, order, order_items):
     if not selected_items:
         return
 
-    carrier = _execution_carrier_dialog(stdscr, effective_shipping_carrier(active_shipping_carrier()))
+    carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
     if not carrier:
         return
+    carrier_options = None
+    if carrier == "post":
+        carrier_options = _post_selection_dialog(stdscr, scope="domestic")
+        if not carrier_options:
+            return
+    elif carrier == "gls":
+        carrier_options = shipping_services_dialog(
+            stdscr,
+            SETTINGS.get("shipping_services", []),
+            cancel_returns_none=True,
+        )
+        if carrier_options is None:
+            return
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
         return
@@ -5563,7 +6044,7 @@ def run_partial_execution_for_order(stdscr, order, order_items):
             order,
             weight_kg=selected_weight_kg,
             shipment_reference=f"{order.get('order_name') or ''}-PART",
-            service_codes=None,
+            service_codes=carrier_options,
             carrier=carrier,
         )
         if print_mode in {"both", "label"} and created.get("label_path"):
@@ -5608,6 +6089,22 @@ def _print_delivery_note_pdf_path(order, pdf_path):
     )
 
 
+def _print_merged_delivery_note_pdf(pdf_path, title="Lieferschein Sammeldruck"):
+    printer = SETTINGS["delivery_note_printer"].strip()
+    if not printer:
+        raise RuntimeError("Lieferschein Drucker nicht gesetzt.")
+    cmd = ["lp", "-d", printer, "-t", title]
+    cmd.extend(_cups_label_print_options(_delivery_note_format()))
+    cmd.append(pdf_path)
+    subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+
+
 def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     if not orders:
         message_box(stdscr, "Bulk", "Keine Bestellungen vorhanden.")
@@ -5622,6 +6119,22 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
         message_box(stdscr, "Bulk", "Bitte zuerst Auftraege markieren (Space).")
         return
 
+    carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
+    if not carrier:
+        return
+    carrier_options = None
+    if carrier == "post":
+        carrier_options = _post_selection_dialog(stdscr, scope="domestic")
+        if not carrier_options:
+            return
+    elif carrier == "gls":
+        carrier_options = shipping_services_dialog(
+            stdscr,
+            SETTINGS.get("shipping_services", []),
+            cancel_returns_none=True,
+        )
+        if carrier_options is None:
+            return
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
         return
@@ -5629,18 +6142,19 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     if shopify_mode is None:
         return
 
-    carrier_map = {row["order_id"]: effective_shipping_carrier(active_shipping_carrier()) for row in selected_orders}
-    if confirm_box(stdscr, "Bulk", "Dienstleister je Auftrag festlegen?", default_yes=False):
-        carrier_map = bulk_carrier_per_order_dialog(stdscr, selected_orders, carrier_map)
+    carrier_map = {row["order_id"]: carrier for row in selected_orders}
 
     success_count = 0
     failure_count = 0
     queued_count = 0
     queue_failed_count = 0
     last_failure_summary = ""
+    label_paths_to_print = []
+    note_paths_to_print = []
+    printed_label_ids = []
 
     for order in selected_orders:
-        carrier = effective_shipping_carrier(carrier_map.get(order["order_id"], active_shipping_carrier()))
+        carrier = effective_shipping_carrier(carrier_map.get(order["order_id"]))
         try:
             order_items = order_items_cache.get(order["order_id"])
             if order_items is None:
@@ -5648,15 +6162,20 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                 order_items_cache[order["order_id"]] = order_items
 
             order_weight_kg, _order_weight_grams = calculate_order_shipping_weight(order, order_items)
-            created = create_shipping_label(order, weight_kg=order_weight_kg, carrier=carrier)
+            created = create_shipping_label(
+                order,
+                weight_kg=order_weight_kg,
+                carrier=carrier,
+                service_codes=carrier_options,
+            )
             if print_mode in {"both", "label"} and created.get("label_path"):
-                printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier.upper()} {created['shipment_reference']}", carrier=carrier)
-                if printed and created.get("label_id") is not None:
-                    update_gls_label_status(created["label_id"], "PRINTED")
+                label_paths_to_print.append(created["label_path"])
+                if created.get("label_id") is not None:
+                    printed_label_ids.append(created["label_id"])
 
             note_path, _rows = create_delivery_note_pdf(order, order_items)
             if print_mode in {"both", "note"}:
-                _print_delivery_note_pdf_path(order, note_path)
+                note_paths_to_print.append(note_path)
 
             if shopify_mode == "queue" and created.get("label_id") is not None:
                 labels_for_order = list_gls_labels(order["order_id"])
@@ -5701,18 +6220,51 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
         )
         return
 
+    try:
+        with tempfile.TemporaryDirectory(prefix="lager-bulk-print-") as temp_dir:
+            if label_paths_to_print:
+                merged_label_pdf = os.path.join(temp_dir, f"shipping_labels_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+                _merge_pdf_files(label_paths_to_print, merged_label_pdf)
+                printed = _print_pdf_via_lp(stdscr, merged_label_pdf, f"{carrier.upper()} Sammeldruck", carrier=carrier)
+                if printed:
+                    for label_id in printed_label_ids:
+                        update_gls_label_status(label_id, "PRINTED")
+            if note_paths_to_print:
+                merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+                _merge_pdf_files(note_paths_to_print, merged_note_pdf)
+                _print_merged_delivery_note_pdf(merged_note_pdf)
+    except Exception as exc:
+        LOGGER.exception("Bulk-Sammeldruck fehlgeschlagen carrier=%s print_mode=%s", carrier, print_mode)
+        PRINT_LOGGER.exception("Bulk-Sammeldruck fehlgeschlagen carrier=%s", carrier)
+        selected_order_ids.clear()
+        message_box(stdscr, "Bulk", f"Druckfehler: {str(exc)[:22]} {PRINT_LOG_PATH.name}"[:56])
+        return
+
     selected_order_ids.clear()
     message_box(stdscr, "Bulk", f"Fertig OK:{success_count} Err:{failure_count} Q:{queued_count}/{queue_failed_count}"[:56])
 
 
 def create_shipping_label_for_order(stdscr, order):
-    resolved_carrier = effective_shipping_carrier(active_shipping_carrier())
-    carrier = resolved_carrier.upper()
-    if not confirm_box(stdscr, "Versandlabel", f"Label fuer {order['order_name']} erstellen?", default_yes=False):
+    resolved_carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
+    if not resolved_carrier:
         return
+    carrier = resolved_carrier.upper()
+    carrier_options = None
+    if resolved_carrier == "post":
+        carrier_options = _post_selection_dialog(stdscr, scope="domestic")
+        if not carrier_options:
+            return
+    elif resolved_carrier == "gls":
+        carrier_options = shipping_services_dialog(
+            stdscr,
+            SETTINGS.get("shipping_services", []),
+            cancel_returns_none=True,
+        )
+        if carrier_options is None:
+            return
     order_weight_kg, total_grams = calculate_order_shipping_weight(order)
     try:
-        created = create_shipping_label(order, weight_kg=order_weight_kg, carrier=resolved_carrier)
+        created = create_shipping_label(order, weight_kg=order_weight_kg, service_codes=carrier_options, carrier=resolved_carrier)
     except ValueError as exc:
         message_box(stdscr, "Versandlabel", str(exc)[:56])
         return
@@ -5733,6 +6285,9 @@ def create_shipping_label_for_order(stdscr, order):
 
 
 def create_manual_shipping_label(stdscr):
+    carrier_key = _execution_carrier_dialog(stdscr, last_shipping_carrier())
+    if not carrier_key:
+        return
     state = {
         "name": "",
         "street": "",
@@ -5744,6 +6299,7 @@ def create_manual_shipping_label(stdscr):
     active = 0
     country_code = "DE"
     selected_services = _normalize_shipping_services(SETTINGS.get("shipping_services", []))
+    post_selection = dict(_POST_SELECTION_CACHE.get("domestic") or {})
     print_mode = "print"
 
     while True:
@@ -5755,15 +6311,18 @@ def create_manual_shipping_label(stdscr):
             {"name": "reference", "label": "Referenz", "value": state["reference"]},
             {"name": "weight_grams", "label": "Gewicht (g)", "value": state["weight_grams"]},
             {"name": "country_display", "label": "Land (F3)", "value": _manual_label_country_display(country_code)},
-            {"name": "services_display", "label": "Services (F4)", "value": _shipping_services_summary(selected_services)},
-            {"name": "print_mode", "label": "Ausgabe (F5)", "value": "PDF + Drucken" if print_mode == "print" else "Nur PDF"},
         ]
+        if carrier_key == "post":
+            fields.append({"name": "post_product", "label": "POST Produkt (F4)", "value": _post_selection_summary(post_selection)})
+        else:
+            fields.append({"name": "services_display", "label": "Services (F4)", "value": _shipping_services_summary(selected_services)})
+        fields.append({"name": "print_mode", "label": "Ausgabe (F5)", "value": "PDF + Drucken" if print_mode == "print" else "Nur PDF"})
         result = form_dialog(
             stdscr,
             "Versandlabel ohne Bestellung",
             fields,
             initial_active=active,
-            footer_text="F3 Land  F4 Services  F5 Ausgabe  F2 Erstellen  F9 Zurueck",
+            footer_text="Enter weiter/erstellen  F3 Land  F4 Auswahl  F5 Ausgabe  F9 Zurueck",
             extra_actions=[
                 {"name": "country", "keys": {curses.KEY_F3}},
                 {"name": "services", "keys": {curses.KEY_F4}},
@@ -5779,7 +6338,12 @@ def create_manual_shipping_label(stdscr):
             if result["__action__"] == "country":
                 country_code = manual_country_dialog(stdscr, country_code)
             elif result["__action__"] == "services":
-                selected_services = shipping_services_dialog(stdscr, selected_services)
+                if carrier_key == "post":
+                    chosen_post = _post_selection_dialog(stdscr, scope="domestic")
+                    if chosen_post:
+                        post_selection = chosen_post
+                else:
+                    selected_services = shipping_services_dialog(stdscr, selected_services)
             elif result["__action__"] == "print_mode":
                 next_mode = manual_label_print_mode_dialog(stdscr, print_mode)
                 if next_mode is None:
@@ -5808,6 +6372,9 @@ def create_manual_shipping_label(stdscr):
     if weight_grams <= 0:
         message_box(stdscr, "Versandlabel", "Gewicht muss groesser als 0 g sein.")
         return
+    if carrier_key == "post" and not post_selection:
+        message_box(stdscr, "Versandlabel", "Bitte POST Produkt waehlen.")
+        return
 
     reference = state.get("reference", "").strip()
     if not reference:
@@ -5822,14 +6389,15 @@ def create_manual_shipping_label(stdscr):
         "shipping_city": state["city"].strip(),
         "shipping_country": country_code,
     }
-    carrier = active_shipping_carrier().upper()
+    carrier = carrier_key.upper()
 
     try:
         created = create_shipping_label(
             order_stub,
             weight_kg=round(weight_grams / 1000.0, 3),
             shipment_reference=reference,
-            service_codes=selected_services,
+            service_codes=post_selection if carrier_key == "post" else selected_services,
+            carrier=carrier_key,
         )
     except Exception as exc:
         PRINT_LOGGER.exception("Manuelles Versandlabel fehlgeschlagen reference=%s", reference)
@@ -6140,7 +6708,7 @@ def orders_dialog(stdscr):
 
         draw_panel(details_win, "Positionen", detail_lines, 0, 0, False)
 
-        footer = " Space Mark  F1 Offen  F2 Status  F3 Springen  F4 Versand-History  F5 Pickliste  F6 PDF  F7 Lieferschein  Shift+F7 Teilausf.  F8 Versandlabel  Shift+F8 Manuell  F9 Zurueck  F10 Zahlung  F11 Bulk  F12 Alle "
+        footer = " Space Mark  A Alle  F1 Offen  F2 Status  F3 Zahlung  F4 Springen  F5 Versandlabel  Shift+F5 Manuell  F6 Teilausf.  F7 Bulk  F8 Versand-History  F9 Zurueck  F10 Pickliste  F11 Lieferschein  F12 PDF "
         filter_tags = []
         if order_filter:
             filter_tags.append(f"Text:{order_filter}")
@@ -6162,17 +6730,8 @@ def orders_dialog(stdscr):
         except curses.error:
             continue
 
-        if key in (27, curses.KEY_F9, curses.KEY_F12):
-            if key in (27, curses.KEY_F9):
-                return
-            if key == curses.KEY_F12:
-                if not orders:
-                    continue
-                if len(selected_order_ids) == len(orders):
-                    selected_order_ids.clear()
-                else:
-                    selected_order_ids = {row["order_id"] for row in orders}
-                continue
+        if key in (27, curses.KEY_F9):
+            return
         if key == curses.KEY_DOWN:
             selected = move_selection(orders, selected, 1)
         elif key == curses.KEY_UP:
@@ -6192,16 +6751,13 @@ def orders_dialog(stdscr):
             selected = 0
             top_index = 0
             reload_orders = True
-        elif key == curses.KEY_F10:
+        elif key == curses.KEY_F3:
             current_index = PAYMENT_FILTER_SEQUENCE.index(payment_filter) if payment_filter in PAYMENT_FILTER_SEQUENCE else 0
             payment_filter = PAYMENT_FILTER_SEQUENCE[(current_index + 1) % len(PAYMENT_FILTER_SEQUENCE)]
             selected = 0
             top_index = 0
             reload_orders = True
-        elif key == curses.KEY_F11:
-            run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
-            reload_orders = True
-        elif key == curses.KEY_F3:
+        elif key == curses.KEY_F4:
             value = order_jump_dialog(stdscr, order_filter or "")
             if value is not None:
                 order_filter = value or None
@@ -6221,25 +6777,37 @@ def orders_dialog(stdscr):
                     if target_index is not None:
                         selected = target_index
         elif key == curses.KEY_F5 and selected_order:
-            print_picklist(stdscr, selected_order, order_items)
+            create_shipping_label_for_order(stdscr, selected_order)
+        elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
+            create_manual_shipping_label(stdscr)
         elif key == curses.KEY_F6 and selected_order:
-            export_delivery_note_pdf(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F7 and selected_order:
-            print_delivery_note(stdscr, selected_order, order_items)
+            run_partial_execution_for_order(stdscr, selected_order, order_items)
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
             run_partial_execution_for_order(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F8 and selected_order:
-            create_shipping_label_for_order(stdscr, selected_order)
-        elif key in (curses.KEY_F20, "m", "M"):
-            create_manual_shipping_label(stdscr)
-        elif key == curses.KEY_F4:
+        elif key == curses.KEY_F7:
+            run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
+            reload_orders = True
+        elif key == curses.KEY_F8:
             shipping_history_dialog(stdscr, selected_order)
+        elif key == curses.KEY_F10 and selected_order:
+            print_picklist(stdscr, selected_order, order_items)
+        elif key == curses.KEY_F11 and selected_order:
+            print_delivery_note(stdscr, selected_order, order_items)
+        elif key == curses.KEY_F12 and selected_order:
+            export_delivery_note_pdf(stdscr, selected_order, order_items)
         elif key == " " and selected_order:
             order_id = selected_order["order_id"]
             if order_id in selected_order_ids:
                 selected_order_ids.remove(order_id)
             else:
                 selected_order_ids.add(order_id)
+        elif key in ("a", "A"):
+            if not orders:
+                continue
+            if len(selected_order_ids) == len(orders):
+                selected_order_ids.clear()
+            else:
+                selected_order_ids = {row["order_id"] for row in orders}
 
 
 def inventory_count_dialog(stdscr, line):

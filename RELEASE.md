@@ -21,8 +21,8 @@ Es gilt ein einfaches Release-Schema:
 
 - Produktive Releases auf `main`: `MAJOR.MINOR.PATCH`
   - Beispiel: `1.21.0`
-- Entwicklungsstaende auf `develop`: `MAJOR.MINOR.PATCH-dev`
-  - Beispiel: `1.21.0-dev`
+- Entwicklungsstaende auf `develop`: `MAJOR.MINOR.PATCH-dev.BUILD`
+  - Beispiel: `1.21.0-dev.1`
 
 Regeln:
 
@@ -32,13 +32,15 @@ Regeln:
 - `VERSION_STAGE` in [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py) ist
   - leer auf `main`
   - `dev` auf `develop`
+- `VERSION_BUILD` wird auf `develop` bei sichtbaren Zwischenstaenden oder
+  relevanten Testbuilds weiter hochgezaehlt
 - der Shopify-Sync fuehrt seine eigene Version separat in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
   und wird nicht ueber `app_version.py` mitversioniert
 
 Aktueller Uebergang:
 
 - letzter produktiver Stand vor der Umstellung: `1.20.028`
-- laufender Entwicklungsstand nach der Umstellung: `1.21.0-dev`
+- laufender Entwicklungsstand nach der Umstellung: `1.21.0-dev.1`
 - naechster Release auf `main`: `1.21.0`
 
 ## Changelog
@@ -58,6 +60,7 @@ Aktueller Uebergang:
 5. Vor Release:
    - `app_version.py` auf finale Release-Version setzen
    - `VERSION_STAGE = ""`
+   - `VERSION_BUILD = 0`
    - Changelog fuer alle Aenderungen seit dem letzten Release ergaenzen
    - zugehoerige Shopify-Sync-Version notieren und auf `shopify-sync/CHANGELOG.md` verweisen
 6. `develop` nach `main` mergen

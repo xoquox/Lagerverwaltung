@@ -86,13 +86,13 @@ Wichtige Einstellungen:
 - `delivery_note_sender_street`
 - `delivery_note_sender_city`
 - `delivery_note_sender_email`
-- `shipping_carrier`
-- `shipping_label_printer_gls`, `shipping_label_printer_dhl`, `shipping_label_printer_post`
-- `shipping_label_format_gls`, `shipping_label_format_dhl`, `shipping_label_format_post`
+- `shipping_label_printer_gls`, `shipping_label_printer_dhl_private`, `shipping_label_printer_post`
+- `shipping_label_format_gls`, `shipping_label_format_dhl_private`, `shipping_label_format_post`
 - `shipping_label_printer`, `shipping_label_format` (Fallback/Legacy)
 - `shipping_services`, `shipping_packaging_weight_grams`
 - `gls_api_url`, `gls_user`, `gls_password`, `gls_contact_id`
-- `post_api_url`, `post_user`, `post_password`, `post_partner_id`
+- `post_api_url`, `post_api_key`, `post_api_secret`, `post_user`, `post_password`, `post_partner_id`
+- `dhl_private_api_url`, `dhl_private_api_test_url`, `dhl_private_api_key`, `dhl_private_api_secret`, `dhl_private_use_test_api`
 
 ## Entwicklung und Releases
 
@@ -102,9 +102,13 @@ Wichtige Einstellungen:
 - `CHANGELOG.md` wird nur beim Merge eines fertigen Stands nach `main` ergaenzt.
 - `app_version.py` fuehrt die sichtbare Versionsnummer:
   - Release auf `main`: z. B. `1.21.0`
-  - Entwicklungsstand auf `develop`: z. B. `1.21.0-dev`
+  - Entwicklungsstand auf `develop`: z. B. `1.21.0-dev.1`
+- `VERSION_BUILD` in [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py) wird auf `develop`
+  fuer neue testbare Zwischenstaende hochgezaehlt
 - Der Shopify-Sync hat zusaetzlich eine eigene Versionsquelle in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
   und ein eigenes Sync-Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md).
+- Der Shopify-Sync nutzt dafuer analog `SYNC_VERSION_BUILD` in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py),
+  z. B. `0.1.0-dev.1`.
 - Release-Eintraege in [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) enthalten die zugehoerige Sync-Version
   und verweisen auf das separate Sync-Changelog.
 

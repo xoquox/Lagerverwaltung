@@ -210,6 +210,77 @@ class InternetmarkeClientTests(unittest.TestCase):
         self.assertEqual(payload["dpi"], "DPI203")
 
 
+class PostProductImportTests(unittest.TestCase):
+    def test_import_post_ppl_creates_structured_json_mapping(self):
+        from scripts import import_post_ppl
+
+        sample_csv = """PROD_GUEAB;T&T;PROD_ID;PROD_AUSR;PROD_NAME;PROD_BRPREIS;BP_NAME;BP_BRPREIS;ADD_NAME;ADD_BRPREIS;MINL;MINB;MINH;MAXL;MAXB;MAXH;MING;MAXG;MIND;MAXD;PROD_ANM;INTMA_HINWTEXT;INTMA_PROD_URL;INTMA_VERTRAG;INTMA_ZOLLERKL
+01.01.2025;;31;N;Maxibrief;2,90;Maxibrief;2,90;;;100;70;0;353;250;50;0;1000;;;;;Beschreibung;https://example.invalid/maxi;nein;nein
+01.01.2025;;41;N;Maxibrief bis 2000 g + Zusatzentgelt MBf;5,10;Maxibrief bis 2000 g;2,90;Zusatzentgelt MBf;2,20;100;70;0;600;300;150;0;2000;;;;;MBf;https://example.invalid/maxi2;nein;nein
+01.07.2025;;290;N;Warensendung;2,70;Warensendung;2,70;;;100;70;0;353;250;50;0;1000;;;;;Waren;https://example.invalid/ware;nein;nein
+01.07.2025;;331;N;Warensendung 2.000 + Gewichtszuschlag;3,55;Warensendung 1.000 zzgl. Gewichtszuschlag;2,70;Warensendung 2.000 Gewichtszuschlag;0,85;100;70;0;353;250;50;1001;2000;;;;;Waren2;https://example.invalid/ware2;nein;nein
+01.01.2025;1;1037;N;Maxibrief Integral + EINSCHREIBEN;5,55;Maxibrief BZL GK;2,90;EINSCHREIBEN;2,65;100;70;0;353;250;50;0;1000;;;;;Tracked;https://example.invalid/reg;nein;nein
+"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "sample.csv"
+            target = Path(tmpdir) / "post_products.json"
+            source.write_text(sample_csv, encoding="latin-1")
+
+            payload = import_post_ppl.import_csv(source, target)
+
+            self.assertEqual(payload["meta"]["product_count"], 5)
+            self.assertTrue(target.exists())
+            written = json.loads(target.read_text(encoding="utf-8"))
+            by_code = {item["product_code"]: item for item in written["products"]}
+            self.assertEqual(by_code["31"]["base_product"], "maxibrief")
+            self.assertEqual(by_code["31"]["price_cents"], 290)
+            self.assertEqual(by_code["31"]["base_label"], "Maxibrief")
+            self.assertEqual(by_code["41"]["addons"], ["mbf"])
+            self.assertEqual(by_code["41"]["base_label"], "Maxibrief")
+            self.assertEqual(by_code["331"]["addons"], ["gewichtszuschlag"])
+            self.assertEqual(by_code["331"]["base_label"], "Warensendung")
+            self.assertTrue(by_code["1037"]["tracked"])
+            self.assertEqual(by_code["1037"]["addons"], ["einschreiben"])
+            self.assertEqual(by_code["1037"]["category"], "registered")
+            self.assertEqual(by_code["1037"]["addon_labels"], ["EINSCHREIBEN"])
+            self.assertTrue(written["selection"]["base_products"])
+            maxibrief_group = next(item for item in written["selection"]["base_products"] if item["base_key"] == "maxibrief")
+            self.assertIn("einschreiben", maxibrief_group["option_codes"])
+            self.assertIn("mbf", maxibrief_group["option_codes"])
+            warensendung_group = next(item for item in written["selection"]["base_products"] if item["base_key"] == "warensendung")
+            self.assertIn("gewichtszuschlag", warensendung_group["option_codes"])
+
+    def test_product_catalog_loader_and_lookup(self):
+        from post.product_catalog import find_post_product, list_post_products, list_post_base_products, list_post_options
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "post_products.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "meta": {"product_count": 2},
+                        "selection": {
+                            "base_products": [{"base_key": "maxibrief", "scope": "domestic"}],
+                            "options": [{"option_code": "einschreiben", "label": "EINSCHREIBEN"}],
+                        },
+                        "products": [
+                            {"product_code": "31", "category": "letter", "scope": "domestic", "tracked": False},
+                            {"product_code": "1032", "category": "registered", "scope": "domestic", "tracked": True},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(find_post_product("1032", path=source)["product_code"], "1032")
+            self.assertEqual(len(list_post_products(path=source, domestic_only=True)), 2)
+            self.assertEqual(len(list_post_products(path=source, tracked_only=True)), 1)
+            self.assertEqual(list_post_products(path=source, category="registered")[0]["product_code"], "1032")
+            self.assertEqual(list_post_base_products(path=source, scope="domestic")[0]["base_key"], "maxibrief")
+            self.assertEqual(list_post_options(path=source)[0]["option_code"], "einschreiben")
+
+
 class LagerMcLogicTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -221,6 +292,17 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(self.lager_mc.normalize_regal(""), "")
         self.assertIsNone(self.lager_mc.normalize_regal("AA"))
         self.assertIsNone(self.lager_mc.normalize_regal("1"))
+
+    def test_resolve_post_product_selection_uses_base_and_options(self):
+        product = self.lager_mc._resolve_post_product_selection(
+            {"scope": "domestic", "base_key": "maxibrief", "option_codes": ["einschreiben_einwurf"]}
+        )
+        self.assertEqual(product["product_code"], "1032")
+
+        base_product = self.lager_mc._resolve_post_product_selection(
+            {"scope": "domestic", "base_key": "warensendung", "option_codes": []}
+        )
+        self.assertEqual(base_product["product_code"], "290")
 
     def test_normalize_fach_and_platz_default_regex(self):
         self.assertEqual(self.lager_mc.normalize_fach("1"), "1")
@@ -606,9 +688,9 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(run_mock.call_args.kwargs["env"]["LC_ALL"], "C")
         self.assertEqual(run_mock.call_args.kwargs["env"]["LANG"], "C")
 
-    def test_active_shipping_carrier_falls_back_to_gls_for_unknown_values(self):
-        with mock.patch.dict(self.lager_mc.SETTINGS, {"shipping_carrier": "kaputt"}, clear=False):
-            self.assertEqual(self.lager_mc.active_shipping_carrier(), "gls")
+    def test_effective_shipping_carrier_falls_back_to_gls_for_unknown_values(self):
+        self.lager_mc._SHIPPING_CARRIER_CACHE = None
+        self.assertEqual(self.lager_mc.effective_shipping_carrier("kaputt"), "gls")
 
     def test_shipping_printer_for_carrier_uses_specific_private_and_fallback(self):
         with mock.patch.dict(

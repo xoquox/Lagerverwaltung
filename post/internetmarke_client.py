@@ -135,6 +135,45 @@ class InternetmarkeClient:
             raise RuntimeError("INTERNETMARKE Preview: link fehlt in der Antwort.")
         return self.download_binary(link)
 
+    def checkout_pdf(
+        self,
+        *,
+        shop_order_id,
+        total_cents,
+        page_format_id,
+        positions,
+        create_manifest=False,
+        create_shipping_list="0",
+        voucher_layout="ADDRESS_ZONE",
+        dpi="DPI300",
+        direct_checkout=True,
+    ):
+        self._ensure_token()
+        payload = {
+            "type": "AppShoppingCartPDFRequest",
+            "shopOrderId": str(shop_order_id),
+            "total": int(total_cents),
+            "pageFormatId": int(page_format_id),
+            "createManifest": bool(create_manifest),
+            "createShippingList": str(create_shipping_list),
+            "dpi": str(dpi or "DPI300").strip().upper(),
+            "positions": positions,
+        }
+        response = self._json_request(
+            "POST",
+            "/app/shoppingcart/pdf",
+            payload=payload,
+            query={"directCheckout": "true" if direct_checkout else "false"},
+        )
+        return response
+
+    def checkout_pdf_binary(self, **kwargs):
+        response = self.checkout_pdf(**kwargs)
+        link = (response.get("link") or "").strip()
+        if not link:
+            raise RuntimeError("INTERNETMARKE Kauf: link fehlt in der Antwort.")
+        return response, self.download_binary(link)
+
     def _ensure_token(self):
         if not self._access_token or time.time() >= self._token_expires_at:
             self.authorize()

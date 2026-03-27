@@ -32,7 +32,6 @@ DEFAULT_SETTINGS = {
     "delivery_note_sender_street": "Strasse 1",
     "delivery_note_sender_city": "12345 Musterstadt",
     "delivery_note_sender_email": "info@example.com",
-    "shipping_carrier": "gls",
     "shipping_label_output_dir": "",
     "shipping_label_format": "A6",
     "shipping_label_printer": "",
