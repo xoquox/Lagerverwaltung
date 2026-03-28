@@ -2713,16 +2713,27 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
             "receiver": receiver,
         },
     }
-    response, pdf_blob = client.checkout_pdf_binary(
-        shop_order_id=_reference[:18],
-        total_cents=total_cents,
-        page_format_id=page_format_id,
-        positions=[position],
-        create_manifest=False,
-        create_shipping_list="0",
-        dpi="DPI300",
-        direct_checkout=True,
-    )
+    try:
+        response, pdf_blob = client.checkout_pdf_binary(
+            shop_order_id=_reference[:18],
+            total_cents=total_cents,
+            page_format_id=page_format_id,
+            positions=[position],
+            create_manifest=False,
+            create_shipping_list="0",
+            dpi="DPI300",
+            direct_checkout=True,
+        )
+    except Exception:
+        LOGGER.exception(
+            "POST Label-Checkout fehlgeschlagen reference=%s product_code=%s product_name=%s page_format_id=%s country=%s",
+            _reference,
+            product.get("product_code"),
+            product.get("name"),
+            page_format_id,
+            order.get("shipping_country"),
+        )
+        raise
     shopping_cart = response.get("shoppingCart") if isinstance(response.get("shoppingCart"), dict) else {}
     voucher_list = shopping_cart.get("voucherList") if isinstance(shopping_cart.get("voucherList"), list) else []
     first_voucher = voucher_list[0] if voucher_list else {}
@@ -2793,16 +2804,40 @@ def test_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     }
 
 
+def _gls_label_identifiers(label_row):
+    identifiers = []
+    for value in (label_row.get("parcel_number"), label_row.get("track_id")):
+        normalized = (value or "").strip()
+        if normalized and normalized not in identifiers:
+            identifiers.append(normalized)
+    return identifiers
+
+
 def gls_reprint_label(label_row):
     creds = load_gls_credentials()
-    track_id = (label_row.get("track_id") or "").strip()
-    if not track_id:
-        raise ValueError("TrackID fehlt")
-    url = f"{creds['api_url'].rstrip('/')}/reprint/{track_id}"
-    status_code, data, raw = _gls_api_json_request(url, creds)
+    identifiers = _gls_label_identifiers(label_row)
+    if not identifiers:
+        raise ValueError("TrackID/ParcelNumber fehlt")
+    status_code = None
+    data = None
+    raw = b""
+    chosen_identifier = identifiers[0]
+    for identifier in identifiers:
+        url = f"{creds['api_url'].rstrip('/')}/reprint/{identifier}"
+        status_code, data, raw = _gls_api_json_request(url, creds)
+        chosen_identifier = identifier
+        if status_code < 400 or status_code != 404:
+            break
+    if status_code is None:
+        raise RuntimeError("GLS Reprint fehlgeschlagen.")
     if status_code >= 400:
         error_detail = _gls_error_summary(data, raw)
-        LOGGER.error("GLS Reprint Fehler status=%s track_id=%s detail=%s", status_code, track_id, error_detail or "-")
+        LOGGER.error(
+            "GLS Reprint Fehler status=%s identifiers=%s detail=%s",
+            status_code,
+            ",".join(identifiers),
+            error_detail or "-",
+        )
         if error_detail:
             raise RuntimeError(f"GLS Reprint Fehler HTTP {status_code}: {error_detail[:180]}")
         raise RuntimeError(f"GLS Reprint Fehler HTTP {status_code}")
@@ -2813,22 +2848,37 @@ def gls_reprint_label(label_row):
     if not pdf_blob:
         raise RuntimeError("GLS Reprint ohne PDF-Daten.")
 
-    label_path = _save_shipping_label_pdf("gls", label_row["order_name"], track_id, pdf_blob, suffix="reprint")
+    label_path = _save_shipping_label_pdf("gls", label_row["order_name"], chosen_identifier, pdf_blob, suffix="reprint")
     update_gls_label_reprint(label_row["id"], label_path)
     return label_path
 
 
 def gls_cancel_label(label_row):
     creds = load_gls_credentials()
-    track_id = (label_row.get("track_id") or "").strip()
-    if not track_id:
-        raise ValueError("TrackID fehlt")
-    url = f"{creds['api_url'].rstrip('/')}/cancel/{track_id}"
-    status_code, data, raw = _gls_api_json_request(url, creds)
+    identifiers = _gls_label_identifiers(label_row)
+    if not identifiers:
+        raise ValueError("TrackID/ParcelNumber fehlt")
+    status_code = None
+    data = None
+    raw = b""
+    chosen_identifier = identifiers[0]
+    for identifier in identifiers:
+        url = f"{creds['api_url'].rstrip('/')}/cancel/{identifier}"
+        status_code, data, raw = _gls_api_json_request(url, creds)
+        chosen_identifier = identifier
+        if status_code < 400 or status_code != 404:
+            break
+    if status_code is None:
+        raise RuntimeError("GLS Storno fehlgeschlagen.")
     if status_code >= 400:
         error_detail = _gls_error_summary(data, raw)
         update_gls_label_status(label_row["id"], "CANCEL_FAILED", f"HTTP {status_code} {error_detail[:120]}".strip())
-        LOGGER.error("GLS Storno Fehler status=%s track_id=%s detail=%s", status_code, track_id, error_detail or "-")
+        LOGGER.error(
+            "GLS Storno Fehler status=%s identifiers=%s detail=%s",
+            status_code,
+            ",".join(identifiers),
+            error_detail or "-",
+        )
         if error_detail:
             raise RuntimeError(f"GLS Storno Fehler HTTP {status_code}: {error_detail[:180]}")
         raise RuntimeError(f"GLS Storno Fehler HTTP {status_code}")
@@ -2993,6 +3043,9 @@ def create_shipping_label(order, weight_kg=None, shipment_reference=None, servic
 
 
 def reprint_shipping_label(label_row):
+    existing_path = (label_row.get("label_path") or "").strip()
+    if existing_path and os.path.isfile(existing_path):
+        return existing_path
     carrier = (label_row.get("carrier") or "gls").strip().lower()
     if carrier == "gls":
         return gls_reprint_label(label_row)
@@ -4600,7 +4653,7 @@ def settings_dialog(stdscr):
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "Tab naechster Tab  Shift+Tab vorheriger Tab  F3 Drucker  F4 Format  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 2, 1, " " * (width - 2))
         win.addstr(height - 2, 1, _fit(footer, width - 2))
@@ -4889,15 +4942,14 @@ def settings_dialog(stdscr):
     if updated["shipping_label_output_dir"] and not os.path.isdir(updated["shipping_label_output_dir"]):
         message_box(stdscr, t("error"), "Versandlabel Ordner existiert nicht.")
         return
-    allowed_formats = {"A6", "A5", "A4", "100x62"}
     if not updated["delivery_note_format"]:
         updated["delivery_note_format"] = "A4"
-    if updated["shipping_label_format"] not in allowed_formats:
-        message_box(stdscr, t("error"), "Labelformat nur A6, A5, A4 oder 100x62.")
+    if not updated["shipping_label_format"]:
+        message_box(stdscr, t("error"), "Labelformat darf nicht leer sein.")
         return
     for key in ("shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post"):
-        if updated[key] not in allowed_formats:
-            message_box(stdscr, t("error"), f"{key} ungueltig.")
+        if not updated[key]:
+            message_box(stdscr, t("error"), f"{key} darf nicht leer sein.")
             return
     if not updated.get("shipping_label_format_gls"):
         updated["shipping_label_format_gls"] = "A6"
@@ -6614,14 +6666,20 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 reload_rows = True
         elif key == curses.KEY_F7 and chosen:
             try:
-                new_path = reprint_shipping_label(chosen)
+                reprint_path = reprint_shipping_label(chosen)
             except Exception as exc:
                 PRINT_LOGGER.exception("Versand Reprint fehlgeschlagen carrier=%s track=%s", chosen.get("carrier"), chosen.get("track_id"))
-                update_gls_label_status(chosen["id"], "REPRINT_FAILED", str(exc)[:120])
                 message_box(stdscr, "Reprint", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
             else:
-                message_box(stdscr, "Reprint", new_path[-56:])
-                reload_rows = True
+                if _print_pdf_via_lp(
+                    stdscr,
+                    reprint_path,
+                    f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
+                    carrier=(chosen.get("carrier") or "gls").lower(),
+                ):
+                    update_gls_label_status(chosen["id"], "REPRINTED")
+                    message_box(stdscr, "Reprint", "Label erneut gedruckt.")
+                    reload_rows = True
         elif key == curses.KEY_F6 and chosen:
             if not confirm_box(stdscr, "Storno", f"Sendung {chosen['track_id']} stornieren?"):
                 continue

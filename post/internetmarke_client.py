@@ -235,12 +235,56 @@ class InternetmarkeClient:
                 parsed = json.loads(raw.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
                 parsed = None
-            if isinstance(parsed, dict):
-                title = (parsed.get("title") or "").strip()
-                info = (parsed.get("detail") or "").strip()
-                detail = " - ".join(part for part in (title, info) if part)
+            if parsed is not None:
+                detail = InternetmarkeClient._extract_error_text(parsed)
             if not detail:
                 detail = raw.decode("utf-8", errors="replace").strip()
         if detail:
             return f"{prefix} HTTP {status_code}: {detail[:500]}"
         return f"{prefix} HTTP {status_code}"
+
+    @staticmethod
+    def _extract_error_text(data):
+        messages = []
+
+        def walk(value):
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    key_lower = str(key).strip().lower()
+                    if key_lower in {
+                        "title",
+                        "detail",
+                        "message",
+                        "messages",
+                        "description",
+                        "error",
+                        "errors",
+                        "field",
+                        "reason",
+                        "faultstring",
+                    }:
+                        if isinstance(nested, str):
+                            text = nested.strip()
+                            if text:
+                                messages.append(text)
+                        elif isinstance(nested, list):
+                            for item in nested:
+                                walk(item)
+                        else:
+                            walk(nested)
+                    else:
+                        walk(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    walk(nested)
+            elif isinstance(value, str):
+                text = value.strip()
+                if text and len(text) < 240:
+                    messages.append(text)
+
+        walk(data)
+        deduped = []
+        for entry in messages:
+            if entry not in deduped:
+                deduped.append(entry)
+        return " | ".join(deduped)

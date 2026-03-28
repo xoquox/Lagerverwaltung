@@ -1,3 +1,4 @@
+import base64
 import importlib
 import json
 import os
@@ -784,6 +785,32 @@ class LagerMcLogicTests(unittest.TestCase):
             shipment_reference=None,
             service_codes=None,
         )
+
+    def test_gls_reprint_tries_parcel_number_before_track_id(self):
+        label_row = {
+            "id": 9,
+            "order_name": "#1001",
+            "parcel_number": "1234567890",
+            "track_id": "Z8ZRLZDW",
+        }
+        responses = [
+            (200, {}, b"%PDF-1.4 test"),
+        ]
+
+        with (
+            mock.patch.object(self.lager_mc, "load_gls_credentials", return_value={"api_url": "https://example.test/api"}) as creds_mock,
+            mock.patch.object(self.lager_mc, "_gls_api_json_request", side_effect=responses) as api_mock,
+            mock.patch.object(self.lager_mc, "_save_shipping_label_pdf", return_value="/tmp/reprint.pdf") as save_mock,
+            mock.patch.object(self.lager_mc, "update_gls_label_reprint") as update_mock,
+        ):
+            result = self.lager_mc.gls_reprint_label(label_row)
+
+        self.assertEqual(result, "/tmp/reprint.pdf")
+        creds_mock.assert_called_once_with()
+        api_mock.assert_called_once()
+        self.assertTrue(api_mock.call_args.args[0].endswith("/reprint/1234567890"))
+        save_mock.assert_called_once()
+        update_mock.assert_called_once_with(9, "/tmp/reprint.pdf")
 
     def test_format_shopify_sync_status_label_prefers_pull_and_push_times(self):
         row = {
