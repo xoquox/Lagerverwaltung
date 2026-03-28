@@ -2388,15 +2388,7 @@ def _build_test_label_pdf(order_name, shipment_reference, track_id):
 
 
 def _save_shipping_label_pdf(carrier, order_name, track_id, pdf_bytes, suffix=""):
-    configured_dir = os.path.expanduser((SETTINGS.get("shipping_label_output_dir") or "").strip())
-    if configured_dir:
-        output_dir = Path(configured_dir)
-    else:
-        normalized_carrier = (carrier or "").strip().lower()
-        if normalized_carrier == "post":
-            output_dir = POST_LABEL_DIR
-        else:
-            output_dir = GLS_LABEL_DIR
+    output_dir = Path(get_shipping_label_output_dir())
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_order = _sanitize_order_reference(order_name)
     safe_track = "".join(ch for ch in (track_id or "unknown") if ch.isalnum() or ch in "-_") or "unknown"
@@ -4653,7 +4645,7 @@ def settings_dialog(stdscr):
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  F6 Auswahl  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 2, 1, " " * (width - 2))
         win.addstr(height - 2, 1, _fit(footer, width - 2))
@@ -4757,6 +4749,30 @@ def settings_dialog(stdscr):
             cursor_positions[active_name] = len(str(values[active_name]))
             continue
 
+        if key == curses.KEY_F6:
+            if active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
+                values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
+                cursor_positions[active_name] = len(str(values[active_name]))
+                continue
+            if active_name == "color_theme_file":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name in {"label_font_regular", "label_font_condensed"}:
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name == "delivery_note_template_path":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name == "delivery_note_logo_source":
+                current_value = (values.get(active_name) or "").strip()
+                if not is_http_url(current_value):
+                    values[active_name] = file_dialog(stdscr, current_value, "Logo waehlen", extensions={".png", ".jpg", ".jpeg", ".svg", ".pdf"})
+                    cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+
         if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             if active_name == "language":
                 values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
@@ -4795,6 +4811,14 @@ def settings_dialog(stdscr):
                     values[active_name],
                     "Lieferschein Format",
                 )
+            elif active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
+                values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
+            elif active_name == "color_theme_file":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
+            elif active_name in {"label_font_regular", "label_font_condensed"}:
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
+            elif active_name == "delivery_note_template_path":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
             elif active_name == "dhl_private_use_test_api":
                 values["dhl_private_use_test_api"] = choice_dialog(
                     stdscr,
@@ -5457,11 +5481,248 @@ def build_delivery_note_filename(order):
     return f"lieferschein_{safe_name}_{timestamp}.pdf"
 
 
+def _documents_base_dir():
+    home = Path.home()
+    for name in ("Dokumente", "Documents"):
+        candidate = home / name
+        if candidate.exists():
+            return candidate
+    return home / "Dokumente"
+
+
+def _lager_documents_dir():
+    return _documents_base_dir() / "Lagerverwaltung"
+
+
+def _default_shipping_label_output_dir():
+    return str(_lager_documents_dir() / "Versandlabel")
+
+
+def _default_delivery_note_output_dir():
+    return str(_lager_documents_dir() / "Lieferscheine")
+
+
+def get_shipping_label_output_dir():
+    configured = (SETTINGS.get("shipping_label_output_dir") or "").strip()
+    if configured:
+        output_dir = Path(os.path.expanduser(configured))
+    else:
+        output_dir = Path(_default_shipping_label_output_dir())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir)
+
+
 def get_pdf_output_dir():
     configured = SETTINGS["pdf_output_dir"].strip()
-    if not configured:
-        return os.getcwd()
-    return configured
+    if configured:
+        output_dir = Path(os.path.expanduser(configured))
+    else:
+        output_dir = Path(_default_delivery_note_output_dir())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir)
+
+
+def directory_dialog(stdscr, current_path="", title="Ordner waehlen"):
+    base = (current_path or "").strip()
+    if base:
+        current = Path(os.path.expanduser(base)).resolve()
+    else:
+        current = _lager_documents_dir()
+    if not current.exists():
+        current = current.parent if current.parent.exists() else Path.home()
+    selected = 0
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(max(72, len(str(current)) + 6), w - 4)
+        height = min(22, h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+        win.addstr(1, 2, _fit(str(current), width - 4))
+
+        entries = [
+            {"kind": "select", "label": "[Diesen Ordner waehlen]", "path": current},
+            {"kind": "mkdir", "label": "[Neuen Ordner anlegen]", "path": current},
+        ]
+        if current.parent != current:
+            entries.append({"kind": "up", "label": "[..]", "path": current.parent})
+        try:
+            subdirs = sorted(
+                [entry for entry in current.iterdir() if entry.is_dir()],
+                key=lambda item: item.name.lower(),
+            )
+        except OSError:
+            subdirs = []
+        for entry in subdirs:
+            entries.append({"kind": "dir", "label": entry.name + "/", "path": entry})
+
+        if selected >= len(entries):
+            selected = max(0, len(entries) - 1)
+
+        visible_rows = height - 4
+        scroll = 0
+        if selected >= visible_rows:
+            scroll = selected - visible_rows + 1
+
+        for row in range(visible_rows):
+            idx = scroll + row
+            screen_y = 2 + row
+            if idx >= len(entries):
+                win.addstr(screen_y, 1, " " * (width - 2))
+                continue
+            label = _fit(entries[idx]["label"], width - 4)
+            if idx == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+
+        footer = "Enter waehlen  F9 Zurueck"
+        win.attrset(curses.color_pair(3))
+        win.addstr(height - 1, 1, " " * (width - 2))
+        win.addstr(height - 1, 1, _fit(footer, width - 2))
+        win.attrset(curses.color_pair(1))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return current_path
+        if key == curses.KEY_UP:
+            selected = (selected - 1) % max(1, len(entries))
+            continue
+        if key == curses.KEY_DOWN:
+            selected = (selected + 1) % max(1, len(entries))
+            continue
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            chosen = entries[selected]
+            if chosen["kind"] == "select":
+                return str(chosen["path"])
+            if chosen["kind"] == "mkdir":
+                form = form_dialog(
+                    stdscr,
+                    "Ordner anlegen",
+                    [{"name": "dirname", "label": "Ordnername", "value": ""}],
+                    footer_text="Enter bestaetigen  F9 Zurueck",
+                )
+                if form and form.get("dirname", "").strip():
+                    name = form["dirname"].strip()
+                    new_dir = chosen["path"] / name
+                    try:
+                        new_dir.mkdir(parents=True, exist_ok=False)
+                    except FileExistsError:
+                        message_box(stdscr, "Ordner", "Ordner existiert bereits.")
+                    except OSError as exc:
+                        message_box(stdscr, "Ordner", f"{str(exc)[:44]}")
+                    else:
+                        current = new_dir
+                        selected = 0
+                continue
+            current = chosen["path"]
+            selected = 0
+
+
+def file_dialog(stdscr, current_path="", title="Datei waehlen", extensions=None):
+    base = (current_path or "").strip()
+    if base:
+        current = Path(os.path.expanduser(base)).resolve()
+        selected_name = current.name if current.exists() else ""
+        current_dir = current.parent if current.parent.exists() else Path.home()
+    else:
+        current_dir = _lager_documents_dir()
+        selected_name = ""
+    if not current_dir.exists():
+        current_dir = current_dir.parent if current_dir.parent.exists() else Path.home()
+    allowed = {ext.lower() for ext in (extensions or [])}
+    selected = 0
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(max(76, len(str(current_dir)) + 6), w - 4)
+        height = min(24, h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+        win.addstr(1, 2, _fit(str(current_dir), width - 4))
+
+        entries = []
+        if current_dir.parent != current_dir:
+            entries.append({"kind": "up", "label": "[..]", "path": current_dir.parent})
+        try:
+            children = sorted(current_dir.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+        except OSError:
+            children = []
+        for entry in children:
+            if entry.is_dir():
+                entries.append({"kind": "dir", "label": entry.name + "/", "path": entry})
+                continue
+            if allowed and entry.suffix.lower() not in allowed:
+                continue
+            entries.append({"kind": "file", "label": entry.name, "path": entry})
+
+        if selected_name:
+            for idx, entry in enumerate(entries):
+                if entry["kind"] == "file" and entry["path"].name == selected_name:
+                    selected = idx
+                    selected_name = ""
+                    break
+        if selected >= len(entries):
+            selected = max(0, len(entries) - 1)
+
+        visible_rows = height - 4
+        scroll = 0
+        if selected >= visible_rows:
+            scroll = selected - visible_rows + 1
+
+        for row in range(visible_rows):
+            idx = scroll + row
+            screen_y = 2 + row
+            if idx >= len(entries):
+                win.addstr(screen_y, 1, " " * (width - 2))
+                continue
+            label = _fit(entries[idx]["label"], width - 4)
+            if idx == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+
+        footer = "Enter waehlen  F9 Zurueck"
+        win.attrset(curses.color_pair(3))
+        win.addstr(height - 1, 1, " " * (width - 2))
+        win.addstr(height - 1, 1, _fit(footer, width - 2))
+        win.attrset(curses.color_pair(1))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return current_path
+        if key == curses.KEY_UP:
+            selected = (selected - 1) % max(1, len(entries))
+            continue
+        if key == curses.KEY_DOWN:
+            selected = (selected + 1) % max(1, len(entries))
+            continue
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            if not entries:
+                continue
+            chosen = entries[selected]
+            if chosen["kind"] == "file":
+                return str(chosen["path"])
+            current_dir = chosen["path"]
+            selected = 0
 
 
 def get_delivery_note_sender():
