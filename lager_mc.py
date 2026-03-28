@@ -906,15 +906,90 @@ def init_db():
     con.close()
 
 
+class DatabaseUnavailableError(RuntimeError):
+    pass
+
+
+def _summarize_db_error(exc):
+    text = str(exc or "").strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "Datenbank ist nicht erreichbar."
+    return " | ".join(lines[:2])[:180]
+
+
+def _probe_database_ready():
+    if _is_default_db_settings(SETTINGS):
+        return False, "Bitte zuerst DB Einstellungen in Shift+F11 speichern."
+    try:
+        init_db()
+        return True, ""
+    except Exception as exc:
+        return False, _summarize_db_error(exc)
+
+
+def database_connection_dialog(stdscr, error_text):
+    message = (error_text or "Datenbank ist nicht erreichbar.").strip()
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(max(78, int(w * 0.72)), w - 4)
+        height = 11
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.timeout(1000)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, " DB nicht erreichbar ")
+        host_line = f"Host: {SETTINGS.get('db_host') or '-'}  DB: {SETTINGS.get('db_name') or '-'}"
+        status_line = "Warte auf Verbindung, starte automatisch bei Erfolg."
+        footer = "Enter Neu versuchen  F2 Einstellungen  F9 Beenden"
+        wrapped_error = textwrap.wrap(message, width=max(20, width - 4)) or ["Datenbank ist nicht erreichbar."]
+
+        win.addstr(2, 2, _fit(host_line, width - 4))
+        for index, line in enumerate(wrapped_error[:3]):
+            win.addstr(4 + index, 2, _fit(line, width - 4))
+        win.addstr(height - 3, 2, _fit(status_line, width - 4))
+        win.attrset(curses.color_pair(3))
+        win.addstr(height - 2, 2, _fit(footer, width - 4))
+        win.attrset(curses.color_pair(1))
+        win.refresh()
+
+        key = win.getch()
+        if key == -1 or key in (10, 13, curses.KEY_ENTER):
+            ready, latest_error = _probe_database_ready()
+            if ready:
+                return True
+            if latest_error:
+                message = latest_error
+            continue
+        if key == curses.KEY_F2:
+            settings_dialog(stdscr)
+            ready, latest_error = _probe_database_ready()
+            if ready:
+                return True
+            if latest_error:
+                message = latest_error
+            continue
+        if key in (27, curses.KEY_F9):
+            return False
+
 
 def db():
-    return psycopg2.connect(
-        host=SETTINGS["db_host"],
-        dbname=SETTINGS["db_name"],
-        user=SETTINGS["db_user"],
-        password=SETTINGS["db_pass"],
-        cursor_factory=psycopg2.extras.RealDictCursor
-    )
+    try:
+        return psycopg2.connect(
+            host=SETTINGS["db_host"],
+            dbname=SETTINGS["db_name"],
+            user=SETTINGS["db_user"],
+            password=SETTINGS["db_pass"],
+            cursor_factory=psycopg2.extras.RealDictCursor
+        )
+    except psycopg2.OperationalError as exc:
+        raise DatabaseUnavailableError(_summarize_db_error(exc)) from exc
 
 
 def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=10.0, force=False):
@@ -1012,21 +1087,10 @@ def _is_default_db_settings(settings):
 
 
 def ensure_database_ready(stdscr):
-    while True:
-        if _is_default_db_settings(SETTINGS):
-            message_box(stdscr, "Setup", "Bitte zuerst DB Einstellungen in Shift+F11 speichern.")
-            settings_dialog(stdscr)
-            if _is_default_db_settings(SETTINGS):
-                if confirm_box(stdscr, "Setup", "Keine DB Daten gesetzt. Programm beenden?"):
-                    return False
-                continue
-
-        try:
-            init_db()
-            return True
-        except Exception as exc:
-            message_box(stdscr, "DB Fehler", str(exc)[:56])
-            settings_dialog(stdscr)
+    ready, error_text = _probe_database_ready()
+    if ready:
+        return True
+    return database_connection_dialog(stdscr, error_text)
 
 
 def get_items(filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
@@ -6068,6 +6132,8 @@ def run_partial_execution_for_order(stdscr, order, order_items):
             "Teilausfuehrung",
             f"OK: Label {created['track_id']} {selected_weight_grams}g erstellt",
         )
+    except DatabaseUnavailableError:
+        raise
     except Exception as exc:
         PRINT_LOGGER.exception("Teilausfuehrung fehlgeschlagen order=%s", order.get("order_name"))
         message_box(stdscr, "Teilausfuehrung", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
@@ -6192,6 +6258,8 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                             update_gls_label_status(created["label_id"], "SHOPIFY_QUEUED")
 
             success_count += 1
+        except DatabaseUnavailableError:
+            raise
         except Exception as exc:
             failure_count += 1
             short_error = str(exc).strip() or exc.__class__.__name__
@@ -6265,6 +6333,8 @@ def create_shipping_label_for_order(stdscr, order):
     order_weight_kg, total_grams = calculate_order_shipping_weight(order)
     try:
         created = create_shipping_label(order, weight_kg=order_weight_kg, service_codes=carrier_options, carrier=resolved_carrier)
+    except DatabaseUnavailableError:
+        raise
     except ValueError as exc:
         message_box(stdscr, "Versandlabel", str(exc)[:56])
         return
@@ -6399,6 +6469,8 @@ def create_manual_shipping_label(stdscr):
             service_codes=post_selection if carrier_key == "post" else selected_services,
             carrier=carrier_key,
         )
+    except DatabaseUnavailableError:
+        raise
     except Exception as exc:
         PRINT_LOGGER.exception("Manuelles Versandlabel fehlgeschlagen reference=%s", reference)
         message_box(stdscr, "Versandlabel", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
@@ -6603,17 +6675,23 @@ def orders_dialog(stdscr):
     last_orders_refresh_at = None
 
     while True:
-        if reload_orders or should_refresh_orders(last_orders_refresh_at):
-            orders = get_orders(
-                order_filter,
-                only_pending=only_pending,
-                fulfillment_filter=fulfillment_filter,
-                payment_filter=payment_filter,
-            )
-            order_items_cache = {}
-            selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
-            reload_orders = False
-            last_orders_refresh_at = time.monotonic()
+        try:
+            if reload_orders or should_refresh_orders(last_orders_refresh_at):
+                orders = get_orders(
+                    order_filter,
+                    only_pending=only_pending,
+                    fulfillment_filter=fulfillment_filter,
+                    payment_filter=payment_filter,
+                )
+                order_items_cache = {}
+                selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
+                reload_orders = False
+                last_orders_refresh_at = time.monotonic()
+        except DatabaseUnavailableError as exc:
+            if not database_connection_dialog(stdscr, str(exc)):
+                return
+            reload_orders = True
+            continue
 
         if selected >= len(orders):
             selected = len(orders) - 1
@@ -6626,8 +6704,14 @@ def orders_dialog(stdscr):
         if selected_order_id != current_order_id:
             current_order_id = selected_order_id
 
-        if selected_order_id and selected_order_id not in order_items_cache:
-            order_items_cache[selected_order_id] = get_order_items(selected_order_id)
+        try:
+            if selected_order_id and selected_order_id not in order_items_cache:
+                order_items_cache[selected_order_id] = get_order_items(selected_order_id)
+        except DatabaseUnavailableError as exc:
+            if not database_connection_dialog(stdscr, str(exc)):
+                return
+            reload_orders = True
+            continue
 
         order_items = order_items_cache.get(selected_order_id, [])
 
@@ -6674,7 +6758,13 @@ def orders_dialog(stdscr):
         if selected_order:
             selected_weight_kg, selected_weight_grams = calculate_order_shipping_weight(selected_order, order_items)
             country = _localized_country_display(selected_order.get("shipping_country"))
-            order_shipments = list_gls_labels(selected_order["order_id"])
+            try:
+                order_shipments = list_gls_labels(selected_order["order_id"])
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
+                continue
             created_at = selected_order.get("created_at")
             if isinstance(created_at, datetime.datetime):
                 ordered_at_text = created_at.strftime("%d.%m.%Y %H:%M")
@@ -6777,18 +6867,48 @@ def orders_dialog(stdscr):
                     if target_index is not None:
                         selected = target_index
         elif key == curses.KEY_F5 and selected_order:
-            create_shipping_label_for_order(stdscr, selected_order)
+            try:
+                create_shipping_label_for_order(stdscr, selected_order)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
         elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
-            create_manual_shipping_label(stdscr)
+            try:
+                create_manual_shipping_label(stdscr)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
         elif key == curses.KEY_F6 and selected_order:
-            run_partial_execution_for_order(stdscr, selected_order, order_items)
+            try:
+                run_partial_execution_for_order(stdscr, selected_order, order_items)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
-            run_partial_execution_for_order(stdscr, selected_order, order_items)
+            try:
+                run_partial_execution_for_order(stdscr, selected_order, order_items)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
         elif key == curses.KEY_F7:
-            run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
-            reload_orders = True
+            try:
+                run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
+                reload_orders = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
         elif key == curses.KEY_F8:
-            shipping_history_dialog(stdscr, selected_order)
+            try:
+                shipping_history_dialog(stdscr, selected_order)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_orders = True
         elif key == curses.KEY_F10 and selected_order:
             print_picklist(stdscr, selected_order, order_items)
         elif key == curses.KEY_F11 and selected_order:
@@ -6967,9 +7087,15 @@ def main(stdscr):
 
     while True:
         if reload_items:
-            items = get_items(filter_text, filter_no_location, filter_local, sort_mode, external_mode)
-            location_rows = build_location_rows(items)
-            reload_items = False
+            try:
+                items = get_items(filter_text, filter_no_location, filter_local, sort_mode, external_mode)
+                location_rows = build_location_rows(items)
+                reload_items = False
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items = True
+                continue
 
         if left_selected >= len(items):
             left_selected = len(items) - 1
@@ -7081,27 +7207,52 @@ def main(stdscr):
             item_info_dialog(stdscr, selected_item)
 
         elif key == curses.KEY_F5:
-            add_item(stdscr)
-            reload_items = True
+            try:
+                add_item(stdscr)
+                reload_items = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items = True
 
         elif key == curses.KEY_F6 and selected_item:
-            change_location(stdscr, selected_item)
-            reload_items = True
+            try:
+                change_location(stdscr, selected_item)
+                reload_items = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items = True
 
         elif key == curses.KEY_F7 and selected_item:
-            change_qty(stdscr, selected_item)
-            reload_items = True
+            try:
+                change_qty(stdscr, selected_item)
+                reload_items = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items = True
 
         elif key == curses.KEY_F8 and selected_item:
             print_label(stdscr, selected_item)
 
         elif key == curses.KEY_F1 + 12:
-            if inventory_dialog(stdscr):
+            try:
+                if inventory_dialog(stdscr):
+                    reload_items = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
                 reload_items = True
 
         elif key == curses.KEY_F5 + 12 and selected_item:
-            edit_item(stdscr, selected_item)
-            reload_items = True
+            try:
+                edit_item(stdscr, selected_item)
+                reload_items = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items = True
 
         elif key == curses.KEY_F8 + 12 and selected_item:
             print_label_multiple(stdscr, selected_item)
@@ -7127,7 +7278,11 @@ def main(stdscr):
             show_secondary_help = not show_secondary_help
 
         elif key == curses.KEY_F12:
-            orders_dialog(stdscr)
+            try:
+                orders_dialog(stdscr)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
 
         elif key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
 

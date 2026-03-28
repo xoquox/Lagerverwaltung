@@ -29,13 +29,11 @@ Regeln:
 - `MAJOR` nur bei groben, inkompatiblen Umstellungen erhoehen
 - `MINOR` bei groesseren neuen Funktionsbloecken erhoehen
 - `PATCH` fuer produktive Hotfixes auf derselben Release-Linie erhoehen
-- `VERSION_STAGE` in [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py) ist
-  - leer auf `main`
-  - `dev` auf `develop`
-- `VERSION_BUILD` wird auf `develop` bei sichtbaren Zwischenstaenden oder
-  relevanten Testbuilds weiter hochgezaehlt
-- der Shopify-Sync fuehrt seine eigene Version separat in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
-  und wird nicht ueber `app_version.py` mitversioniert
+- die TUI liest ihre Version aus [version.json](/home/chrisi/Lagerverwaltung/version.json)
+- auf `develop` bleibt `stage = "dev"` und `build` wird fuer jeden neuen testbaren Stand weiter hochgezaehlt
+- auf `main` ist `stage = ""` und `build = 0`
+- der Shopify-Sync fuehrt seine eigene Version separat in [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json)
+  und wird nicht ueber die TUI-Version mitversioniert
 
 Aktueller Uebergang:
 
@@ -58,9 +56,9 @@ Aktueller Uebergang:
 3. Merge nach `develop`
 4. Gesamtstand auf `develop` testen
 5. Vor Release:
-   - `app_version.py` auf finale Release-Version setzen
-   - `VERSION_STAGE = ""`
-   - `VERSION_BUILD = 0`
+   - [version.json](/home/chrisi/Lagerverwaltung/version.json) auf finale Release-Version setzen
+   - `stage = ""`
+   - `build = 0`
    - Changelog fuer alle Aenderungen seit dem letzten Release ergaenzen
    - zugehoerige Shopify-Sync-Version notieren und auf `shopify-sync/CHANGELOG.md` verweisen
 6. `develop` nach `main` mergen
