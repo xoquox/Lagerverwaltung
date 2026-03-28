@@ -3422,11 +3422,16 @@ def item_info_dialog(stdscr, item):
 
         win.attrset(curses.color_pair(3))
         footer = " PgUp/PgDn oder Pfeile scrollen  F9/Esc schliessen "
-        win.addstr(height - 1, 1, " " * (width - 2))
-        win.addstr(height - 1, 1, footer[: width - 2])
+        draw_footer_line(win, height - 1, 1, width - 2, footer)
         win.refresh()
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
         if key in (27, curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
             return
         if key == curses.KEY_NPAGE:
@@ -3522,6 +3527,40 @@ def draw_shadow(stdscr, y, x, h, w):
     shadow.bkgd(" ", curses.color_pair(3))
     shadow.erase()
     shadow.refresh()
+
+
+def _scrolling_footer_slice(text, width):
+    width = max(0, int(width))
+    if width <= 0:
+        return ""
+    text = str(text or "")
+    if len(text) <= width:
+        return text.ljust(width)
+    gap = "   "
+    cycle = text + gap
+    scroll_speed = 1.0
+    start_pause = 6.0
+    end_pause = 2.5
+    scroll_frames = len(cycle)
+    scroll_duration = scroll_frames / scroll_speed
+    cycle_duration = start_pause + scroll_duration + end_pause
+    phase = time.monotonic() % cycle_duration
+    if phase < start_pause:
+        offset = 0
+    elif phase >= start_pause + scroll_duration:
+        offset = scroll_frames - 1
+    else:
+        offset = min(scroll_frames - 1, int((phase - start_pause) * scroll_speed))
+    window = cycle[offset:] + cycle[:offset] + cycle
+    return window[:width]
+
+
+def draw_footer_line(win, y, x, width, text):
+    width = max(0, int(width))
+    if width <= 0:
+        return
+    win.addstr(y, x, " " * width)
+    win.addstr(y, x, _scrolling_footer_slice(text, width))
 
 
 def draw_panel(win, title, lines, selected, top_index, active):
@@ -3644,8 +3683,7 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     if sync_x > 4:
         stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)])
 
-    stdscr.addstr(h-1, 0, " "*(w-1))
-    stdscr.addstr(h-1, 0, status[:w-1])
+    draw_footer_line(stdscr, h - 1, 0, w - 1, status)
 
     stdscr.refresh()
 
@@ -3789,7 +3827,7 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
 
 
 
-        win.addstr(height - 2, 2, footer[:width - 4])
+        draw_footer_line(win, height - 2, 2, width - 4, footer)
         
         cursor_y = 2 + active
 
@@ -3806,7 +3844,13 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
         win.refresh()
 
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
 
         if key in (27, curses.KEY_F9):
             return None
@@ -4647,8 +4691,7 @@ def settings_dialog(stdscr):
 
         footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  F6 Auswahl  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
-        win.addstr(height - 2, 1, " " * (width - 2))
-        win.addstr(height - 2, 1, _fit(footer, width - 2))
+        draw_footer_line(win, height - 2, 1, width - 2, footer)
         win.attrset(curses.color_pair(1))
 
         if active_name:
@@ -4657,7 +4700,13 @@ def settings_dialog(stdscr):
             win.move(3 + active_index, cursor_x)
         win.refresh()
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
         if key in (27, curses.KEY_F9):
             return
         if key == curses.KEY_F2:
@@ -7042,7 +7091,7 @@ def orders_dialog(stdscr):
 
         win = curses.newwin(height, width, y, x)
         win.keypad(True)
-        win.timeout(1000)
+        win.timeout(200)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
         win.box()
@@ -7130,8 +7179,7 @@ def orders_dialog(stdscr):
         if filter_tags:
             footer = f" Filter[{', '.join(filter_tags)}] " + footer
         win.attrset(curses.color_pair(3))
-        win.addstr(height - 1, 1, " " * (width - 2))
-        win.addstr(height - 1, 1, footer[:width - 2])
+        draw_footer_line(win, height - 1, 1, width - 2, footer)
         win.refresh()
 
         try:
@@ -7327,11 +7375,16 @@ def inventory_dialog(stdscr):
         total, counted, differences = inventory_session_summary(get_inventory_lines(session["session_id"]))
         footer = f" F2 Neu  F3 Zaehlen  F4 CSV  F5 Drucken  F6 Diff  F7 Uebern.  F9 Zurueck | Pos {total} Gezaehlt {counted} Diff {differences} "
         win.attrset(curses.color_pair(3))
-        win.addstr(height - 1, 1, " " * (width - 2))
-        win.addstr(height - 1, 1, footer[:width - 2])
+        draw_footer_line(win, height - 1, 1, width - 2, footer)
         win.refresh()
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
 
         if key in (27, curses.KEY_F9):
             return False
@@ -7457,7 +7510,13 @@ def main(stdscr):
             external_mode,
         )
 
-        key = stdscr.get_wch()
+        stdscr.timeout(200)
+        try:
+            key = stdscr.get_wch()
+        except curses.error:
+            continue
+        finally:
+            stdscr.timeout(-1)
         selected_item = (
             get_selected_item(items, left_selected)
             if active_pane == "left"
