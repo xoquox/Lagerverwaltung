@@ -3488,6 +3488,7 @@ def item_info_dialog(stdscr, item):
     description_lines = clean_shopify_description(item.get("shopify_description")).splitlines()
     description_top = 0
 
+    footer = " PgUp/PgDn oder Pfeile scrollen  F9/Esc schliessen "
     while True:
         draw_shadow(stdscr, y, x, height, width)
         win = curses.newwin(height, width, y, x)
@@ -3520,18 +3521,18 @@ def item_info_dialog(stdscr, item):
             desc_win.addstr(1 + index, 2, line[: desc_width - 4])
 
         win.attrset(curses.color_pair(3))
-        footer = " PgUp/PgDn oder Pfeile scrollen  F9/Esc schliessen "
-        draw_footer_line(win, height - 1, 1, width - 2, footer)
+        try:
+            win.addstr(height - 1, 1, " " * max(0, width - 2))
+            win.addstr(height - 1, 1, footer[: max(0, width - 2)])
+        except curses.error:
+            pass
         win.refresh()
 
-        win.timeout(200)
         try:
             key = win.get_wch()
         except curses.error:
             continue
-        finally:
-            win.timeout(-1)
-        if key in (27, curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
+        if key in (27, "\x1b", curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
             return
         if key == curses.KEY_NPAGE:
             description_top = min(max(0, len(wrapped_description) - visible_desc_rows), description_top + visible_desc_rows)
