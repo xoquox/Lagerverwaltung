@@ -346,6 +346,7 @@ def init_db():
             label_id integer,
             order_id text NOT NULL,
             tracking_number text NOT NULL,
+            tracking_url text,
             carrier text NOT NULL,
             line_items_json text,
             notify_customer boolean NOT NULL DEFAULT FALSE,
@@ -360,6 +361,7 @@ def init_db():
         """
     )
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS label_id integer")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS line_items_json text")
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
@@ -1021,6 +1023,17 @@ def _normalize_carrier_name(value):
     return normalized[:32]
 
 
+def _shopify_tracking_company(value):
+    normalized = _normalize_carrier_name(value)
+    if normalized == "gls":
+        return "GLS"
+    if normalized == "post":
+        return "Deutsche Post"
+    if normalized in {"dhl", "dhl_private"}:
+        return "DHL"
+    return (value or "").strip() or "GLS"
+
+
 def _iter_fulfillments(order):
     rows = order.get("fulfillments") or []
     if isinstance(rows, dict):
@@ -1225,7 +1238,7 @@ def _build_line_items_by_fulfillment_order(open_targets, requested_items):
     return payload
 
 
-def create_fulfillment(order_id, tracking_number, company, notify_customer=False, line_items=None):
+def create_fulfillment(order_id, tracking_number, company, tracking_url=None, notify_customer=False, line_items=None):
     open_targets = get_open_fulfillment_order_targets(order_id)
     mutation = """
     mutation CreateFulfillment($fulfillment: FulfillmentInput!, $message: String) {
@@ -1248,14 +1261,18 @@ def create_fulfillment(order_id, tracking_number, company, notify_customer=False
     """
 
     line_items_payload = _build_line_items_by_fulfillment_order(open_targets, line_items)
+    tracking_info = {
+        "number": tracking_number,
+        "company": _shopify_tracking_company(company),
+    }
+    if (tracking_url or "").strip():
+        tracking_info["url"] = tracking_url.strip()
+
     variables = {
         "fulfillment": {
             "notifyCustomer": bool(notify_customer),
             "lineItemsByFulfillmentOrder": line_items_payload,
-            "trackingInfo": {
-                "number": tracking_number,
-                "company": company,
-            },
+            "trackingInfo": tracking_info,
         },
         "message": "Lagerverwaltung Versand abgeschlossen",
     }
@@ -1299,6 +1316,7 @@ def claim_fulfillment_jobs(limit=20):
             j.label_id,
             j.order_id,
             j.tracking_number,
+            j.tracking_url,
             j.carrier,
             j.line_items_json,
             j.notify_customer,
@@ -1428,6 +1446,7 @@ def process_fulfillment_jobs(limit=20):
                 order_id=job["order_id"],
                 tracking_number=job["tracking_number"],
                 company=job["carrier"],
+                tracking_url=job.get("tracking_url"),
                 notify_customer=job["notify_customer"],
                 line_items=line_items,
             )

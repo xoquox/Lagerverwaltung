@@ -359,6 +359,12 @@ TRANSLATIONS = {
         "field_shipping_format_post": "POST Labelformat",
         "field_shipping_services": "Versand Services",
         "field_shipping_packaging_weight": "Verpackung Gewicht (g)",
+        "field_shopify_tracking_mode_gls": "Shopify Tracking GLS",
+        "field_shopify_tracking_mode_post": "Shopify Tracking POST",
+        "field_shopify_tracking_mode_dhl_private": "Shopify Tracking DHL Privat",
+        "field_shopify_tracking_url_gls": "Shopify Tracking URL GLS",
+        "field_shopify_tracking_url_post": "Shopify Tracking URL POST",
+        "field_shopify_tracking_url_dhl_private": "Shopify Tracking URL DHL Privat",
         "field_gls_api_url": "GLS API URL",
         "field_gls_user": "GLS User",
         "field_gls_password": "GLS Passwort",
@@ -466,6 +472,12 @@ TRANSLATIONS = {
         "field_shipping_format_post": "POST Label Format",
         "field_shipping_services": "Shipping Services",
         "field_shipping_packaging_weight": "Packaging Weight (g)",
+        "field_shopify_tracking_mode_gls": "Shopify Tracking GLS",
+        "field_shopify_tracking_mode_post": "Shopify Tracking POST",
+        "field_shopify_tracking_mode_dhl_private": "Shopify Tracking DHL Private",
+        "field_shopify_tracking_url_gls": "Shopify Tracking URL GLS",
+        "field_shopify_tracking_url_post": "Shopify Tracking URL POST",
+        "field_shopify_tracking_url_dhl_private": "Shopify Tracking URL DHL Private",
         "field_gls_api_url": "GLS API URL",
         "field_gls_user": "GLS User",
         "field_gls_password": "GLS Password",
@@ -817,6 +829,7 @@ def init_db():
             label_id integer,
             order_id text NOT NULL,
             tracking_number text NOT NULL,
+            tracking_url text,
             carrier text NOT NULL,
             line_items_json text,
             notify_customer boolean NOT NULL DEFAULT FALSE,
@@ -831,6 +844,7 @@ def init_db():
         """
     )
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS label_id integer")
+    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS line_items_json text")
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
@@ -910,12 +924,29 @@ class DatabaseUnavailableError(RuntimeError):
     pass
 
 
+class DatabaseBusyError(RuntimeError):
+    pass
+
+
 def _summarize_db_error(exc):
     text = str(exc or "").strip()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return "Datenbank ist nicht erreichbar."
     return " | ".join(lines[:2])[:180]
+
+
+def _execute_db_query(cur, query, params=None, deadlock_retries=1):
+    params = params or []
+    for attempt in range(deadlock_retries + 1):
+        try:
+            cur.execute(query, params)
+            return
+        except psycopg2.errors.DeadlockDetected as exc:
+            if attempt < deadlock_retries:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise DatabaseBusyError("Datenbank ist kurzzeitig blockiert. Bitte erneut versuchen.") from exc
 
 
 def _probe_database_ready():
@@ -944,7 +975,7 @@ def database_connection_dialog(stdscr, error_text):
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
         win.box()
-        win.addstr(0, 2, " DB nicht erreichbar ")
+        win.addstr(0, 2, " DB Problem ")
         host_line = f"Host: {SETTINGS.get('db_host') or '-'}  DB: {SETTINGS.get('db_name') or '-'}"
         status_line = "Warte auf Verbindung, starte automatisch bei Erfolg."
         footer = "Enter Neu versuchen  F2 Einstellungen  F9 Beenden"
@@ -1215,7 +1246,8 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
     if conditions:
         where = "WHERE " + " AND ".join(conditions)
 
-    cur.execute(
+    _execute_db_query(
+        cur,
         f"""
         SELECT
             so.order_id,
@@ -1589,6 +1621,55 @@ def _shipment_number(row):
     return ((row.get("parcel_number") or "").strip() or (row.get("track_id") or "").strip() or "-")
 
 
+def _shopify_tracking_company(carrier):
+    normalized = (carrier or "").strip().lower()
+    if normalized == "gls":
+        return "GLS"
+    if normalized == "post":
+        return "Deutsche Post"
+    if normalized in {"dhl", "dhl_private"}:
+        return "DHL"
+    return (carrier or "").strip().upper() or "GLS"
+
+
+def _tracking_url_for_carrier(carrier, tracking_number):
+    number = (tracking_number or "").strip()
+    if not number:
+        return None
+    normalized = (carrier or "").strip().lower()
+    template = ""
+    if normalized == "gls":
+        template = (SETTINGS.get("shopify_tracking_url_gls") or "").strip()
+    elif normalized == "post":
+        template = (SETTINGS.get("shopify_tracking_url_post") or "").strip()
+    elif normalized in {"dhl", "dhl_private"}:
+        template = (SETTINGS.get("shopify_tracking_url_dhl_private") or "").strip()
+    if not template:
+        return None
+    try:
+        return template.format(tracking_number=number, number=number)
+    except Exception:
+        return template.replace("{tracking_number}", number).replace("{number}", number)
+
+
+def _shopify_tracking_mode_for_carrier(carrier):
+    normalized = (carrier or "").strip().lower()
+    if normalized == "gls":
+        return (SETTINGS.get("shopify_tracking_mode_gls") or "company").strip().lower()
+    if normalized == "post":
+        return (SETTINGS.get("shopify_tracking_mode_post") or "company_and_url").strip().lower()
+    if normalized in {"dhl", "dhl_private"}:
+        return (SETTINGS.get("shopify_tracking_mode_dhl_private") or "company").strip().lower()
+    return "company"
+
+
+def _effective_tracking_url_for_shopify(carrier, tracking_number, tracking_url=None):
+    mode = _shopify_tracking_mode_for_carrier(carrier)
+    if mode == "company_and_url":
+        return (tracking_url or "").strip() or _tracking_url_for_carrier(carrier, tracking_number)
+    return None
+
+
 def _shipment_source_label(value):
     normalized = (value or "").strip().lower()
     if current_language() == "de":
@@ -1626,8 +1707,14 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
     label_id = label_row.get("id")
     order_id = (label_row.get("order_id") or "").strip()
     tracking_number = (label_row.get("parcel_number") or label_row.get("track_id") or "").strip()
-    carrier = (label_row.get("carrier") or "gls").strip().upper()
-    if carrier == "TEST":
+    carrier_code = (label_row.get("carrier") or "gls").strip()
+    carrier = _shopify_tracking_company(carrier_code)
+    tracking_url = _effective_tracking_url_for_shopify(
+        carrier_code,
+        tracking_number,
+        (label_row.get("tracking_url") or "").strip(),
+    )
+    if carrier_code.strip().upper() == "TEST":
         raise RuntimeError("Test-Labels duerfen nicht an Shopify uebertragen werden.")
     if not order_id:
         raise RuntimeError("order_id fehlt.")
@@ -1659,6 +1746,7 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
             label_id,
             order_id,
             tracking_number,
+            tracking_url,
             carrier,
             line_items_json,
             notify_customer,
@@ -1667,10 +1755,10 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
             created_at,
             updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
         RETURNING id, status
         """,
-        (label_id, order_id, tracking_number, carrier, None, bool(notify_customer)),
+        (label_id, order_id, tracking_number, tracking_url, carrier, None, bool(notify_customer)),
     )
     row = cur.fetchone()
     con.commit()
@@ -1683,8 +1771,14 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
     label_id = label_row.get("id")
     order_id = (label_row.get("order_id") or "").strip()
     tracking_number = (label_row.get("parcel_number") or label_row.get("track_id") or "").strip()
-    carrier = (label_row.get("carrier") or "gls").strip().upper()
-    if carrier == "TEST":
+    carrier_code = (label_row.get("carrier") or "gls").strip()
+    carrier = _shopify_tracking_company(carrier_code)
+    tracking_url = _effective_tracking_url_for_shopify(
+        carrier_code,
+        tracking_number,
+        (label_row.get("tracking_url") or "").strip(),
+    )
+    if carrier_code.strip().upper() == "TEST":
         raise RuntimeError("Test-Labels duerfen nicht an Shopify uebertragen werden.")
     if not label_id:
         raise RuntimeError("label_id fehlt.")
@@ -1741,6 +1835,7 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
             label_id,
             order_id,
             tracking_number,
+            tracking_url,
             carrier,
             line_items_json,
             notify_customer,
@@ -1749,13 +1844,14 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
             created_at,
             updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
         RETURNING id, status
         """,
         (
             label_id,
             order_id,
             tracking_number,
+            tracking_url,
             carrier,
             json.dumps(line_items, ensure_ascii=True),
             bool(notify_customer),
@@ -2731,6 +2827,7 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     first_voucher = voucher_list[0] if voucher_list else {}
     track_id = (first_voucher.get("trackId") or "").strip() or (first_voucher.get("voucherId") or "").strip()
     parcel_number = (first_voucher.get("trackId") or "").strip() or None
+    tracking_url = _tracking_url_for_carrier("post", track_id or parcel_number or _reference)
     label_path = _save_shipping_label_pdf("post", order["order_name"], track_id or _reference, pdf_blob)
     label_id = insert_gls_label_history(
         order=order,
@@ -2741,6 +2838,7 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
         status="CREATED",
         weight_kg=_weight_value,
         carrier="post",
+        tracking_url=tracking_url,
     )
     return {
         "label_id": label_id,
@@ -2750,6 +2848,7 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
         "shipment_reference": _reference,
         "post_product_code": product["product_code"],
         "post_product_name": product["name"],
+        "tracking_url": tracking_url,
     }
 
 
@@ -3559,8 +3658,11 @@ def draw_footer_line(win, y, x, width, text):
     width = max(0, int(width))
     if width <= 0:
         return
-    win.addstr(y, x, " " * width)
-    win.addstr(y, x, _scrolling_footer_slice(text, width))
+    try:
+        win.addstr(y, x, " " * width)
+        win.addstr(y, x, _scrolling_footer_slice(text, width))
+    except curses.error:
+        return
 
 
 def draw_panel(win, title, lines, selected, top_index, active):
@@ -3672,16 +3774,21 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     if external_mode == "only":
         focus = focus[:-1] + t("view_external")
 
-    stdscr.addstr(h-2, 0, " "*(w-1))
-
-    if filter_text:
-        stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[:w-1])
-    else:
-        stdscr.addstr(h-2, 0, focus[:w-1])
+    try:
+        stdscr.addstr(h-2, 0, " " * max(0, w - 1))
+        if filter_text:
+            stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[: max(0, w - 1)])
+        else:
+            stdscr.addstr(h-2, 0, focus[: max(0, w - 1)])
+    except curses.error:
+        pass
     sync_label = format_shopify_sync_status_label()
     sync_x = max(0, w - len(sync_label) - 1)
     if sync_x > 4:
-        stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)])
+        try:
+            stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)])
+        except curses.error:
+            pass
 
     draw_footer_line(stdscr, h - 1, 0, w - 1, status)
 
@@ -4504,6 +4611,12 @@ def settings_dialog(stdscr):
         "shipping_packaging_weight_grams": str(
             SETTINGS.get("shipping_packaging_weight_grams", DEFAULT_SETTINGS.get("shipping_packaging_weight_grams", 400))
         ),
+        "shopify_tracking_mode_gls": (SETTINGS.get("shopify_tracking_mode_gls") or DEFAULT_SETTINGS.get("shopify_tracking_mode_gls", "company")).strip().lower(),
+        "shopify_tracking_mode_post": (SETTINGS.get("shopify_tracking_mode_post") or DEFAULT_SETTINGS.get("shopify_tracking_mode_post", "company_and_url")).strip().lower(),
+        "shopify_tracking_mode_dhl_private": (SETTINGS.get("shopify_tracking_mode_dhl_private") or DEFAULT_SETTINGS.get("shopify_tracking_mode_dhl_private", "company")).strip().lower(),
+        "shopify_tracking_url_gls": SETTINGS.get("shopify_tracking_url_gls", ""),
+        "shopify_tracking_url_post": SETTINGS.get("shopify_tracking_url_post", ""),
+        "shopify_tracking_url_dhl_private": SETTINGS.get("shopify_tracking_url_dhl_private", ""),
         "gls_api_url": SETTINGS.get("gls_api_url", ""),
         "gls_user": SETTINGS.get("gls_user", ""),
         "gls_password": SETTINGS.get("gls_password", ""),
@@ -4569,21 +4682,30 @@ def settings_dialog(stdscr):
             "title": "Versand",
             "fields": [
                 ("shipping_label_output_dir", "field_shipping_label_output_dir"),
-                ("shipping_label_format_gls", "field_shipping_format_gls"),
-                ("shipping_label_format_dhl_private", "field_shipping_format_dhl_private"),
-                ("shipping_label_format_post", "field_shipping_format_post"),
-                ("shipping_services_display", "field_shipping_services"),
                 ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
+                ("_heading_gls", "GLS"),
+                ("shipping_label_format_gls", "field_shipping_format_gls"),
+                ("shipping_services_display", "field_shipping_services"),
+                ("shopify_tracking_mode_gls", "field_shopify_tracking_mode_gls"),
+                ("shopify_tracking_url_gls", "field_shopify_tracking_url_gls"),
                 ("gls_api_url", "field_gls_api_url"),
                 ("gls_user", "field_gls_user"),
                 ("gls_password", "field_gls_password"),
                 ("gls_contact_id", "field_gls_contact_id"),
+                ("_heading_post", "POST"),
+                ("shipping_label_format_post", "field_shipping_format_post"),
+                ("shopify_tracking_mode_post", "field_shopify_tracking_mode_post"),
+                ("shopify_tracking_url_post", "field_shopify_tracking_url_post"),
                 ("post_api_url", "field_post_api_url"),
                 ("post_api_key", "field_post_api_key"),
                 ("post_api_secret", "field_post_api_secret"),
                 ("post_user", "field_post_user"),
                 ("post_password", "field_post_password"),
                 ("post_partner_id", "field_post_partner_id"),
+                ("_heading_dhl_private", "DHL Privat"),
+                ("shipping_label_format_dhl_private", "field_shipping_format_dhl_private"),
+                ("shopify_tracking_mode_dhl_private", "field_shopify_tracking_mode_dhl_private"),
+                ("shopify_tracking_url_dhl_private", "field_shopify_tracking_url_dhl_private"),
                 ("dhl_private_api_url", "field_dhl_private_api_url"),
                 ("dhl_private_api_test_url", "field_dhl_private_api_test_url"),
                 ("dhl_private_api_key", "field_dhl_private_api_key"),
@@ -4606,8 +4728,14 @@ def settings_dialog(stdscr):
     ]
     active_tab = 0
     active_field_by_tab = [0 for _ in tabs]
-    cursor_positions = {name: len(str(values.get(name, ""))) for tab in tabs for name, _ in tab["fields"]}
-    scroll_offsets = {name: 0 for tab in tabs for name, _ in tab["fields"]}
+    editable_field_names = {
+        name
+        for tab in tabs
+        for name, _ in tab["fields"]
+        if not str(name).startswith("_heading_")
+    }
+    cursor_positions = {name: len(str(values.get(name, ""))) for name in editable_field_names}
+    scroll_offsets = {name: 0 for name in editable_field_names}
 
     def normalize_view(field_name, field_width):
         field_width = max(1, field_width)
@@ -4626,13 +4754,22 @@ def settings_dialog(stdscr):
     while True:
         tab = tabs[active_tab]
         tab_fields = tab["fields"]
-        if active_field_by_tab[active_tab] >= len(tab_fields):
-            active_field_by_tab[active_tab] = max(0, len(tab_fields) - 1)
-        if active_field_by_tab[active_tab] < 0:
-            active_field_by_tab[active_tab] = 0
-
-        active_index = active_field_by_tab[active_tab] if tab_fields else 0
-        active_name = tab_fields[active_index][0] if tab_fields else ""
+        editable_indices = [idx for idx, (name, _label_key) in enumerate(tab_fields) if not str(name).startswith("_heading_")]
+        if not editable_indices:
+            active_index = 0
+            active_name = ""
+        else:
+            current_pos = active_field_by_tab[active_tab]
+            if current_pos >= len(editable_indices):
+                current_pos = len(editable_indices) - 1
+            if current_pos < 0:
+                current_pos = 0
+            active_field_by_tab[active_tab] = current_pos
+            active_index = editable_indices[current_pos]
+            active_name = tab_fields[active_index][0]
+        if not tab_fields:
+            active_index = 0
+            active_name = ""
 
         h, w = stdscr.getmaxyx()
         max_label = max((len(t(label_key)) for entry in tabs for _, label_key in entry["fields"]), default=12)
@@ -4673,18 +4810,24 @@ def settings_dialog(stdscr):
 
         for idx, (name, label_key) in enumerate(tab_fields):
             row = 3 + idx
-            label = t(label_key)
-            value = str(values.get(name, ""))
-            win.addstr(row, 2, f"{label}:")
-            normalize_view(name, field_width)
-            start = scroll_offsets[name]
-            visible = value[start:start + field_width]
-            if idx == active_index:
+            if str(name).startswith("_heading_"):
+                label = str(label_key)
                 win.attrset(curses.color_pair(2))
-                win.addstr(row, field_x, visible.ljust(field_width))
+                win.addstr(row, 2, _fit(f"[{label}]", width - 4))
                 win.attrset(curses.color_pair(1))
             else:
-                win.addstr(row, field_x, visible.ljust(field_width))
+                label = t(label_key)
+                value = str(values.get(name, ""))
+                win.addstr(row, 2, f"{label}:")
+                normalize_view(name, field_width)
+                start = scroll_offsets[name]
+                visible = value[start:start + field_width]
+                if idx == active_index:
+                    win.attrset(curses.color_pair(2))
+                    win.addstr(row, field_x, visible.ljust(field_width))
+                    win.attrset(curses.color_pair(1))
+                else:
+                    win.addstr(row, field_x, visible.ljust(field_width))
 
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
@@ -4718,10 +4861,12 @@ def settings_dialog(stdscr):
             active_tab = (active_tab - 1) % len(tabs)
             continue
         if key == curses.KEY_DOWN:
-            active_field_by_tab[active_tab] = (active_index + 1) % max(1, len(tab_fields))
+            if editable_indices:
+                active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
             continue
         if key == curses.KEY_UP:
-            active_field_by_tab[active_tab] = (active_index - 1) % max(1, len(tab_fields))
+            if editable_indices:
+                active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] - 1) % len(editable_indices)
             continue
 
         if not active_name:
@@ -4878,11 +5023,22 @@ def settings_dialog(stdscr):
                     ],
                     values["dhl_private_use_test_api"],
                 )
+            elif active_name in {"shopify_tracking_mode_gls", "shopify_tracking_mode_post", "shopify_tracking_mode_dhl_private"}:
+                values[active_name] = choice_dialog(
+                    stdscr,
+                    "Shopify Tracking",
+                    [
+                        {"value": "company", "label": "Carrier + Nummer"},
+                        {"value": "company_and_url", "label": "Carrier + Nummer + URL"},
+                    ],
+                    values[active_name],
+                )
             elif active_name == "shipping_services_display":
                 values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
                 values["shipping_services_display"] = _shipping_services_summary(values["shipping_services"])
             else:
-                active_field_by_tab[active_tab] = (active_index + 1) % max(1, len(tab_fields))
+                if editable_indices:
+                    active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
             cursor_positions[active_name] = len(str(values.get(active_name, "")))
             continue
 
@@ -4926,6 +5082,12 @@ def settings_dialog(stdscr):
         "shipping_label_format_post": _normalize_shipping_label_format(values["shipping_label_format_post"].strip()),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
+        "shopify_tracking_mode_gls": values["shopify_tracking_mode_gls"].strip().lower(),
+        "shopify_tracking_mode_post": values["shopify_tracking_mode_post"].strip().lower(),
+        "shopify_tracking_mode_dhl_private": values["shopify_tracking_mode_dhl_private"].strip().lower(),
+        "shopify_tracking_url_gls": values["shopify_tracking_url_gls"].strip(),
+        "shopify_tracking_url_post": values["shopify_tracking_url_post"].strip(),
+        "shopify_tracking_url_dhl_private": values["shopify_tracking_url_dhl_private"].strip(),
         "gls_api_url": values["gls_api_url"].strip(),
         "gls_user": values["gls_user"].strip(),
         "gls_password": values["gls_password"],
@@ -7029,6 +7191,10 @@ def shipping_history_dialog(stdscr, selected_order=None):
 
 
 def orders_dialog(stdscr):
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     order_filter = None
     only_pending = False
     fulfillment_filter = "all"
@@ -7055,7 +7221,7 @@ def orders_dialog(stdscr):
                 selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
                 reload_orders = False
                 last_orders_refresh_at = time.monotonic()
-        except DatabaseUnavailableError as exc:
+        except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
             reload_orders = True
@@ -7075,7 +7241,7 @@ def orders_dialog(stdscr):
         try:
             if selected_order_id and selected_order_id not in order_items_cache:
                 order_items_cache[selected_order_id] = get_order_items(selected_order_id)
-        except DatabaseUnavailableError as exc:
+        except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
             reload_orders = True
@@ -7128,7 +7294,7 @@ def orders_dialog(stdscr):
             country = _localized_country_display(selected_order.get("shipping_country"))
             try:
                 order_shipments = list_gls_labels(selected_order["order_id"])
-            except DatabaseUnavailableError as exc:
+            except (DatabaseUnavailableError, DatabaseBusyError) as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
                 reload_orders = True
@@ -7188,6 +7354,10 @@ def orders_dialog(stdscr):
             continue
 
         if key in (27, curses.KEY_F9):
+            try:
+                curses.curs_set(1)
+            except curses.error:
+                pass
             return
         if key == curses.KEY_DOWN:
             selected = move_selection(orders, selected, 1)
@@ -7216,6 +7386,10 @@ def orders_dialog(stdscr):
             reload_orders = True
         elif key == curses.KEY_F4:
             value = order_jump_dialog(stdscr, order_filter or "")
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
             if value is not None:
                 order_filter = value or None
                 selected = 0
@@ -7236,44 +7410,92 @@ def orders_dialog(stdscr):
         elif key == curses.KEY_F5 and selected_order:
             try:
                 create_shipping_label_for_order(stdscr, selected_order)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
                     return
                 reload_orders = True
         elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
             try:
                 create_manual_shipping_label(stdscr)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
                     return
                 reload_orders = True
         elif key == curses.KEY_F6 and selected_order:
             try:
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
                     return
                 reload_orders = True
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
             try:
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
                     return
                 reload_orders = True
         elif key == curses.KEY_F7:
             try:
                 run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
                 reload_orders = True
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
                     return
                 reload_orders = True
         elif key == curses.KEY_F8:
             try:
                 shipping_history_dialog(stdscr, selected_order)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
                     return
                 reload_orders = True
         elif key == curses.KEY_F10 and selected_order:

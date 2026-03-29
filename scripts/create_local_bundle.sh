@@ -63,6 +63,8 @@ portable_keys = {
     "post_api_url", "post_api_key", "post_api_secret", "post_user", "post_password", "post_partner_id",
     "dhl_private_api_url", "dhl_private_api_test_url", "dhl_private_api_key", "dhl_private_api_secret", "dhl_private_use_test_api",
     "shipping_services", "shipping_packaging_weight_grams",
+    "shopify_tracking_mode_gls", "shopify_tracking_mode_post", "shopify_tracking_mode_dhl_private",
+    "shopify_tracking_url_gls", "shopify_tracking_url_post", "shopify_tracking_url_dhl_private",
     "delivery_note_sender_name", "delivery_note_sender_street", "delivery_note_sender_city", "delivery_note_sender_email",
 }
 
@@ -115,6 +117,12 @@ Installationsablauf:
 1. Git-Repo normal klonen.
 2. Dieses Archiv in das Projektverzeichnis kopieren.
 3. ./scripts/apply_local_bundle.sh <archiv.zip> ausfuehren.
+
+Enthalten sind portable/private Projektdateien wie:
+- API-Zugaenge und portable Settings
+- Shopify-Sync .env
+- GLS-Zugangspdf
+- Fonts, Logo und ausgewaehlte Vorlagen/Theme-Dateien
 
 Nicht ueberschrieben werden lokale Arbeitsplatz-Einstellungen wie:
 - Drucker

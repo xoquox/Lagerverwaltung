@@ -764,6 +764,31 @@ class LagerMcLogicTests(unittest.TestCase):
                 }
             )
 
+    def test_tracking_url_for_carrier_uses_settings_template(self):
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "shopify_tracking_url_gls": "https://gls.example/track/{tracking_number}",
+                "shopify_tracking_url_post": "https://post.example/{number}",
+                "shopify_tracking_url_dhl_private": "",
+                "shopify_tracking_mode_gls": "company_and_url",
+                "shopify_tracking_mode_post": "company_and_url",
+                "shopify_tracking_mode_dhl_private": "company",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                self.lager_mc._tracking_url_for_carrier("gls", "ABC123"),
+                "https://gls.example/track/ABC123",
+            )
+            self.assertEqual(
+                self.lager_mc._tracking_url_for_carrier("post", "XYZ789"),
+                "https://post.example/XYZ789",
+            )
+            self.assertIsNone(
+                self.lager_mc._effective_tracking_url_for_shopify("dhl_private", "DHL123")
+            )
+
     def test_create_shipping_label_routes_to_requested_carrier(self):
         order = {
             "order_id": "gid://shopify/Order/1",
