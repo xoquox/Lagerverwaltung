@@ -2351,6 +2351,103 @@ def manual_label_print_mode_dialog(stdscr, current_mode):
     )
 
 
+def gls_pickup_product_dialog(stdscr, current_value):
+    return choice_dialog(
+        stdscr,
+        "GLS Produkt",
+        [
+            {"value": "PARCEL", "label": "PARCEL"},
+            {"value": "EXPRESS", "label": "EXPRESS"},
+        ],
+        (current_value or "PARCEL").strip().upper(),
+        cancel_returns_none=True,
+    )
+
+
+def gls_pickup_haz_goods_dialog(stdscr, current_value):
+    return choice_dialog(
+        stdscr,
+        "Gefahrgut",
+        [
+            {"value": "nein", "label": "Nein"},
+            {"value": "ja", "label": "Ja"},
+        ],
+        "ja" if current_value else "nein",
+        cancel_returns_none=True,
+    )
+
+
+def create_gls_sporadic_collection_dialog(stdscr):
+    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    state = {
+        "pickup_date": tomorrow,
+        "parcel_count": "1",
+        "product": "PARCEL",
+        "expected_total_weight": "",
+        "contains_haz_goods": False,
+        "additional_information": "",
+    }
+    active = 0
+
+    while True:
+        fields = [
+            {"name": "pickup_date", "label": "Abholdatum", "value": state["pickup_date"]},
+            {"name": "parcel_count", "label": "Paketanzahl", "value": state["parcel_count"]},
+            {"name": "product", "label": "Produkt (F3)", "value": state["product"]},
+            {"name": "expected_total_weight", "label": "Gesamtgewicht kg", "value": state["expected_total_weight"]},
+            {"name": "contains_haz_goods", "label": "Gefahrgut (F4)", "value": "Ja" if state["contains_haz_goods"] else "Nein"},
+            {"name": "additional_information", "label": "Hinweis", "value": state["additional_information"]},
+        ]
+        result = form_dialog(
+            stdscr,
+            "GLS Abholung buchen",
+            fields,
+            initial_active=active,
+            footer_text="Enter weiter/buchen  F3 Produkt  F4 Gefahrgut  F9 Zurueck",
+            extra_actions=[
+                {"name": "product", "keys": {curses.KEY_F3}},
+                {"name": "haz", "keys": {curses.KEY_F4}},
+            ],
+        )
+        if result is None:
+            return None
+        if "__action__" in result:
+            state.update(result.get("__values__", {}))
+            active = result.get("__active__", active)
+            if result["__action__"] == "product":
+                chosen = gls_pickup_product_dialog(stdscr, state["product"])
+                if chosen:
+                    state["product"] = chosen
+            elif result["__action__"] == "haz":
+                chosen = gls_pickup_haz_goods_dialog(stdscr, state["contains_haz_goods"])
+                if chosen is not None:
+                    state["contains_haz_goods"] = chosen == "ja"
+            continue
+
+        state.update(result)
+        active = 0
+        try:
+            booking = gls_order_sporadic_collection(
+                preferred_pickup_date=state["pickup_date"],
+                number_of_parcels=state["parcel_count"],
+                product=state["product"],
+                expected_total_weight=state["expected_total_weight"],
+                contains_haz_goods=state["contains_haz_goods"],
+                additional_information=state["additional_information"],
+            )
+        except Exception as exc:
+            message_box(stdscr, "GLS Abholung", str(exc)[:220])
+            continue
+
+        estimated = booking.get("estimated_date") or state["pickup_date"]
+        message_box(
+            stdscr,
+            "GLS Abholung",
+            f"Abholung angefragt fuer {state['pickup_date']}. Bestaetigt: {estimated}",
+        )
+        return booking
+
+
 def _gls_api_json_request(url, credentials, payload=None):
     auth_raw = f"{credentials['user']}:{credentials['password']}"
     auth = base64.b64encode(auth_raw.encode("utf-8")).decode("ascii")
@@ -2380,6 +2477,86 @@ def _gls_api_json_request(url, credentials, payload=None):
         except json.JSONDecodeError:
             parsed = None
     return status_code, parsed, raw
+
+
+def _gls_sporadic_collection_url(credentials):
+    api_url = (credentials.get("api_url") or "").strip()
+    if not api_url:
+        raise RuntimeError("GLS API URL fehlt.")
+    base = api_url.rsplit("/", 1)[0] if "/" in api_url else api_url
+    return base.rstrip("/") + "/sporadiccollection"
+
+
+def gls_order_sporadic_collection(
+    preferred_pickup_date,
+    number_of_parcels,
+    product="PARCEL",
+    expected_total_weight=None,
+    contains_haz_goods=False,
+    additional_information="",
+):
+    creds = load_gls_credentials()
+    pickup_date = (preferred_pickup_date or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pickup_date):
+        raise ValueError("Abholdatum muss im Format JJJJ-MM-TT sein.")
+    try:
+        parcel_count = int(number_of_parcels)
+    except (TypeError, ValueError):
+        raise ValueError("Paketanzahl ist ungueltig.")
+    if parcel_count <= 0:
+        raise ValueError("Paketanzahl muss groesser als 0 sein.")
+
+    product_value = (product or "PARCEL").strip().upper()
+    if product_value not in {"PARCEL", "EXPRESS"}:
+        raise ValueError("Produkt muss PARCEL oder EXPRESS sein.")
+
+    payload = {
+        "ContactID": creds["contact_id"],
+        "PreferredPickUpDate": pickup_date,
+        "NumberOfParcels": parcel_count,
+        "Product": product_value,
+    }
+    if expected_total_weight not in (None, ""):
+        try:
+            weight_value = float(expected_total_weight)
+        except (TypeError, ValueError):
+            raise ValueError("Gesamtgewicht ist ungueltig.")
+        if weight_value <= 0:
+            raise ValueError("Gesamtgewicht muss groesser als 0 sein.")
+        payload["ExpectedTotalWeight"] = round(weight_value, 3)
+    if contains_haz_goods:
+        payload["ContainsHazGoods"] = True
+    info_text = (additional_information or "").strip()
+    if info_text:
+        payload["AdditionalInformation"] = info_text[:200]
+
+    url = _gls_sporadic_collection_url(creds)
+    status_code, data, raw = _gls_api_json_request(url, creds, payload)
+    if status_code >= 400:
+        error_detail = _gls_error_summary(data, raw)
+        LOGGER.error(
+            "GLS SporadicCollection Fehler status=%s date=%s parcels=%s product=%s detail=%s",
+            status_code,
+            pickup_date,
+            parcel_count,
+            product_value,
+            error_detail or "-",
+        )
+        if error_detail:
+            raise RuntimeError(f"GLS Abholung Fehler HTTP {status_code}: {error_detail[:180]}")
+        raise RuntimeError(f"GLS Abholung Fehler HTTP {status_code}")
+
+    estimated_date = ""
+    if isinstance(data, dict):
+        estimated_date = (data.get("EstimatedPickUpDate") or "").strip()
+    return {
+        "url": url,
+        "requested_date": pickup_date,
+        "estimated_date": estimated_date or pickup_date,
+        "number_of_parcels": parcel_count,
+        "product": product_value,
+        "response": data,
+    }
 
 
 def _extract_first_pdf_blob(data):
@@ -3914,16 +4091,16 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
             row = 2 + i
             label = field["label"]
             val = values[i]
-
-            if i == active:
-                win.attron(curses.color_pair(2))
-
+            is_active = i == active
+            if is_active:
+                win.attrset(curses.color_pair(2))
+            else:
+                win.attrset(curses.color_pair(1))
             win.addstr(row, 2, f"{label}: ")
-            
+
             xpos = len(label) + 4
 
-            if i == active:
-                win.attron(curses.color_pair(2))
+            if is_active:
                 field_width = max(1, width - xpos - 2)
                 normalize_view(i, field_width)
                 visible = val[scroll_offsets[i]: scroll_offsets[i] + field_width]
@@ -3931,9 +4108,7 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
                 visible = val[-(width - xpos - 2):]
 
             win.addstr(row, xpos, visible.ljust(width - xpos - 2))
-
-
-
+            win.attrset(curses.color_pair(1))
 
         draw_footer_line(win, height - 2, 2, width - 4, footer)
         
@@ -6076,6 +6251,57 @@ def export_delivery_note_pdf(stdscr, order, order_items):
         message_box(stdscr, "Lieferschein PDF", output_path[-56:])
 
 
+def delivery_note_output_mode_dialog(stdscr):
+    return choice_dialog(
+        stdscr,
+        "Lieferschein Ausgabe",
+        [
+            {"value": "print", "label": "Drucken"},
+            {"value": "print_pdf", "label": "Drucken + PDF"},
+            {"value": "pdf", "label": "Nur PDF"},
+        ],
+        "print",
+        cancel_returns_none=True,
+    )
+
+
+def handle_delivery_note_output(stdscr, order, order_items):
+    mode = delivery_note_output_mode_dialog(stdscr)
+    if not mode:
+        return
+    if mode == "print":
+        print_delivery_note(stdscr, order, order_items)
+        return
+    if mode == "pdf":
+        export_delivery_note_pdf(stdscr, order, order_items)
+        return
+
+    try:
+        output_path, rows = create_delivery_note_pdf(order, order_items)
+        _print_delivery_note_pdf_path(order, output_path)
+    except FileNotFoundError as exc:
+        PRINT_LOGGER.exception("Lieferschein Druck+PDF nicht moeglich order=%s", order["order_name"])
+        message_box(stdscr, "Druckfehler", str(exc)[:56])
+    except ValueError as exc:
+        PRINT_LOGGER.warning("Lieferschein Druck+PDF abgebrochen order=%s reason=%s", order["order_name"], exc)
+        message_box(stdscr, "Druckfehler", str(exc)[:56])
+    except subprocess.CalledProcessError as exc:
+        PRINT_LOGGER.exception("Lieferschein Druck+PDF fehlgeschlagen order=%s", order["order_name"])
+        error_text = (exc.stderr or str(exc)).strip()
+        message_box(stdscr, "Druckfehler", f"{(error_text[:20] or 'Druckfehler')} {PRINT_LOG_PATH.name}"[:56])
+    except Exception:
+        PRINT_LOGGER.exception("Lieferschein Druck+PDF fehlgeschlagen order=%s", order["order_name"])
+        message_box(stdscr, "Druckfehler", f"Lieferschein fehlgeschlagen {PRINT_LOG_PATH.name}"[:56])
+    else:
+        PRINT_LOGGER.info(
+            "Lieferschein gedruckt+gespeichert order=%s items=%s path=%s",
+            order["order_name"],
+            len(rows),
+            output_path,
+        )
+        message_box(stdscr, "Lieferschein", output_path[-56:])
+
+
 def print_delivery_note(stdscr, order, order_items):
     printer = SETTINGS["delivery_note_printer"].strip()
     if not printer:
@@ -7333,7 +7559,7 @@ def orders_dialog(stdscr):
 
         draw_panel(details_win, "Positionen", detail_lines, 0, 0, False)
 
-        footer = " Space Mark  A Alle  F1 Offen  F2 Status  F3 Zahlung  F4 Springen  F5 Versandlabel  Shift+F5 Manuell  F6 Teilausf.  F7 Bulk  F8 Versand-History  F9 Zurueck  F10 Pickliste  F11 Lieferschein  F12 PDF "
+        footer = " Space Mark  A Alle  F1 Offen  F2 Status  F3 Zahlung  F4 Springen  F5 Versandlabel  Shift+F5 Manuell  F6 Teilausf.  F7 Bulk  F8 Versand-History  F9 Zurueck  F10 Pickliste  F11 Lieferschein  F12 GLS-Abholung "
         filter_tags = []
         if order_filter:
             filter_tags.append(f"Text:{order_filter}")
@@ -7499,12 +7725,38 @@ def orders_dialog(stdscr):
                         pass
                     return
                 reload_orders = True
+        elif key == curses.KEY_F11 and selected_order:
+            try:
+                handle_delivery_note_output(stdscr, selected_order, order_items)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders = True
         elif key == curses.KEY_F10 and selected_order:
             print_picklist(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F11 and selected_order:
-            print_delivery_note(stdscr, selected_order, order_items)
         elif key == curses.KEY_F12 and selected_order:
-            export_delivery_note_pdf(stdscr, selected_order, order_items)
+            try:
+                create_gls_sporadic_collection_dialog(stdscr)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders = True
         elif key == " " and selected_order:
             order_id = selected_order["order_id"]
             if order_id in selected_order_ids:

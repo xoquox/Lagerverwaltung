@@ -837,6 +837,58 @@ class LagerMcLogicTests(unittest.TestCase):
         save_mock.assert_called_once()
         update_mock.assert_called_once_with(9, "/tmp/reprint.pdf")
 
+    def test_gls_sporadic_collection_url_uses_backend_base(self):
+        creds = {"api_url": "https://example.invalid/backend/rs/shipments"}
+        self.assertEqual(
+            self.lager_mc._gls_sporadic_collection_url(creds),
+            "https://example.invalid/backend/rs/sporadiccollection",
+        )
+
+    def test_gls_order_sporadic_collection_builds_expected_payload(self):
+        with (
+            mock.patch.object(
+                self.lager_mc,
+                "load_gls_credentials",
+                return_value={
+                    "api_url": "https://example.invalid/backend/rs/shipments",
+                    "user": "u",
+                    "password": "p",
+                    "contact_id": "CID123",
+                },
+            ),
+            mock.patch.object(
+                self.lager_mc,
+                "_gls_api_json_request",
+                return_value=(200, {"EstimatedPickUpDate": "2026-03-31"}, b""),
+            ) as api_mock,
+        ):
+            result = self.lager_mc.gls_order_sporadic_collection(
+                preferred_pickup_date="2026-03-30",
+                number_of_parcels="2",
+                product="PARCEL",
+                expected_total_weight="12.5",
+                contains_haz_goods=True,
+                additional_information="Rampe hinten",
+            )
+
+        self.assertEqual(result["estimated_date"], "2026-03-31")
+        self.assertEqual(
+            api_mock.call_args.args[0],
+            "https://example.invalid/backend/rs/sporadiccollection",
+        )
+        self.assertEqual(
+            api_mock.call_args.args[2],
+            {
+                "ContactID": "CID123",
+                "PreferredPickUpDate": "2026-03-30",
+                "NumberOfParcels": 2,
+                "Product": "PARCEL",
+                "ExpectedTotalWeight": 12.5,
+                "ContainsHazGoods": True,
+                "AdditionalInformation": "Rampe hinten",
+            },
+        )
+
     def test_format_shopify_sync_status_label_prefers_pull_and_push_times(self):
         row = {
             "status": "ok",
