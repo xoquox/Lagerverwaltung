@@ -880,6 +880,39 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_customers (
+            customer_id text PRIMARY KEY,
+            first_name text,
+            last_name text,
+            display_name text,
+            email text,
+            phone text,
+            default_name text,
+            default_address1 text,
+            default_zip text,
+            default_city text,
+            default_country text,
+            default_phone text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS first_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS last_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS display_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS email text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_address1 text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_zip text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_city text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_country text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_display_name ON shopify_customers(display_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_email ON shopify_customers(email)")
     cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
     cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
     cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
@@ -1683,6 +1716,165 @@ def _shipment_source_label(value):
             "shopify": "Shopify",
         }
     return labels.get(normalized, value or "-")
+
+
+def search_shopify_customers(search_text="", limit=100):
+    con = db()
+    cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    needle = f"%{(search_text or '').strip()}%"
+    cur.execute(
+        """
+        SELECT
+            customer_id,
+            first_name,
+            last_name,
+            display_name,
+            email,
+            phone,
+            default_name,
+            default_address1,
+            default_zip,
+            default_city,
+            default_country,
+            default_phone
+        FROM shopify_customers
+        WHERE
+            %s = '%%'
+            OR COALESCE(display_name, '') ILIKE %s
+            OR COALESCE(email, '') ILIKE %s
+            OR COALESCE(default_name, '') ILIKE %s
+            OR COALESCE(default_address1, '') ILIKE %s
+            OR COALESCE(default_city, '') ILIKE %s
+        ORDER BY COALESCE(display_name, default_name, email, customer_id)
+        LIMIT %s
+        """,
+        (needle, needle, needle, needle, needle, needle, int(limit)),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _shopify_customer_dialog_label(row, width):
+    name = (row.get("display_name") or row.get("default_name") or row.get("email") or "-").strip()
+    address = (row.get("default_address1") or "").strip()
+    postal = (row.get("default_zip") or "").strip()
+    city = (row.get("default_city") or "").strip()
+    email = (row.get("email") or "").strip()
+    city_block = " ".join(part for part in [postal, city] if part).strip()
+    line = " | ".join(part for part in [name, address, city_block, email] if part)
+    return _fit(line, width)
+
+
+def _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code):
+    updated = dict(state)
+    if not chosen_customer:
+        return updated, country_code
+    updated["name"] = (
+        (chosen_customer.get("default_name") or "").strip()
+        or (chosen_customer.get("display_name") or "").strip()
+    )
+    updated["street"] = (chosen_customer.get("default_address1") or "").strip()
+    updated["zip"] = (chosen_customer.get("default_zip") or "").strip()
+    updated["city"] = (chosen_customer.get("default_city") or "").strip()
+    customer_country = _normalized_country_code_for_display(chosen_customer.get("default_country"))
+    return updated, (customer_country or country_code)
+
+
+def shopify_customer_dialog(stdscr, search_text=""):
+    query = search_text or ""
+    selected = 0
+    top_index = 0
+    cursor_pos = len(query)
+    base_h, base_w = stdscr.getmaxyx()
+    width = min(max(84, int(base_w * 0.86)), base_w - 4)
+    height = min(max(18, int(base_h * 0.7)), base_h - 2)
+    y = max(1, (base_h - height) // 2)
+    x = max(2, (base_w - width) // 2)
+
+    while True:
+        rows = search_shopify_customers(query, limit=150)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, " Shopify Kunde waehlen ")
+
+        prompt = "Suche: "
+        input_width = max(1, width - len(prompt) - 4)
+        input_scroll = max(0, cursor_pos - input_width + 1)
+        visible_query = query[input_scroll: input_scroll + input_width]
+        win.addstr(1, 2, prompt)
+        win.attrset(curses.color_pair(2))
+        win.addstr(1, 2 + len(prompt), visible_query.ljust(input_width))
+        win.attrset(curses.color_pair(1))
+
+        visible_rows = max(1, height - 5)
+        if selected >= len(rows):
+            selected = max(0, len(rows) - 1)
+        if selected < top_index:
+            top_index = selected
+        if selected >= top_index + visible_rows:
+            top_index = selected - visible_rows + 1
+
+        if not rows:
+            win.addstr(3, 2, _fit("Keine Kunden gefunden", width - 4))
+        else:
+            for row_index, row in enumerate(rows[top_index:top_index + visible_rows]):
+                real_index = top_index + row_index
+                line = _shopify_customer_dialog_label(row, width - 4)
+                y_pos = 3 + row_index
+                if real_index == selected:
+                    win.attrset(curses.color_pair(2))
+                    win.addstr(y_pos, 2, line.ljust(width - 4))
+                    win.attrset(curses.color_pair(1))
+                else:
+                    win.addstr(y_pos, 2, line.ljust(width - 4))
+
+        win.attrset(curses.color_pair(3))
+        draw_footer_line(win, height - 1, 1, width - 2, "Text eingeben  ↑↓ waehlen  Enter uebernehmen  F9 Zurueck")
+        win.attrset(curses.color_pair(1))
+        cursor_x = 2 + len(prompt) + min(max(0, cursor_pos - input_scroll), input_width - 1)
+        win.move(1, min(width - 2, cursor_x))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return None
+        if key == curses.KEY_DOWN:
+            if rows:
+                selected = move_selection(rows, selected, 1)
+            continue
+        if key == curses.KEY_UP:
+            if rows:
+                selected = move_selection(rows, selected, -1)
+            continue
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            if rows:
+                return rows[selected]
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
+            if cursor_pos > 0:
+                query = query[:cursor_pos - 1] + query[cursor_pos:]
+                cursor_pos -= 1
+                selected = 0
+                top_index = 0
+            continue
+        if key == curses.KEY_LEFT:
+            cursor_pos = max(0, cursor_pos - 1)
+            continue
+        if key == curses.KEY_RIGHT:
+            cursor_pos = min(len(query), cursor_pos + 1)
+            continue
+        if isinstance(key, str) and key.isprintable():
+            query = query[:cursor_pos] + key + query[cursor_pos:]
+            cursor_pos += 1
+            selected = 0
+            top_index = 0
 
 
 def _shipment_summary_lines(rows, width):
@@ -7143,11 +7335,12 @@ def create_manual_shipping_label(stdscr):
             "Versandlabel ohne Bestellung",
             fields,
             initial_active=active,
-            footer_text="Enter weiter/erstellen  F3 Land  F4 Auswahl  F5 Ausgabe  F9 Zurueck",
+            footer_text="Enter weiter/erstellen  F3 Land  F4 Auswahl  F5 Ausgabe  F6 Kunde  F9 Zurueck",
             extra_actions=[
                 {"name": "country", "keys": {curses.KEY_F3}},
                 {"name": "services", "keys": {curses.KEY_F4}},
                 {"name": "print_mode", "keys": {curses.KEY_F5}},
+                {"name": "customer", "keys": {curses.KEY_F6}},
             ],
         )
         if result is None:
@@ -7170,6 +7363,10 @@ def create_manual_shipping_label(stdscr):
                 if next_mode is None:
                     return
                 print_mode = next_mode
+            elif result["__action__"] == "customer":
+                chosen_customer = shopify_customer_dialog(stdscr)
+                if chosen_customer:
+                    state, country_code = _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code)
             continue
         state.update(result)
         break

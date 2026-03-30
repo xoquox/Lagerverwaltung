@@ -391,6 +391,39 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_customers (
+            customer_id text PRIMARY KEY,
+            first_name text,
+            last_name text,
+            display_name text,
+            email text,
+            phone text,
+            default_name text,
+            default_address1 text,
+            default_zip text,
+            default_city text,
+            default_country text,
+            default_phone text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS first_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS last_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS display_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS email text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_address1 text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_zip text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_city text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_country text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_display_name ON shopify_customers(display_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_email ON shopify_customers(email)")
     cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
     cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
     cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
@@ -916,6 +949,97 @@ def get_all_orders():
 
         after = page["pageInfo"]["endCursor"]
         time.sleep(0.5)
+
+
+def get_all_customers():
+    query = """
+    query CustomersPage($after: String) {
+      customers(first: 50, after: $after, sortKey: UPDATED_AT) {
+        nodes {
+          id
+          firstName
+          lastName
+          displayName
+          email
+          phone
+          defaultAddress {
+            name
+            address1
+            zip
+            city
+            country
+            phone
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    """
+
+    customers = []
+    after = None
+    while True:
+        data = graphql_request(query, {"after": after})
+        page = data["customers"]
+        customers.extend(page["nodes"])
+        log_info("Customers-Seite geladen: gesamt=%s has_next=%s", len(customers), page["pageInfo"]["hasNextPage"])
+        if not page["pageInfo"]["hasNextPage"]:
+            return customers
+        after = page["pageInfo"]["endCursor"]
+        time.sleep(0.5)
+
+
+def sync_customers():
+    customers = get_all_customers()
+    con = db()
+    cur = con.cursor()
+    cur.execute("TRUNCATE TABLE shopify_customers")
+
+    for customer in customers:
+        default_address = customer.get("defaultAddress") or {}
+        cur.execute(
+            """
+            INSERT INTO shopify_customers (
+                customer_id,
+                first_name,
+                last_name,
+                display_name,
+                email,
+                phone,
+                default_name,
+                default_address1,
+                default_zip,
+                default_city,
+                default_country,
+                default_phone,
+                updated_at
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            """,
+            (
+                customer.get("id"),
+                customer.get("firstName"),
+                customer.get("lastName"),
+                customer.get("displayName"),
+                customer.get("email"),
+                customer.get("phone"),
+                default_address.get("name"),
+                default_address.get("address1"),
+                default_address.get("zip"),
+                default_address.get("city"),
+                default_address.get("country"),
+                default_address.get("phone"),
+            ),
+        )
+
+    con.commit()
+    cur.close()
+    con.close()
+    log_info("Kunden synchronisiert: %s", len(customers))
+    return len(customers)
 
 
 def sync_orders():
@@ -1488,6 +1612,7 @@ def run_sync_loop():
                 update_service_runtime_state(mark_seen=True, mark_push=True)
             sync_products()
             sync_inventory_levels()
+            sync_customers()
             sync_orders()
             update_service_runtime_state(status="ok", mark_seen=True, mark_pull=True, mark_finished=True, clear_error=True)
         except Exception as exc:

@@ -72,7 +72,7 @@ class FakeConnection:
         self.committed = False
         self.closed = False
 
-    def cursor(self):
+    def cursor(self, *args, **kwargs):
         return self._cursor
 
     def commit(self):
@@ -788,6 +788,68 @@ class LagerMcLogicTests(unittest.TestCase):
             self.assertIsNone(
                 self.lager_mc._effective_tracking_url_for_shopify("dhl_private", "DHL123")
             )
+
+    def test_search_shopify_customers_queries_local_table(self):
+        fake_rows = [[{"customer_id": "gid://shopify/Customer/1", "display_name": "Max Mustermann"}]]
+        cursor = FakeCursor(fetchall_results=fake_rows)
+        con = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=con):
+            rows = self.lager_mc.search_shopify_customers("Max", limit=25)
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("FROM shopify_customers", cursor.executed[0][0])
+        self.assertEqual(cursor.executed[0][1][-1], 25)
+        self.assertEqual(rows[0]["display_name"], "Max Mustermann")
+
+    def test_apply_shopify_customer_to_manual_state_fills_address(self):
+        state = {
+            "name": "",
+            "street": "",
+            "zip": "",
+            "city": "",
+            "reference": "",
+            "weight_grams": "400",
+        }
+        customer = {
+            "display_name": "Max Mustermann",
+            "default_name": "Max Mustermann",
+            "default_address1": "Musterstr. 1",
+            "default_zip": "12345",
+            "default_city": "Berlin",
+            "default_country": "Germany",
+        }
+
+        updated, country = self.lager_mc._apply_shopify_customer_to_manual_state(state, customer, "DE")
+
+        self.assertEqual(updated["name"], "Max Mustermann")
+        self.assertEqual(updated["street"], "Musterstr. 1")
+        self.assertEqual(updated["zip"], "12345")
+        self.assertEqual(updated["city"], "Berlin")
+        self.assertEqual(country, "DE")
+
+    def test_handle_delivery_note_output_routes_by_mode(self):
+        order = {"order_name": "#1001"}
+        items = [{"sku": "ABC"}]
+
+        with mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="print"):
+            with mock.patch.object(self.lager_mc, "print_delivery_note") as print_mock:
+                self.lager_mc.handle_delivery_note_output(None, order, items)
+        print_mock.assert_called_once_with(None, order, items)
+
+        with mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="pdf"):
+            with mock.patch.object(self.lager_mc, "export_delivery_note_pdf") as export_mock:
+                self.lager_mc.handle_delivery_note_output(None, order, items)
+        export_mock.assert_called_once_with(None, order, items)
+
+        with mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="print_pdf"):
+            with mock.patch.object(self.lager_mc, "create_delivery_note_pdf", return_value=("/tmp/note.pdf", items)) as create_mock:
+                with mock.patch.object(self.lager_mc, "_print_delivery_note_pdf_path") as print_path_mock:
+                    with mock.patch.object(self.lager_mc, "message_box") as message_mock:
+                        self.lager_mc.handle_delivery_note_output(None, order, items)
+        create_mock.assert_called_once_with(order, items)
+        print_path_mock.assert_called_once_with(order, "/tmp/note.pdf")
+        message_mock.assert_called_once()
 
     def test_create_shipping_label_routes_to_requested_carrier(self):
         order = {
