@@ -43,5 +43,4 @@ Die Carrier-Struktur ist fuer weitere Versanddienstleister vorbereitet.
 
 ## Varianten
 
-- Projektstand mit Shopify- und Versandfunktionen: [Lagerverwaltung](https://github.com/xoquox/Lagerverwaltung)
-- Projektstand ohne Shopify- und Versandfunktionen: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)
+- Fork mit den Kernfunktionen fuer Lagerverwaltung ohne Shopify-Integration und Versand: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)

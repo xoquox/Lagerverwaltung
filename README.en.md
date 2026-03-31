@@ -40,5 +40,4 @@ The carrier structure is prepared for additional shipping providers.
 
 ## Repository variants
 
-- Project variant with Shopify and shipping support: [Lagerverwaltung](https://github.com/xoquox/Lagerverwaltung)
-- Project variant without Shopify and shipping support: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)
+- Fork with the core inventory features without Shopify integration and shipping: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)
