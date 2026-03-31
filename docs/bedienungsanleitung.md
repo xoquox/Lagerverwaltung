@@ -13,13 +13,28 @@ Das Handbuch beschreibt diese Bereiche:
 - Versandhistory mit Reprint, Storno und Shopify-Queue
 - Inventur mit Snapshot und CSV-Export
 
+## Aktueller Versandstand
+
+Produktive Carrier-Integrationen:
+
+- `GLS`
+- `Deutsche Post INTERNETMARKE`
+
+Zusaetzlich vorhanden:
+
+- `Adresslabel` fuer interne Adresslabels ohne Carrier-API
+
+Die Carrier-Struktur ist fuer weitere Versanddienstleister vorbereitet.
+
+Details zur Carrier-Struktur und zu den Integrationspunkten stehen in [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md).
+
 ## Voraussetzungen
 
 - Python 3.11 oder neuer
 - PostgreSQL
 - `curses`
-- fuer Versand und Listen ein funktionierendes Drucksystem mit `lp`
-- fuer HTML-basierte Vorlagen `WeasyPrint`
+- ein funktionierendes Drucksystem mit `lp`
+- `WeasyPrint` fuer HTML-basierte Vorlagen
 
 ## Installation
 
@@ -31,15 +46,15 @@ cd Lagerverwaltung
 ./scripts/install-linux.sh
 ```
 
-Manueller Start:
+Start:
 
 ```bash
 python3 lager_mc.py
 ```
 
-## Erster Start
+## Ersteinrichtung
 
-Vor dem ersten produktiven Einsatz sollten diese Punkte gesetzt sein:
+Vor dem ersten produktiven Einsatz werden diese Punkte gesetzt:
 
 1. Datenbankverbindung
 2. Picklisten- und Lieferschein-Drucker
@@ -47,19 +62,19 @@ Vor dem ersten produktiven Einsatz sollten diese Punkte gesetzt sein:
 4. Shopify-Sync
 5. Versandzugaenge fuer GLS und POST
 
-Die Einstellungen erreichst du aus der Lageransicht mit `Shift+F11`.
+Die Einstellungen liegen unter `Shift+F11`.
 
 ## Bedienkonzept
 
-Die Anwendung ist auf Tastaturbedienung ausgelegt.
+Die Anwendung ist fuer Tastaturbedienung ausgelegt.
 
-Wichtige Grundregeln:
+Grundregeln:
 
 - `↑↓` bewegen die Auswahl
 - `Enter` bestaetigt die aktuelle Auswahl oder wechselt ins naechste Feld
 - `F9` schliesst den aktuellen Dialog
 - `Tab` und `Shift+Tab` wechseln in den Einstellungen zwischen Tabs
-- Suchfilter lassen sich in Listen direkt ueber die Tastatur eingeben
+- Suchfilter werden in Listen direkt ueber die Tastatur eingegeben
 
 Die untere Statuszeile zeigt die gueltigen Tasten fuer den aktuellen Dialog.
 
@@ -126,7 +141,7 @@ Nach der Carrier-Auswahl koennen GLS-Services gewaehlt werden, zum Beispiel:
 - PreAdvice
 - SMS Service
 
-Die Standardwerte dafuer kommen aus den Einstellungen und koennen pro Auftrag geaendert werden.
+Die Standardwerte kommen aus den Einstellungen und koennen pro Auftrag geaendert werden.
 
 ### POST
 
@@ -157,7 +172,7 @@ Adresslabels koennen fuer Einzelversand, manuelle Labels und Bulk-Ausfuehrung ve
 
 ### Manuelles Versandlabel
 
-Die manuelle Versandmaske oeffnest du in der Auftragsansicht mit `Shift+F5`.
+Die manuelle Versandmaske liegt in der Auftragsansicht auf `Shift+F5`.
 
 Wichtige Funktionen:
 
@@ -168,7 +183,7 @@ Wichtige Funktionen:
 
 ## Versandhistory
 
-Die Versandhistory oeffnest du in der Auftragsansicht mit `F8`.
+Die Versandhistory liegt in der Auftragsansicht auf `F8`.
 
 Wichtige Aktionen:
 
@@ -195,17 +210,17 @@ Picklisten und Lieferscheine werden aus der Auftragsansicht gestartet.
 - `F10` Pickliste
 - `F11` Lieferschein
 
-Beim Lieferschein kann zwischen diesen Ausgabemodi gewaehlt werden:
+Beim Lieferschein stehen diese Ausgabemodi zur Verfuegung:
 
-- Drucken
-- Drucken + PDF
-- Nur PDF
+- `Drucken`
+- `Drucken + PDF`
+- `Nur PDF`
 
-Die Lieferschein-Vorlage und das Logo lassen sich in den Einstellungen setzen.
+Vorlage und Logo werden in den Einstellungen gesetzt.
 
 ## Bulk-Ausfuehrung
 
-Bulk-Ausfuehrung oeffnest du in der Auftragsansicht mit `F7`.
+Bulk-Ausfuehrung liegt in der Auftragsansicht auf `F7`.
 
 Ablauf:
 
@@ -219,13 +234,13 @@ Label und Lieferscheine werden fuer den Sammeldruck intern zusammengefuehrt. Die
 
 ## Teilausfuehrung
 
-Teilausfuehrung oeffnest du in der Auftragsansicht mit `F6`.
+Teilausfuehrung liegt in der Auftragsansicht auf `F6`.
 
-Hier waehlst du pro Position die Menge, die versendet werden soll. Danach folgt derselbe Versandablauf wie bei einer normalen Ausfuehrung.
+Hier wird pro Position die Menge festgelegt. Danach folgt derselbe Versandablauf wie bei einer normalen Ausfuehrung.
 
 ## Einstellungen
 
-Die Einstellungen erreichst du mit `Shift+F11`.
+Die Einstellungen liegen auf `Shift+F11`.
 
 Tab-Struktur:
 
@@ -315,8 +330,3 @@ Wichtige Logdateien:
 - [logs/druck.log](/home/chrisi/Lagerverwaltung/logs/druck.log)
 - [logs/shopify-sync.log](/home/chrisi/Lagerverwaltung/logs/shopify-sync.log)
 
-## Release-Stand pruefen
-
-Die laufende Version der TUI kommt aus [version.json](/home/chrisi/Lagerverwaltung/version.json).
-
-Die laufende Version des Shopify-Sync kommt aus [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json).
