@@ -61,10 +61,10 @@ portable_keys = {
     "language", "color_theme",
     "gls_api_url", "gls_user", "gls_password", "gls_contact_id",
     "post_api_url", "post_api_key", "post_api_secret", "post_user", "post_password", "post_partner_id",
-    "dhl_private_api_url", "dhl_private_api_test_url", "dhl_private_api_key", "dhl_private_api_secret", "dhl_private_use_test_api",
+    "shipping_active_carriers",
     "shipping_services", "shipping_packaging_weight_grams",
-    "shopify_tracking_mode_gls", "shopify_tracking_mode_post", "shopify_tracking_mode_dhl_private",
-    "shopify_tracking_url_gls", "shopify_tracking_url_post", "shopify_tracking_url_dhl_private",
+    "shopify_tracking_mode_gls", "shopify_tracking_mode_post",
+    "shopify_tracking_url_gls", "shopify_tracking_url_post",
     "delivery_note_sender_name", "delivery_note_sender_street", "delivery_note_sender_city", "delivery_note_sender_email",
 }
 
@@ -90,6 +90,7 @@ def copy_optional_setting_file(setting_key, relative_target):
 
 copy_optional_setting_file("delivery_note_template_path", "templates/delivery_note_template" + Path((settings.get("delivery_note_template_path") or "template")).suffix)
 copy_optional_setting_file("delivery_note_logo_source", "templates/delivery_note_logo" + Path((settings.get("delivery_note_logo_source") or "logo")).suffix)
+copy_optional_setting_file("free_label_template_path", "templates/free_label_template" + Path((settings.get("free_label_template_path") or "template")).suffix)
 copy_optional_setting_file("label_font_regular", "fonts/label_font_regular" + Path((settings.get("label_font_regular") or "font")).suffix)
 copy_optional_setting_file("label_font_condensed", "fonts/label_font_condensed" + Path((settings.get("label_font_condensed") or "font")).suffix)
 copy_optional_setting_file("color_theme_file", "themes/custom_theme" + Path((settings.get("color_theme_file") or "theme")).suffix)
@@ -99,8 +100,8 @@ manifest = {
     "portable_settings": sorted(bundle_settings.keys()),
     "non_overwritten_local_keys": [
         "picklist_printer", "delivery_note_printer", "delivery_note_format",
-        "shipping_label_printer", "shipping_label_printer_gls", "shipping_label_printer_dhl", "shipping_label_printer_dhl_private", "shipping_label_printer_post",
-        "shipping_label_output_dir", "shipping_label_format", "shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post",
+        "shipping_label_printer", "shipping_label_printer_gls", "shipping_label_printer_free", "shipping_label_printer_post",
+        "shipping_label_output_dir", "shipping_label_format", "shipping_label_format_gls", "shipping_label_format_free", "shipping_label_format_post",
         "pdf_output_dir", "printer_uri", "printer_model", "label_size",
     ],
     "setting_file_mappings": file_mappings,

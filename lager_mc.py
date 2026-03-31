@@ -23,11 +23,11 @@ from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from address_label import build_address_label_pdf
 from app_logging import MAIN_LOG_PATH, PRINT_LOG_PATH, get_logger
 from app_settings import DEFAULT_SETTINGS, load_settings, save_settings
 from app_version import APP_VERSION
 from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
-from dhl.private_client import DHLPrivateClient
 from post.internetmarke_client import InternetmarkeClient
 from post.product_catalog import find_post_product, list_post_base_products
 
@@ -56,7 +56,38 @@ SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_smsservice", "label": "SMS Service - Versandinfo per SMS", "locked": False},
 ]
 
-IMPLEMENTED_SHIPPING_CARRIERS = {"gls", "post", "dhl_private", "test"}
+SHIPPING_CARRIER_DEFINITIONS = {
+    "gls": {
+        "label": "GLS",
+        "short_label": "GLS",
+        "default_format": "A6",
+        "shopify_allowed": True,
+        "option_mode": "gls_services",
+    },
+    "post": {
+        "label": "POST",
+        "short_label": "POST",
+        "default_format": "100x62",
+        "shopify_allowed": True,
+        "option_mode": "post_products",
+    },
+    "free": {
+        "label": "Adresslabel",
+        "short_label": "ADR",
+        "default_format": "A6",
+        "shopify_allowed": False,
+        "option_mode": None,
+    },
+    "test": {
+        "label": "TEST",
+        "short_label": "TEST",
+        "default_format": "A6",
+        "shopify_allowed": False,
+        "option_mode": None,
+    },
+}
+SHIPPING_CARRIER_ORDER = list(SHIPPING_CARRIER_DEFINITIONS.keys())
+DEFAULT_ACTIVE_SHIPPING_CARRIERS = ["gls", "post", "free"]
 
 MANUAL_LABEL_COUNTRY_OPTIONS = [
     {"value": "AD", "label": "Andorra"},
@@ -346,25 +377,21 @@ TRANSLATIONS = {
         "field_delivery_format": "Lieferschein Format",
         "field_shipping_printer": "Versandlabel Drucker",
         "field_shipping_printer_gls": "GLS Label Drucker",
-        "field_shipping_printer_dhl": "DHL Label Drucker",
-        "field_shipping_printer_dhl_private": "DHL Privat Label Drucker",
+        "field_shipping_printer_free": "Adresslabel Drucker",
         "field_shipping_printer_post": "POST Label Drucker",
         "field_shipping_printer_fallback": "Label Drucker Fallback",
-        "field_shipping_carrier": "Versand Dienstleister",
+        "field_shipping_active_carriers": "Aktive Versanddienste",
         "field_shipping_label_output_dir": "Versandlabel Ordner",
         "field_shipping_format": "Versand Labelformat",
         "field_shipping_format_gls": "GLS Labelformat",
-        "field_shipping_format_dhl": "DHL Labelformat",
-        "field_shipping_format_dhl_private": "DHL Privat Labelformat",
+        "field_shipping_format_free": "Adresslabel Format",
         "field_shipping_format_post": "POST Labelformat",
         "field_shipping_services": "Versand Services",
         "field_shipping_packaging_weight": "Verpackung Gewicht (g)",
         "field_shopify_tracking_mode_gls": "Shopify Tracking GLS",
         "field_shopify_tracking_mode_post": "Shopify Tracking POST",
-        "field_shopify_tracking_mode_dhl_private": "Shopify Tracking DHL Privat",
         "field_shopify_tracking_url_gls": "Shopify Tracking URL GLS",
         "field_shopify_tracking_url_post": "Shopify Tracking URL POST",
-        "field_shopify_tracking_url_dhl_private": "Shopify Tracking URL DHL Privat",
         "field_gls_api_url": "GLS API URL",
         "field_gls_user": "GLS User",
         "field_gls_password": "GLS Passwort",
@@ -375,11 +402,7 @@ TRANSLATIONS = {
         "field_post_user": "POST User",
         "field_post_password": "POST Passwort",
         "field_post_partner_id": "POST Partner-ID",
-        "field_dhl_private_api_url": "DHL Privat API URL",
-        "field_dhl_private_api_test_url": "DHL Privat Test API URL",
-        "field_dhl_private_api_key": "DHL Privat API Key",
-        "field_dhl_private_api_secret": "DHL Privat API Secret",
-        "field_dhl_private_use_test_api": "DHL Privat Testmodus",
+        "field_free_label_template": "Adresslabel Vorlage",
         "field_pdf_dir": "PDF Ordner",
         "field_template": "LS Vorlage",
         "field_logo": "LS Logo URL/Pfad",
@@ -459,25 +482,21 @@ TRANSLATIONS = {
         "field_delivery_format": "Delivery Format",
         "field_shipping_printer": "Shipping Label Printer",
         "field_shipping_printer_gls": "GLS Label Printer",
-        "field_shipping_printer_dhl": "DHL Label Printer",
-        "field_shipping_printer_dhl_private": "DHL Private Label Printer",
+        "field_shipping_printer_free": "Address Label Printer",
         "field_shipping_printer_post": "POST Label Printer",
         "field_shipping_printer_fallback": "Label Printer Fallback",
-        "field_shipping_carrier": "Shipping Carrier",
+        "field_shipping_active_carriers": "Active Shipping Carriers",
         "field_shipping_label_output_dir": "Shipping Label Folder",
         "field_shipping_format": "Shipping Label Format",
         "field_shipping_format_gls": "GLS Label Format",
-        "field_shipping_format_dhl": "DHL Label Format",
-        "field_shipping_format_dhl_private": "DHL Private Label Format",
+        "field_shipping_format_free": "Address Label Format",
         "field_shipping_format_post": "POST Label Format",
         "field_shipping_services": "Shipping Services",
         "field_shipping_packaging_weight": "Packaging Weight (g)",
         "field_shopify_tracking_mode_gls": "Shopify Tracking GLS",
         "field_shopify_tracking_mode_post": "Shopify Tracking POST",
-        "field_shopify_tracking_mode_dhl_private": "Shopify Tracking DHL Private",
         "field_shopify_tracking_url_gls": "Shopify Tracking URL GLS",
         "field_shopify_tracking_url_post": "Shopify Tracking URL POST",
-        "field_shopify_tracking_url_dhl_private": "Shopify Tracking URL DHL Private",
         "field_gls_api_url": "GLS API URL",
         "field_gls_user": "GLS User",
         "field_gls_password": "GLS Password",
@@ -488,11 +507,7 @@ TRANSLATIONS = {
         "field_post_user": "POST User",
         "field_post_password": "POST Password",
         "field_post_partner_id": "POST Partner ID",
-        "field_dhl_private_api_url": "DHL Private API URL",
-        "field_dhl_private_api_test_url": "DHL Private Test API URL",
-        "field_dhl_private_api_key": "DHL Private API Key",
-        "field_dhl_private_api_secret": "DHL Private API Secret",
-        "field_dhl_private_use_test_api": "DHL Private Test Mode",
+        "field_free_label_template": "Address Label Template",
         "field_pdf_dir": "PDF Folder",
         "field_template": "Delivery Template",
         "field_logo": "Delivery Logo URL/Path",
@@ -1651,7 +1666,76 @@ def get_latest_shopify_job_for_label(label_id):
 
 
 def _shipment_number(row):
+    carrier = (row.get("carrier") or "").strip().lower()
+    if carrier == "free":
+        return "-"
     return ((row.get("parcel_number") or "").strip() or (row.get("track_id") or "").strip() or "-")
+
+
+def _shipping_carrier_label(carrier, short=False):
+    normalized = (carrier or "").strip().lower()
+    definition = SHIPPING_CARRIER_DEFINITIONS.get(normalized) or {}
+    if short:
+        return definition.get("short_label") or definition.get("label") or normalized.upper() or "-"
+    return definition.get("label") or normalized.upper() or "-"
+
+
+def _shipping_carrier_definition(carrier):
+    normalized = (carrier or "").strip().lower()
+    return SHIPPING_CARRIER_DEFINITIONS.get(normalized) or {}
+
+
+def _shipping_carrier_allows_shopify(carrier):
+    return bool(_shipping_carrier_definition(carrier).get("shopify_allowed"))
+
+
+def _shipping_carrier_option_mode(carrier):
+    return _shipping_carrier_definition(carrier).get("option_mode")
+
+
+def _shipping_active_carrier_values(values):
+    if isinstance(values, str):
+        raw_values = [part.strip().lower() for part in values.split(",")]
+    else:
+        raw_values = [str(value or "").strip().lower() for value in (values or [])]
+    normalized = []
+    for code in SHIPPING_CARRIER_ORDER:
+        if code in raw_values and code not in normalized:
+            normalized.append(code)
+    return normalized
+
+
+def _normalize_active_shipping_carriers(values, fallback_to_defaults=True):
+    normalized = _shipping_active_carrier_values(values)
+    if normalized:
+        return normalized
+    if not fallback_to_defaults:
+        return []
+    return list(DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+
+
+def _active_shipping_carriers():
+    return _normalize_active_shipping_carriers(SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS))
+
+
+def _shipping_carrier_options(include_test=True):
+    allowed = _active_shipping_carriers()
+    if include_test and "test" in SHIPPING_CARRIER_ORDER and "test" not in allowed:
+        allowed = list(allowed) + ["test"]
+    options = []
+    for code in allowed:
+        definition = SHIPPING_CARRIER_DEFINITIONS.get(code)
+        if not definition:
+            continue
+        options.append({"value": code, "label": definition["label"]})
+    return options
+
+
+def _shipping_active_carriers_summary(values, fallback_to_defaults=True):
+    normalized = _normalize_active_shipping_carriers(values, fallback_to_defaults=fallback_to_defaults)
+    if not normalized:
+        return "Keine"
+    return ", ".join(_shipping_carrier_label(code) for code in normalized)
 
 
 def _shopify_tracking_company(carrier):
@@ -1660,9 +1744,7 @@ def _shopify_tracking_company(carrier):
         return "GLS"
     if normalized == "post":
         return "Deutsche Post"
-    if normalized in {"dhl", "dhl_private"}:
-        return "DHL"
-    return (carrier or "").strip().upper() or "GLS"
+    return _shipping_carrier_label(normalized)
 
 
 def _tracking_url_for_carrier(carrier, tracking_number):
@@ -1675,8 +1757,6 @@ def _tracking_url_for_carrier(carrier, tracking_number):
         template = (SETTINGS.get("shopify_tracking_url_gls") or "").strip()
     elif normalized == "post":
         template = (SETTINGS.get("shopify_tracking_url_post") or "").strip()
-    elif normalized in {"dhl", "dhl_private"}:
-        template = (SETTINGS.get("shopify_tracking_url_dhl_private") or "").strip()
     if not template:
         return None
     try:
@@ -1691,8 +1771,6 @@ def _shopify_tracking_mode_for_carrier(carrier):
         return (SETTINGS.get("shopify_tracking_mode_gls") or "company").strip().lower()
     if normalized == "post":
         return (SETTINGS.get("shopify_tracking_mode_post") or "company_and_url").strip().lower()
-    if normalized in {"dhl", "dhl_private"}:
-        return (SETTINGS.get("shopify_tracking_mode_dhl_private") or "company").strip().lower()
     return "company"
 
 
@@ -1882,7 +1960,7 @@ def _shipment_summary_lines(rows, width):
         return ["Sendungen: -"]
     entries = []
     for row in rows:
-        carrier = (row.get("carrier") or "-").upper()
+        carrier = _shipping_carrier_label(row.get("carrier") or "-", short=True)
         number = _shipment_number(row)
         source = _shipment_source_label(row.get("source"))
         status = row.get("status") or "-"
@@ -1906,8 +1984,8 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
         tracking_number,
         (label_row.get("tracking_url") or "").strip(),
     )
-    if carrier_code.strip().upper() == "TEST":
-        raise RuntimeError("Test-Labels duerfen nicht an Shopify uebertragen werden.")
+    if carrier_code.strip().lower() in {"test", "free"}:
+        raise RuntimeError("Test- und Adresslabels duerfen nicht an Shopify uebertragen werden.")
     if not order_id:
         raise RuntimeError("order_id fehlt.")
     if not tracking_number:
@@ -1970,8 +2048,8 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
         tracking_number,
         (label_row.get("tracking_url") or "").strip(),
     )
-    if carrier_code.strip().upper() == "TEST":
-        raise RuntimeError("Test-Labels duerfen nicht an Shopify uebertragen werden.")
+    if carrier_code.strip().lower() in {"test", "free"}:
+        raise RuntimeError("Test- und Adresslabels duerfen nicht an Shopify uebertragen werden.")
     if not label_id:
         raise RuntimeError("label_id fehlt.")
     if not order_id:
@@ -2297,30 +2375,6 @@ def _resolve_post_product_selection(selection):
     raise ValueError("POST Produktkombination ist nicht verfuegbar.")
 
 
-def load_dhl_private_credentials():
-    creds = {
-        "api_url": (SETTINGS.get("dhl_private_api_url") or "").strip(),
-        "test_api_url": (SETTINGS.get("dhl_private_api_test_url") or "").strip(),
-        "api_key": (SETTINGS.get("dhl_private_api_key") or "").strip(),
-        "api_secret": (SETTINGS.get("dhl_private_api_secret") or "").strip(),
-        "use_test_api": bool(SETTINGS.get("dhl_private_use_test_api", True)),
-    }
-    missing = []
-    if creds["use_test_api"]:
-        if not creds["test_api_url"]:
-            missing.append("test_api_url")
-    else:
-        if not creds["api_url"]:
-            missing.append("api_url")
-    if not creds["api_key"]:
-        missing.append("api_key")
-    if not creds["api_secret"]:
-        missing.append("api_secret")
-    if missing:
-        raise RuntimeError(f"DHL Privat Daten fehlen: {', '.join(missing)}")
-    return creds
-
-
 def _gls_country_code(country_value):
     country_raw = (country_value or "").strip()
     if len(country_raw) == 2 and country_raw.isalpha():
@@ -2569,6 +2623,9 @@ def gls_pickup_haz_goods_dialog(stdscr, current_value):
     )
 
 
+# GLS-Abholung ist aktuell auskommentiert.
+# Der API-Pfad ist vorbereitet, aber fachlich noch nicht ausreichend gegen das GLS-Portal verifiziert
+# und deshalb vorerst experimentell/ungestestet.
 def create_gls_sporadic_collection_dialog(stdscr):
     tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
     state = {
@@ -2931,18 +2988,14 @@ def _normalize_shipping_label_format(value):
 def _shipping_printer_for_carrier(carrier):
     c = (carrier or "").strip().lower()
     specific = (SETTINGS.get(f"shipping_label_printer_{c}") or "").strip() if c else ""
-    if not specific and c == "dhl_private":
-        specific = (SETTINGS.get("shipping_label_printer_dhl") or "").strip()
     fallback = (SETTINGS.get("shipping_label_printer") or "").strip()
     return specific or fallback
 
 
 def _shipping_format_for_carrier(carrier):
     c = (carrier or "").strip().lower()
-    defaults = {"gls": "A6", "dhl": "A5", "dhl_private": "A5", "post": "100x62"}
+    defaults = {code: data.get("default_format", "A6") for code, data in SHIPPING_CARRIER_DEFINITIONS.items()}
     specific = SETTINGS.get(f"shipping_label_format_{c}") if c else None
-    if not specific and c == "dhl_private":
-        specific = SETTINGS.get("shipping_label_format_dhl")
     fallback = SETTINGS.get("shipping_label_format", defaults.get(c, "A6"))
     return _normalize_shipping_label_format(specific or fallback or defaults.get(c, "A6"))
 
@@ -3017,7 +3070,7 @@ def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
     return True
 
 
-def _validate_order_for_gls(order):
+def _validate_shipping_address(order, require_country=False):
     checks = [
         ("shipping_name", "Empfaenger Name fehlt"),
         ("shipping_address1", "Empfaenger Strasse fehlt"),
@@ -3027,8 +3080,12 @@ def _validate_order_for_gls(order):
     for key, message in checks:
         if not (order.get(key) or "").strip():
             raise ValueError(message)
-    if not _gls_country_code(order.get("shipping_country")):
+    if require_country and not _gls_country_code(order.get("shipping_country")):
         raise ValueError("Empfaenger Land ungueltig oder fehlt (ISO2 erwartet, z.B. DE).")
+
+
+def _validate_order_for_gls(order):
+    _validate_shipping_address(order, require_country=True)
 
 
 def gls_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
@@ -3221,25 +3278,57 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     }
 
 
-def dhl_private_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
-    _validate_order_for_gls(order)
-    _creds = load_dhl_private_credentials()
-    client = DHLPrivateClient(
-        api_url=_creds["api_url"],
-        test_api_url=_creds["test_api_url"],
-        api_key=_creds["api_key"],
-        api_secret=_creds["api_secret"],
-        use_test_api=_creds["use_test_api"],
+def free_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
+    _validate_shipping_address(order, require_country=False)
+    try:
+        weight_value = round(float(weight_kg), 3)
+    except (TypeError, ValueError):
+        weight_value = 0.0
+    shipment_reference = _sanitize_order_reference(shipment_reference or order["order_name"])
+    internal_id = f"FREE{datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    template_path = get_free_label_template_path()
+    if template_path and not template_path.exists():
+        raise FileNotFoundError(f"Adresslabel Vorlage fehlt: {template_path.name}")
+
+    with tempfile.NamedTemporaryFile(prefix="free-label-", suffix=".pdf", delete=False) as handle:
+        temp_path = handle.name
+    try:
+        build_address_label_pdf(
+            template_path,
+            temp_path,
+            sender=get_free_label_sender(),
+            receiver=_free_label_receiver(order),
+            page_size=_shipping_format_for_carrier("free"),
+        )
+        pdf_blob = Path(temp_path).read_bytes()
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+    label_path = _save_shipping_label_pdf("free", order["order_name"], internal_id, pdf_blob)
+    label_id = insert_gls_label_history(
+        order=order,
+        shipment_reference=shipment_reference,
+        track_id=internal_id,
+        parcel_number=None,
+        label_path=label_path,
+        status="CREATED",
+        weight_kg=weight_value,
+        carrier="free",
     )
-    client.validate()
-    _weight_value = float(weight_kg)
-    _reference = _sanitize_order_reference(shipment_reference or order["order_name"])
-    mode = "Test" if _creds["use_test_api"] else "Produktion"
-    raise RuntimeError(f"DHL Private Shipping ({mode}) ist vorbereitet, API-Call folgt im naechsten Schritt.")
+    return {
+        "label_id": label_id,
+        "track_id": internal_id,
+        "parcel_number": None,
+        "label_path": label_path,
+        "shipment_reference": shipment_reference,
+    }
 
 
 def test_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
-    _validate_order_for_gls(order)
+    _validate_shipping_address(order, require_country=False)
     shipment_reference = _sanitize_order_reference(shipment_reference or order["order_name"])
     track_id = f"TEST{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     parcel_number = f"999{datetime.datetime.now().strftime('%H%M%S')}"
@@ -3446,25 +3535,40 @@ def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False
                 selected_codes.add(code)
 
 
+def _select_shipping_carrier_options(stdscr, carrier, scope="domestic"):
+    mode = _shipping_carrier_option_mode(carrier)
+    if mode == "post_products":
+        return _post_selection_dialog(stdscr, scope=scope)
+    if mode == "gls_services":
+        return shipping_services_dialog(
+            stdscr,
+            SETTINGS.get("shipping_services", []),
+            cancel_returns_none=True,
+        )
+    return []
+
+
 def remember_shipping_carrier(carrier):
     global _SHIPPING_CARRIER_CACHE
     normalized = (carrier or "").strip().lower()
-    if normalized in {"gls", "post", "test"}:
+    if normalized in SHIPPING_CARRIER_DEFINITIONS:
         _SHIPPING_CARRIER_CACHE = normalized
 
 
 def last_shipping_carrier():
     cached = (_SHIPPING_CARRIER_CACHE or "").strip().lower()
-    if cached in {"gls", "post", "test"}:
+    active = _active_shipping_carriers()
+    if cached in active:
         return cached
-    return "gls"
+    return active[0] if active else "gls"
 
 
 def effective_shipping_carrier(requested_carrier=None):
-    carrier = (requested_carrier or last_shipping_carrier() or "gls").strip().lower()
-    if carrier in IMPLEMENTED_SHIPPING_CARRIERS:
+    active = _active_shipping_carriers()
+    carrier = (requested_carrier or last_shipping_carrier() or (active[0] if active else "gls")).strip().lower()
+    if carrier in SHIPPING_CARRIER_DEFINITIONS and (carrier in active or carrier == "test"):
         return carrier
-    return "gls"
+    return active[0] if active else "gls"
 
 
 def create_shipping_label(order, weight_kg=None, shipment_reference=None, service_codes=None, carrier=None):
@@ -3485,8 +3589,8 @@ def create_shipping_label(order, weight_kg=None, shipment_reference=None, servic
             shipment_reference=shipment_reference,
             service_codes=service_codes,
         )
-    if selected_carrier == "dhl_private":
-        return dhl_private_create_label(
+    if selected_carrier == "free":
+        return free_create_label(
             order,
             weight_kg=weight_kg,
             shipment_reference=shipment_reference,
@@ -3500,6 +3604,13 @@ def create_shipping_label(order, weight_kg=None, shipment_reference=None, servic
             service_codes=service_codes,
         )
     raise RuntimeError(f"Dienstleister {selected_carrier} ist noch nicht implementiert.")
+
+
+def _created_label_display_value(carrier, created):
+    normalized = (carrier or "").strip().lower()
+    if normalized == "free":
+        return "Adresslabel"
+    return (created.get("parcel_number") or created.get("track_id") or created.get("shipment_reference") or "-").strip() or "-"
 
 
 def reprint_shipping_label(label_row):
@@ -4955,21 +5066,23 @@ def settings_dialog(stdscr):
         "delivery_note_format": _normalize_shipping_label_format(
             SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))
         ),
+        "shipping_active_carriers": _normalize_active_shipping_carriers(
+            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+        ),
+        "shipping_active_carriers_display": _shipping_active_carriers_summary(
+            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+        ),
         "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
         "shipping_label_printer_gls": SETTINGS.get("shipping_label_printer_gls", ""),
-        "shipping_label_printer_dhl": SETTINGS.get("shipping_label_printer_dhl", ""),
-        "shipping_label_printer_dhl_private": SETTINGS.get("shipping_label_printer_dhl_private", SETTINGS.get("shipping_label_printer_dhl", "")),
+        "shipping_label_printer_free": SETTINGS.get("shipping_label_printer_free", ""),
         "shipping_label_printer_post": SETTINGS.get("shipping_label_printer_post", ""),
         "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
         "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
         "shipping_label_format_gls": _normalize_shipping_label_format(
             SETTINGS.get("shipping_label_format_gls", SETTINGS.get("shipping_label_format", "A6"))
         ),
-        "shipping_label_format_dhl": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_dhl", "A5")
-        ),
-        "shipping_label_format_dhl_private": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_dhl_private", SETTINGS.get("shipping_label_format_dhl", "A5"))
+        "shipping_label_format_free": _normalize_shipping_label_format(
+            SETTINGS.get("shipping_label_format_free", "A6")
         ),
         "shipping_label_format_post": _normalize_shipping_label_format(
             SETTINGS.get("shipping_label_format_post", "100x62")
@@ -4981,10 +5094,8 @@ def settings_dialog(stdscr):
         ),
         "shopify_tracking_mode_gls": (SETTINGS.get("shopify_tracking_mode_gls") or DEFAULT_SETTINGS.get("shopify_tracking_mode_gls", "company")).strip().lower(),
         "shopify_tracking_mode_post": (SETTINGS.get("shopify_tracking_mode_post") or DEFAULT_SETTINGS.get("shopify_tracking_mode_post", "company_and_url")).strip().lower(),
-        "shopify_tracking_mode_dhl_private": (SETTINGS.get("shopify_tracking_mode_dhl_private") or DEFAULT_SETTINGS.get("shopify_tracking_mode_dhl_private", "company")).strip().lower(),
         "shopify_tracking_url_gls": SETTINGS.get("shopify_tracking_url_gls", ""),
         "shopify_tracking_url_post": SETTINGS.get("shopify_tracking_url_post", ""),
-        "shopify_tracking_url_dhl_private": SETTINGS.get("shopify_tracking_url_dhl_private", ""),
         "gls_api_url": SETTINGS.get("gls_api_url", ""),
         "gls_user": SETTINGS.get("gls_user", ""),
         "gls_password": SETTINGS.get("gls_password", ""),
@@ -4995,11 +5106,7 @@ def settings_dialog(stdscr):
         "post_user": SETTINGS.get("post_user", ""),
         "post_password": SETTINGS.get("post_password", ""),
         "post_partner_id": SETTINGS.get("post_partner_id", ""),
-        "dhl_private_api_url": SETTINGS.get("dhl_private_api_url", ""),
-        "dhl_private_api_test_url": SETTINGS.get("dhl_private_api_test_url", ""),
-        "dhl_private_api_key": SETTINGS.get("dhl_private_api_key", ""),
-        "dhl_private_api_secret": SETTINGS.get("dhl_private_api_secret", ""),
-        "dhl_private_use_test_api": "ja" if SETTINGS.get("dhl_private_use_test_api", True) else "nein",
+        "free_label_template_path": SETTINGS.get("free_label_template_path", ""),
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
         "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
         "delivery_note_logo_source": SETTINGS.get("delivery_note_logo_source", ""),
@@ -5041,7 +5148,7 @@ def settings_dialog(stdscr):
                 ("delivery_note_printer", "field_delivery_printer"),
                 ("delivery_note_format", "field_delivery_format"),
                 ("shipping_label_printer_gls", "field_shipping_printer_gls"),
-                ("shipping_label_printer_dhl_private", "field_shipping_printer_dhl_private"),
+                ("shipping_label_printer_free", "field_shipping_printer_free"),
                 ("shipping_label_printer_post", "field_shipping_printer_post"),
                 ("shipping_label_printer", "field_shipping_printer_fallback"),
             ],
@@ -5051,6 +5158,7 @@ def settings_dialog(stdscr):
             "fields": [
                 ("shipping_label_output_dir", "field_shipping_label_output_dir"),
                 ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
+                ("shipping_active_carriers_display", "field_shipping_active_carriers"),
                 ("_heading_gls", "GLS"),
                 ("shipping_label_format_gls", "field_shipping_format_gls"),
                 ("shipping_services_display", "field_shipping_services"),
@@ -5070,15 +5178,9 @@ def settings_dialog(stdscr):
                 ("post_user", "field_post_user"),
                 ("post_password", "field_post_password"),
                 ("post_partner_id", "field_post_partner_id"),
-                ("_heading_dhl_private", "DHL Privat"),
-                ("shipping_label_format_dhl_private", "field_shipping_format_dhl_private"),
-                ("shopify_tracking_mode_dhl_private", "field_shopify_tracking_mode_dhl_private"),
-                ("shopify_tracking_url_dhl_private", "field_shopify_tracking_url_dhl_private"),
-                ("dhl_private_api_url", "field_dhl_private_api_url"),
-                ("dhl_private_api_test_url", "field_dhl_private_api_test_url"),
-                ("dhl_private_api_key", "field_dhl_private_api_key"),
-                ("dhl_private_api_secret", "field_dhl_private_api_secret"),
-                ("dhl_private_use_test_api", "field_dhl_private_use_test_api"),
+                ("_heading_free", "Adresslabel"),
+                ("shipping_label_format_free", "field_shipping_format_free"),
+                ("free_label_template_path", "field_free_label_template"),
             ],
         },
         {
@@ -5240,7 +5342,7 @@ def settings_dialog(stdscr):
         if not active_name:
             continue
 
-        if active_name == "shipping_services_display":
+        if active_name in {"shipping_services_display", "shipping_active_carriers_display"}:
             if key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END, curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b', curses.KEY_DC):
                 continue
 
@@ -5275,8 +5377,7 @@ def settings_dialog(stdscr):
             "delivery_note_printer",
             "shipping_label_printer",
             "shipping_label_printer_gls",
-            "shipping_label_printer_dhl",
-            "shipping_label_printer_dhl_private",
+            "shipping_label_printer_free",
             "shipping_label_printer_post",
         }:
             values[active_name] = cups_printer_dialog(stdscr, values[active_name])
@@ -5286,8 +5387,7 @@ def settings_dialog(stdscr):
         if key == curses.KEY_F4 and active_name in {
             "delivery_note_format",
             "shipping_label_format_gls",
-            "shipping_label_format_dhl",
-            "shipping_label_format_dhl_private",
+            "shipping_label_format_free",
             "shipping_label_format_post",
         }:
             printer_name = ""
@@ -5298,12 +5398,9 @@ def settings_dialog(stdscr):
             elif active_name == "shipping_label_format_gls":
                 printer_name = values.get("shipping_label_printer_gls") or values.get("shipping_label_printer")
                 title = "GLS Labelformat"
-            elif active_name == "shipping_label_format_dhl":
-                printer_name = values.get("shipping_label_printer_dhl") or values.get("shipping_label_printer")
-                title = "DHL Labelformat"
-            elif active_name == "shipping_label_format_dhl_private":
-                printer_name = values.get("shipping_label_printer_dhl_private") or values.get("shipping_label_printer")
-                title = "DHL Privat Labelformat"
+            elif active_name == "shipping_label_format_free":
+                printer_name = values.get("shipping_label_printer_free") or values.get("shipping_label_printer")
+                title = "Adresslabel Format"
             elif active_name == "shipping_label_format_post":
                 printer_name = values.get("shipping_label_printer_post") or values.get("shipping_label_printer")
                 title = "POST Labelformat"
@@ -5328,6 +5425,10 @@ def settings_dialog(stdscr):
                 values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
                 cursor_positions[active_name] = len(str(values.get(active_name, "")))
                 continue
+            if active_name == "free_label_template_path":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Adresslabel Vorlage waehlen", extensions={".html", ".htm"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
             if active_name == "delivery_note_logo_source":
                 current_value = (values.get(active_name) or "").strip()
                 if not is_http_url(current_value):
@@ -5345,23 +5446,19 @@ def settings_dialog(stdscr):
                 "delivery_note_printer",
                 "shipping_label_printer",
                 "shipping_label_printer_gls",
-                "shipping_label_printer_dhl",
-                "shipping_label_printer_dhl_private",
+                "shipping_label_printer_free",
                 "shipping_label_printer_post",
             }:
                 values[active_name] = cups_printer_dialog(stdscr, values[active_name])
-            elif active_name in {"shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post"}:
+            elif active_name in {"shipping_label_format_gls", "shipping_label_format_free", "shipping_label_format_post"}:
                 printer_name = ""
                 title = "Labelformat"
                 if active_name == "shipping_label_format_gls":
                     printer_name = values.get("shipping_label_printer_gls") or values.get("shipping_label_printer")
                     title = "GLS Labelformat"
-                elif active_name == "shipping_label_format_dhl":
-                    printer_name = values.get("shipping_label_printer_dhl") or values.get("shipping_label_printer")
-                    title = "DHL Labelformat"
-                elif active_name == "shipping_label_format_dhl_private":
-                    printer_name = values.get("shipping_label_printer_dhl_private") or values.get("shipping_label_printer")
-                    title = "DHL Privat Labelformat"
+                elif active_name == "shipping_label_format_free":
+                    printer_name = values.get("shipping_label_printer_free") or values.get("shipping_label_printer")
+                    title = "Adresslabel Format"
                 elif active_name == "shipping_label_format_post":
                     printer_name = values.get("shipping_label_printer_post") or values.get("shipping_label_printer")
                     title = "POST Labelformat"
@@ -5381,17 +5478,9 @@ def settings_dialog(stdscr):
                 values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
             elif active_name == "delivery_note_template_path":
                 values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
-            elif active_name == "dhl_private_use_test_api":
-                values["dhl_private_use_test_api"] = choice_dialog(
-                    stdscr,
-                    "DHL Privat Testmodus",
-                    [
-                        {"value": "ja", "label": "Ja"},
-                        {"value": "nein", "label": "Nein"},
-                    ],
-                    values["dhl_private_use_test_api"],
-                )
-            elif active_name in {"shopify_tracking_mode_gls", "shopify_tracking_mode_post", "shopify_tracking_mode_dhl_private"}:
+            elif active_name == "free_label_template_path":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Adresslabel Vorlage waehlen", extensions={".html", ".htm"})
+            elif active_name in {"shopify_tracking_mode_gls", "shopify_tracking_mode_post"}:
                 values[active_name] = choice_dialog(
                     stdscr,
                     "Shopify Tracking",
@@ -5404,6 +5493,22 @@ def settings_dialog(stdscr):
             elif active_name == "shipping_services_display":
                 values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
                 values["shipping_services_display"] = _shipping_services_summary(values["shipping_services"])
+            elif active_name == "shipping_active_carriers_display":
+                chosen = toggle_choice_dialog(
+                    stdscr,
+                    "Aktive Versanddienste",
+                    _shipping_carrier_options(include_test=True),
+                    values.get("shipping_active_carriers", []),
+                )
+                if chosen is not None:
+                    values["shipping_active_carriers"] = _normalize_active_shipping_carriers(
+                        chosen,
+                        fallback_to_defaults=False,
+                    )
+                    values["shipping_active_carriers_display"] = _shipping_active_carriers_summary(
+                        values["shipping_active_carriers"],
+                        fallback_to_defaults=False,
+                    )
             else:
                 if editable_indices:
                     active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
@@ -5411,7 +5516,7 @@ def settings_dialog(stdscr):
             continue
 
         if isinstance(key, str) and key.isprintable():
-            if active_name == "shipping_services_display":
+            if active_name in {"shipping_services_display", "shipping_active_carriers_display"}:
                 continue
             value = str(values.get(active_name, ""))
             pos = cursor_positions[active_name]
@@ -5437,25 +5542,25 @@ def settings_dialog(stdscr):
         "picklist_printer": values["picklist_printer"].strip(),
         "delivery_note_printer": values["delivery_note_printer"].strip(),
         "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
+        "shipping_active_carriers": _normalize_active_shipping_carriers(
+            values.get("shipping_active_carriers", []),
+            fallback_to_defaults=False,
+        ),
         "shipping_label_printer": values["shipping_label_printer"].strip(),
         "shipping_label_printer_gls": values["shipping_label_printer_gls"].strip(),
-        "shipping_label_printer_dhl": values["shipping_label_printer_dhl"].strip(),
-        "shipping_label_printer_dhl_private": values["shipping_label_printer_dhl_private"].strip(),
+        "shipping_label_printer_free": values["shipping_label_printer_free"].strip(),
         "shipping_label_printer_post": values["shipping_label_printer_post"].strip(),
         "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
         "shipping_label_format_gls": _normalize_shipping_label_format(values["shipping_label_format_gls"].strip()),
-        "shipping_label_format_dhl": _normalize_shipping_label_format(values["shipping_label_format_dhl"].strip()),
-        "shipping_label_format_dhl_private": _normalize_shipping_label_format(values["shipping_label_format_dhl_private"].strip()),
+        "shipping_label_format_free": _normalize_shipping_label_format(values["shipping_label_format_free"].strip()),
         "shipping_label_format_post": _normalize_shipping_label_format(values["shipping_label_format_post"].strip()),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
         "shopify_tracking_mode_gls": values["shopify_tracking_mode_gls"].strip().lower(),
         "shopify_tracking_mode_post": values["shopify_tracking_mode_post"].strip().lower(),
-        "shopify_tracking_mode_dhl_private": values["shopify_tracking_mode_dhl_private"].strip().lower(),
         "shopify_tracking_url_gls": values["shopify_tracking_url_gls"].strip(),
         "shopify_tracking_url_post": values["shopify_tracking_url_post"].strip(),
-        "shopify_tracking_url_dhl_private": values["shopify_tracking_url_dhl_private"].strip(),
         "gls_api_url": values["gls_api_url"].strip(),
         "gls_user": values["gls_user"].strip(),
         "gls_password": values["gls_password"],
@@ -5466,11 +5571,7 @@ def settings_dialog(stdscr):
         "post_user": values["post_user"].strip(),
         "post_password": values["post_password"],
         "post_partner_id": values["post_partner_id"].strip(),
-        "dhl_private_api_url": values["dhl_private_api_url"].strip(),
-        "dhl_private_api_test_url": values["dhl_private_api_test_url"].strip(),
-        "dhl_private_api_key": values["dhl_private_api_key"].strip(),
-        "dhl_private_api_secret": values["dhl_private_api_secret"].strip(),
-        "dhl_private_use_test_api": values["dhl_private_use_test_api"] == "ja",
+        "free_label_template_path": os.path.expanduser(values["free_label_template_path"].strip()),
         "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
         "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
         "delivery_note_logo_source": values["delivery_note_logo_source"].strip(),
@@ -5550,20 +5651,24 @@ def settings_dialog(stdscr):
     if not updated["shipping_label_format"]:
         message_box(stdscr, t("error"), "Labelformat darf nicht leer sein.")
         return
-    for key in ("shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_dhl_private", "shipping_label_format_post"):
+    if not updated["shipping_active_carriers"]:
+        message_box(stdscr, t("error"), "Mindestens ein Versanddienst muss aktiv sein.")
+        return
+    for key in ("shipping_label_format_gls", "shipping_label_format_free", "shipping_label_format_post"):
         if not updated[key]:
             message_box(stdscr, t("error"), f"{key} darf nicht leer sein.")
             return
     if not updated.get("shipping_label_format_gls"):
         updated["shipping_label_format_gls"] = "A6"
-    if not updated.get("shipping_label_format_dhl"):
-        updated["shipping_label_format_dhl"] = "A5"
-    if not updated.get("shipping_label_format_dhl_private"):
-        updated["shipping_label_format_dhl_private"] = "A5"
+    if not updated.get("shipping_label_format_free"):
+        updated["shipping_label_format_free"] = "A6"
     if not updated.get("shipping_label_format_post"):
         updated["shipping_label_format_post"] = "100x62"
     if not updated.get("shipping_label_format"):
         updated["shipping_label_format"] = "A6"
+    if updated["free_label_template_path"] and not os.path.isfile(updated["free_label_template_path"]):
+        message_box(stdscr, t("error"), "Adresslabel Vorlage existiert nicht.")
+        return
     try:
         packaging_weight = int(updated["shipping_packaging_weight_grams"])
     except ValueError:
@@ -6313,6 +6418,38 @@ def get_delivery_note_sender():
     }
 
 
+def get_free_label_sender():
+    sender = get_delivery_note_sender()
+    return {
+        "name": sender["name"],
+        "street": sender["street"],
+        "zip_city": sender["city"],
+    }
+
+
+def get_free_label_template_path():
+    configured = (SETTINGS.get("free_label_template_path") or "").strip()
+    if not configured:
+        return None
+    return Path(os.path.expanduser(configured))
+
+
+def _free_label_receiver(order):
+    zip_city = " ".join(
+        part for part in [(order.get("shipping_zip") or "").strip(), (order.get("shipping_city") or "").strip()] if part
+    ).strip()
+    country_code = (order.get("shipping_country") or "").strip().upper()
+    country_label = COUNTRY_NAME_DE.get(country_code, country_code)
+    return {
+        "name": (order.get("shipping_name") or "").strip(),
+        "additional_name": (order.get("shipping_company") or "").strip(),
+        "street": (order.get("shipping_address1") or "").strip(),
+        "address_line_2": (order.get("shipping_address2") or "").strip(),
+        "zip_city": zip_city,
+        "country": country_label if country_label and country_label != "DE" else "",
+    }
+
+
 def get_delivery_note_template_path():
     configured = SETTINGS.get("delivery_note_template_path", "").strip()
     if not configured:
@@ -6803,7 +6940,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
     if not selected_orders:
         return current_map
 
-    options = sorted(IMPLEMENTED_SHIPPING_CARRIERS)
+    options = _active_shipping_carriers()
     selected = 0
     top_index = 0
     assignments = dict(current_map)
@@ -6874,11 +7011,7 @@ def _execution_carrier_dialog(stdscr, current_carrier=None):
     chosen = choice_dialog(
         stdscr,
         "Versand Dienstleister",
-        [
-            {"value": "gls", "label": "GLS"},
-            {"value": "post", "label": "POST"},
-            {"value": "test", "label": "TEST"},
-        ],
+        _shipping_carrier_options(include_test=False),
         fallback,
         cancel_returns_none=True,
     )
@@ -7022,19 +7155,9 @@ def run_partial_execution_for_order(stdscr, order, order_items):
     carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
     if not carrier:
         return
-    carrier_options = None
-    if carrier == "post":
-        carrier_options = _post_selection_dialog(stdscr, scope="domestic")
-        if not carrier_options:
-            return
-    elif carrier == "gls":
-        carrier_options = shipping_services_dialog(
-            stdscr,
-            SETTINGS.get("shipping_services", []),
-            cancel_returns_none=True,
-        )
-        if carrier_options is None:
-            return
+    carrier_options = _select_shipping_carrier_options(stdscr, carrier, scope="domestic")
+    if carrier_options is None:
+        return
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
         return
@@ -7063,7 +7186,7 @@ def run_partial_execution_for_order(stdscr, order, order_items):
         if print_mode in {"both", "note"}:
             _print_delivery_note_pdf_path(order, note_path)
 
-        if created.get("label_id") is not None:
+        if created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
             fresh_rows = list_gls_labels(order["order_id"])
             current_label = next((row for row in fresh_rows if row["id"] == created["label_id"]), None)
             if current_label:
@@ -7073,7 +7196,7 @@ def run_partial_execution_for_order(stdscr, order, order_items):
         message_box(
             stdscr,
             "Teilausfuehrung",
-            f"OK: Label {created['track_id']} {selected_weight_grams}g erstellt",
+            f"OK: {_created_label_display_value(carrier, created)} {selected_weight_grams}g erstellt",
         )
     except DatabaseUnavailableError:
         raise
@@ -7131,25 +7254,17 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
     if not carrier:
         return
-    carrier_options = None
-    if carrier == "post":
-        carrier_options = _post_selection_dialog(stdscr, scope="domestic")
-        if not carrier_options:
-            return
-    elif carrier == "gls":
-        carrier_options = shipping_services_dialog(
-            stdscr,
-            SETTINGS.get("shipping_services", []),
-            cancel_returns_none=True,
-        )
-        if carrier_options is None:
-            return
+    carrier_options = _select_shipping_carrier_options(stdscr, carrier, scope="domestic")
+    if carrier_options is None:
+        return
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
         return
-    shopify_mode = _bulk_shopify_queue_mode_dialog(stdscr)
-    if shopify_mode is None:
-        return
+    shopify_mode = "manual"
+    if _shipping_carrier_allows_shopify(carrier):
+        shopify_mode = _bulk_shopify_queue_mode_dialog(stdscr)
+        if shopify_mode is None:
+            return
 
     carrier_map = {row["order_id"]: carrier for row in selected_orders}
 
@@ -7186,7 +7301,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
             if print_mode in {"both", "note"}:
                 note_paths_to_print.append(note_path)
 
-            if shopify_mode == "queue" and created.get("label_id") is not None:
+            if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
                 labels_for_order = list_gls_labels(order["order_id"])
                 created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
                 if created_row:
@@ -7259,20 +7374,10 @@ def create_shipping_label_for_order(stdscr, order):
     resolved_carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
     if not resolved_carrier:
         return
-    carrier = resolved_carrier.upper()
-    carrier_options = None
-    if resolved_carrier == "post":
-        carrier_options = _post_selection_dialog(stdscr, scope="domestic")
-        if not carrier_options:
-            return
-    elif resolved_carrier == "gls":
-        carrier_options = shipping_services_dialog(
-            stdscr,
-            SETTINGS.get("shipping_services", []),
-            cancel_returns_none=True,
-        )
-        if carrier_options is None:
-            return
+    carrier = _shipping_carrier_label(resolved_carrier)
+    carrier_options = _select_shipping_carrier_options(stdscr, resolved_carrier, scope="domestic")
+    if carrier_options is None:
+        return
     order_weight_kg, total_grams = calculate_order_shipping_weight(order)
     try:
         created = create_shipping_label(order, weight_kg=order_weight_kg, service_codes=carrier_options, carrier=resolved_carrier)
@@ -7286,15 +7391,15 @@ def create_shipping_label_for_order(stdscr, order):
         message_box(stdscr, "Versandlabel", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
         return
 
-    printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier.lower())
+    printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=resolved_carrier)
     if printed:
         if created["label_id"] is not None:
             update_gls_label_status(created["label_id"], "PRINTED")
-        message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} {total_grams}g gedruckt"[:56])
+        message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(resolved_carrier, created)} {total_grams}g gedruckt"[:56])
     else:
         if created["label_id"] is not None:
             update_gls_label_status(created["label_id"], "CREATED")
-        message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} {total_grams}g nur PDF"[:56])
+        message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(resolved_carrier, created)} {total_grams}g nur PDF"[:56])
 
 
 def create_manual_shipping_label(stdscr):
@@ -7316,6 +7421,7 @@ def create_manual_shipping_label(stdscr):
     print_mode = "print"
 
     while True:
+        option_mode = _shipping_carrier_option_mode(carrier_key)
         fields = [
             {"name": "name", "label": "Empfaenger Name", "value": state["name"]},
             {"name": "street", "label": "Strasse", "value": state["street"]},
@@ -7325,17 +7431,20 @@ def create_manual_shipping_label(stdscr):
             {"name": "weight_grams", "label": "Gewicht (g)", "value": state["weight_grams"]},
             {"name": "country_display", "label": "Land (F3)", "value": _manual_label_country_display(country_code)},
         ]
-        if carrier_key == "post":
+        if option_mode == "post_products":
             fields.append({"name": "post_product", "label": "POST Produkt (F4)", "value": _post_selection_summary(post_selection)})
-        else:
+        elif option_mode == "gls_services":
             fields.append({"name": "services_display", "label": "Services (F4)", "value": _shipping_services_summary(selected_services)})
         fields.append({"name": "print_mode", "label": "Ausgabe (F5)", "value": "PDF + Drucken" if print_mode == "print" else "Nur PDF"})
+        footer_text = "Enter weiter/erstellen  F3 Land  F5 Ausgabe  F6 Kunde  F9 Zurueck"
+        if option_mode in {"gls_services", "post_products"}:
+            footer_text = "Enter weiter/erstellen  F3 Land  F4 Auswahl  F5 Ausgabe  F6 Kunde  F9 Zurueck"
         result = form_dialog(
             stdscr,
             "Versandlabel ohne Bestellung",
             fields,
             initial_active=active,
-            footer_text="Enter weiter/erstellen  F3 Land  F4 Auswahl  F5 Ausgabe  F6 Kunde  F9 Zurueck",
+            footer_text=footer_text,
             extra_actions=[
                 {"name": "country", "keys": {curses.KEY_F3}},
                 {"name": "services", "keys": {curses.KEY_F4}},
@@ -7352,11 +7461,11 @@ def create_manual_shipping_label(stdscr):
             if result["__action__"] == "country":
                 country_code = manual_country_dialog(stdscr, country_code)
             elif result["__action__"] == "services":
-                if carrier_key == "post":
+                if option_mode == "post_products":
                     chosen_post = _post_selection_dialog(stdscr, scope="domestic")
                     if chosen_post:
                         post_selection = chosen_post
-                else:
+                elif option_mode == "gls_services":
                     selected_services = shipping_services_dialog(stdscr, selected_services)
             elif result["__action__"] == "print_mode":
                 next_mode = manual_label_print_mode_dialog(stdscr, print_mode)
@@ -7390,7 +7499,8 @@ def create_manual_shipping_label(stdscr):
     if weight_grams <= 0:
         message_box(stdscr, "Versandlabel", "Gewicht muss groesser als 0 g sein.")
         return
-    if carrier_key == "post" and not post_selection:
+    option_mode = _shipping_carrier_option_mode(carrier_key)
+    if option_mode == "post_products" and not post_selection:
         message_box(stdscr, "Versandlabel", "Bitte POST Produkt waehlen.")
         return
 
@@ -7407,14 +7517,18 @@ def create_manual_shipping_label(stdscr):
         "shipping_city": state["city"].strip(),
         "shipping_country": country_code,
     }
-    carrier = carrier_key.upper()
+    carrier = _shipping_carrier_label(carrier_key)
 
     try:
         created = create_shipping_label(
             order_stub,
             weight_kg=round(weight_grams / 1000.0, 3),
             shipment_reference=reference,
-            service_codes=post_selection if carrier_key == "post" else selected_services,
+            service_codes=(
+                post_selection if option_mode == "post_products"
+                else selected_services if option_mode == "gls_services"
+                else None
+            ),
             carrier=carrier_key,
         )
     except DatabaseUnavailableError:
@@ -7425,15 +7539,15 @@ def create_manual_shipping_label(stdscr):
         return
 
     if print_mode == "print":
-        printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier.lower())
+        printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier_key)
         if printed and created.get("label_id") is not None:
             update_gls_label_status(created["label_id"], "PRINTED")
         if printed:
-            message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} gedruckt"[:56])
+            message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} gedruckt"[:56])
         else:
-            message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} nur PDF"[:56])
+            message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} nur PDF"[:56])
     else:
-        message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} nur PDF"[:56])
+        message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} nur PDF"[:56])
 
 
 def _format_gls_history_line(row, width):
@@ -7443,7 +7557,7 @@ def _format_gls_history_line(row, width):
     else:
         ts = "-"
     order_name = (row.get("order_name") or "-").replace("#", "")
-    carrier = (row.get("carrier") or "gls").upper()
+    carrier = _shipping_carrier_label(row.get("carrier") or "gls", short=True)
     track_id = _shipment_number(row)
     status = row.get("status") or "-"
     text = f"{ts} {_fit(carrier, 4)} {_fit(order_name, 11)} {_fit(track_id, 10)} {status}"
@@ -7500,7 +7614,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         if chosen:
             job = get_latest_shopify_job_for_label(chosen["id"])
             detail_lines.append(_fit(f"Bestellung: {chosen.get('order_name') or '-'}", right_width - 2))
-            detail_lines.append(_fit(f"Dienst: {(chosen.get('carrier') or 'gls').upper()}", right_width - 2))
+            detail_lines.append(_fit(f"Dienst: {_shipping_carrier_label(chosen.get('carrier') or 'gls')}", right_width - 2))
             detail_lines.append(_fit(f"TrackID: {chosen.get('track_id') or '-'}", right_width - 2))
             detail_lines.append(_fit(f"Sendungsnr.: {_shipment_number(chosen)}", right_width - 2))
             detail_lines.append(_fit(f"Status: {chosen.get('status') or '-'}", right_width - 2))
@@ -7591,8 +7705,8 @@ def shipping_history_dialog(stdscr, selected_order=None):
             if str(chosen.get("order_id") or "").startswith("manual-"):
                 message_box(stdscr, "Shopify Queue", "Manuelle Labels haben keine Shopify-Bestellung.")
                 continue
-            if (chosen.get("carrier") or "").strip().lower() == "test":
-                message_box(stdscr, "Shopify Queue", "Test-Labels duerfen nicht an Shopify gesendet werden.")
+            if (chosen.get("carrier") or "").strip().lower() in {"test", "free"}:
+                message_box(stdscr, "Shopify Queue", "Test- und Adresslabels duerfen nicht an Shopify gesendet werden.")
                 continue
             if (chosen.get("source") or "").strip().lower() == "shopify":
                 message_box(stdscr, "Shopify Queue", "Diese Sendung ist bereits aus Shopify eingelesen.")
@@ -7756,7 +7870,7 @@ def orders_dialog(stdscr):
 
         draw_panel(details_win, "Positionen", detail_lines, 0, 0, False)
 
-        footer = " Space Mark  A Alle  F1 Offen  F2 Status  F3 Zahlung  F4 Springen  F5 Versandlabel  Shift+F5 Manuell  F6 Teilausf.  F7 Bulk  F8 Versand-History  F9 Zurueck  F10 Pickliste  F11 Lieferschein  F12 GLS-Abholung "
+        footer = " Space Mark  A Alle  F1 Offen  F2 Status  F3 Zahlung  F4 Springen  F5 Versandlabel  Shift+F5 Manuell  F6 Teilausf.  F7 Bulk  F8 Versand-History  F9 Zurueck  F10 Pickliste  F11 Lieferschein "
         filter_tags = []
         if order_filter:
             filter_tags.append(f"Text:{order_filter}")
@@ -7939,21 +8053,6 @@ def orders_dialog(stdscr):
                 reload_orders = True
         elif key == curses.KEY_F10 and selected_order:
             print_picklist(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F12 and selected_order:
-            try:
-                create_gls_sporadic_collection_dialog(stdscr)
-                try:
-                    curses.curs_set(0)
-                except curses.error:
-                    pass
-            except DatabaseUnavailableError as exc:
-                if not database_connection_dialog(stdscr, str(exc)):
-                    try:
-                        curses.curs_set(1)
-                    except curses.error:
-                        pass
-                    return
-                reload_orders = True
         elif key == " " and selected_order:
             order_id = selected_order["order_id"]
             if order_id in selected_order_ids:

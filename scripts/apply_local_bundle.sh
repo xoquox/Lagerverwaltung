@@ -31,6 +31,7 @@ root = Path(sys.argv[1])
 stage = Path(sys.argv[2])
 manifest = json.loads((stage / "bundle_manifest.json").read_text(encoding="utf-8"))
 bundle_settings = json.loads((stage / "settings.bundle.json").read_text(encoding="utf-8"))
+protected_keys = set(manifest.get("non_overwritten_local_keys") or [])
 local_settings_path = root / "settings.local.json"
 local_settings = {}
 if local_settings_path.exists():
@@ -51,6 +52,8 @@ for mapping in manifest.get("setting_file_mappings", []):
         bundle_settings[key] = str(root / target)
 
 for key, value in bundle_settings.items():
+    if key in protected_keys:
+        continue
     local_settings[key] = value
 
 local_settings_path.write_text(json.dumps(local_settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")

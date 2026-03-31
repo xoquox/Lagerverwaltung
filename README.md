@@ -86,13 +86,14 @@ Wichtige Einstellungen:
 - `delivery_note_sender_street`
 - `delivery_note_sender_city`
 - `delivery_note_sender_email`
-- `shipping_label_printer_gls`, `shipping_label_printer_dhl_private`, `shipping_label_printer_post`
-- `shipping_label_format_gls`, `shipping_label_format_dhl_private`, `shipping_label_format_post`
+- `shipping_active_carriers`
+- `shipping_label_printer_gls`, `shipping_label_printer_free`, `shipping_label_printer_post`
+- `shipping_label_format_gls`, `shipping_label_format_free`, `shipping_label_format_post`
 - `shipping_label_printer`, `shipping_label_format` (Fallback/Legacy)
+- `free_label_template_path` (optional, lokaler Pfad zu einer HTML-Vorlage fuer Adresslabels; HTML-Vorlagen brauchen WeasyPrint)
 - `shipping_services`, `shipping_packaging_weight_grams`
 - `gls_api_url`, `gls_user`, `gls_password`, `gls_contact_id`
 - `post_api_url`, `post_api_key`, `post_api_secret`, `post_user`, `post_password`, `post_partner_id`
-- `dhl_private_api_url`, `dhl_private_api_test_url`, `dhl_private_api_key`, `dhl_private_api_secret`, `dhl_private_use_test_api`
 
 ## Shopify-Sync
 

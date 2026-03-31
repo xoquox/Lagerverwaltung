@@ -1140,8 +1140,6 @@ def _normalize_carrier_name(value):
     normalized = raw.lower()
     if "gls" in normalized:
         return "gls"
-    if "dhl" in normalized:
-        return "dhl"
     if "post" in normalized:
         return "post"
     return normalized[:32]
@@ -1153,8 +1151,6 @@ def _shopify_tracking_company(value):
         return "GLS"
     if normalized == "post":
         return "Deutsche Post"
-    if normalized in {"dhl", "dhl_private"}:
-        return "DHL"
     return (value or "").strip() or "GLS"
 
 
