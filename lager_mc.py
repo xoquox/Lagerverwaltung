@@ -63,6 +63,19 @@ SHIPPING_CARRIER_DEFINITIONS = {
         "default_format": "A6",
         "shopify_allowed": True,
         "option_mode": "gls_services",
+        "printer_field": "shipping_label_printer_gls",
+        "printer_field_label_key": "field_shipping_printer_gls",
+        "format_field": "shipping_label_format_gls",
+        "format_field_label_key": "field_shipping_format_gls",
+        "tracking_mode_field": "shopify_tracking_mode_gls",
+        "tracking_url_field": "shopify_tracking_url_gls",
+        "extra_settings_fields": [
+            ("shipping_services_display", "field_shipping_services"),
+            ("gls_api_url", "field_gls_api_url"),
+            ("gls_user", "field_gls_user"),
+            ("gls_password", "field_gls_password"),
+            ("gls_contact_id", "field_gls_contact_id"),
+        ],
     },
     "post": {
         "label": "POST",
@@ -70,6 +83,20 @@ SHIPPING_CARRIER_DEFINITIONS = {
         "default_format": "100x62",
         "shopify_allowed": True,
         "option_mode": "post_products",
+        "printer_field": "shipping_label_printer_post",
+        "printer_field_label_key": "field_shipping_printer_post",
+        "format_field": "shipping_label_format_post",
+        "format_field_label_key": "field_shipping_format_post",
+        "tracking_mode_field": "shopify_tracking_mode_post",
+        "tracking_url_field": "shopify_tracking_url_post",
+        "extra_settings_fields": [
+            ("post_api_url", "field_post_api_url"),
+            ("post_api_key", "field_post_api_key"),
+            ("post_api_secret", "field_post_api_secret"),
+            ("post_user", "field_post_user"),
+            ("post_password", "field_post_password"),
+            ("post_partner_id", "field_post_partner_id"),
+        ],
     },
     "free": {
         "label": "Adresslabel",
@@ -77,6 +104,13 @@ SHIPPING_CARRIER_DEFINITIONS = {
         "default_format": "A6",
         "shopify_allowed": False,
         "option_mode": None,
+        "printer_field": "shipping_label_printer_free",
+        "printer_field_label_key": "field_shipping_printer_free",
+        "format_field": "shipping_label_format_free",
+        "format_field_label_key": "field_shipping_format_free",
+        "template_field": "free_label_template_path",
+        "template_field_label_key": "field_free_label_template",
+        "extra_settings_fields": [],
     },
     "test": {
         "label": "TEST",
@@ -84,6 +118,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         "default_format": "A6",
         "shopify_allowed": False,
         "option_mode": None,
+        "extra_settings_fields": [],
     },
 }
 SHIPPING_CARRIER_ORDER = list(SHIPPING_CARRIER_DEFINITIONS.keys())
@@ -1428,7 +1463,7 @@ def get_local_fulfilled_quantities_for_order(order_id):
     return totals
 
 
-def list_gls_labels(order_id=None):
+def list_shipping_labels(order_id=None):
     con = db()
     cur = con.cursor()
     if order_id:
@@ -1494,7 +1529,7 @@ def list_gls_labels(order_id=None):
     return rows
 
 
-def insert_gls_label_history(
+def insert_shipping_label_history(
     order,
     shipment_reference,
     track_id,
@@ -1571,7 +1606,7 @@ def insert_gls_label_history(
     return row["id"] if row else None
 
 
-def update_gls_label_status(label_id, status, last_error=None):
+def update_shipping_label_status(label_id, status, last_error=None):
     con = db()
     cur = con.cursor()
     if status == "CANCELLED":
@@ -1614,7 +1649,7 @@ def update_gls_label_status(label_id, status, last_error=None):
     con.close()
 
 
-def update_gls_label_reprint(label_id, label_path):
+def update_shipping_label_reprint(label_id, label_path):
     con = db()
     cur = con.cursor()
     cur.execute(
@@ -1631,6 +1666,13 @@ def update_gls_label_reprint(label_id, label_path):
     con.commit()
     cur.close()
     con.close()
+
+
+# Rueckwaertskompatible Aliasnamen; interne Versandhistorie ist nicht mehr GLS-spezifisch.
+list_gls_labels = list_shipping_labels
+insert_gls_label_history = insert_shipping_label_history
+update_gls_label_status = update_shipping_label_status
+update_gls_label_reprint = update_shipping_label_reprint
 
 
 def get_latest_shopify_job_for_label(label_id):
@@ -1685,12 +1727,55 @@ def _shipping_carrier_definition(carrier):
     return SHIPPING_CARRIER_DEFINITIONS.get(normalized) or {}
 
 
+def _configurable_shipping_carrier_codes(include_test=False):
+    codes = []
+    for code in SHIPPING_CARRIER_ORDER:
+        if code == "test" and not include_test:
+            continue
+        if SHIPPING_CARRIER_DEFINITIONS.get(code):
+            codes.append(code)
+    return codes
+
+
 def _shipping_carrier_allows_shopify(carrier):
     return bool(_shipping_carrier_definition(carrier).get("shopify_allowed"))
 
 
 def _shipping_carrier_option_mode(carrier):
     return _shipping_carrier_definition(carrier).get("option_mode")
+
+
+def _shipping_carrier_setting_field(carrier, field_kind):
+    return _shipping_carrier_definition(carrier).get(f"{field_kind}_field")
+
+
+def _shipping_carrier_field_to_code(field_kind):
+    mapping = {}
+    for code in _configurable_shipping_carrier_codes():
+        field_name = _shipping_carrier_setting_field(code, field_kind)
+        if field_name:
+            mapping[field_name] = code
+    return mapping
+
+
+def _shipping_printer_field_map():
+    return _shipping_carrier_field_to_code("printer")
+
+
+def _shipping_format_field_map():
+    return _shipping_carrier_field_to_code("format")
+
+
+def _shipping_template_field_map():
+    return _shipping_carrier_field_to_code("template")
+
+
+def _shipping_tracking_mode_field_map():
+    return _shipping_carrier_field_to_code("tracking_mode")
+
+
+def _shipping_tracking_url_field_map():
+    return _shipping_carrier_field_to_code("tracking_url")
 
 
 def _shipping_active_carrier_values(values):
@@ -1752,11 +1837,8 @@ def _tracking_url_for_carrier(carrier, tracking_number):
     if not number:
         return None
     normalized = (carrier or "").strip().lower()
-    template = ""
-    if normalized == "gls":
-        template = (SETTINGS.get("shopify_tracking_url_gls") or "").strip()
-    elif normalized == "post":
-        template = (SETTINGS.get("shopify_tracking_url_post") or "").strip()
+    template_field = _shipping_carrier_setting_field(normalized, "tracking_url")
+    template = (SETTINGS.get(template_field) or "").strip() if template_field else ""
     if not template:
         return None
     try:
@@ -1767,10 +1849,10 @@ def _tracking_url_for_carrier(carrier, tracking_number):
 
 def _shopify_tracking_mode_for_carrier(carrier):
     normalized = (carrier or "").strip().lower()
-    if normalized == "gls":
-        return (SETTINGS.get("shopify_tracking_mode_gls") or "company").strip().lower()
-    if normalized == "post":
-        return (SETTINGS.get("shopify_tracking_mode_post") or "company_and_url").strip().lower()
+    tracking_mode_field = _shipping_carrier_setting_field(normalized, "tracking_mode")
+    default_mode = "company_and_url" if normalized == "post" else "company"
+    if tracking_mode_field:
+        return (SETTINGS.get(tracking_mode_field) or default_mode).strip().lower()
     return "company"
 
 
@@ -2987,7 +3069,8 @@ def _normalize_shipping_label_format(value):
 
 def _shipping_printer_for_carrier(carrier):
     c = (carrier or "").strip().lower()
-    specific = (SETTINGS.get(f"shipping_label_printer_{c}") or "").strip() if c else ""
+    printer_field = _shipping_carrier_setting_field(c, "printer")
+    specific = (SETTINGS.get(printer_field) or "").strip() if printer_field else ""
     fallback = (SETTINGS.get("shipping_label_printer") or "").strip()
     return specific or fallback
 
@@ -2995,7 +3078,8 @@ def _shipping_printer_for_carrier(carrier):
 def _shipping_format_for_carrier(carrier):
     c = (carrier or "").strip().lower()
     defaults = {code: data.get("default_format", "A6") for code, data in SHIPPING_CARRIER_DEFINITIONS.items()}
-    specific = SETTINGS.get(f"shipping_label_format_{c}") if c else None
+    format_field = _shipping_carrier_setting_field(c, "format")
+    specific = SETTINGS.get(format_field) if format_field else None
     fallback = SETTINGS.get("shipping_label_format", defaults.get(c, "A6"))
     return _normalize_shipping_label_format(specific or fallback or defaults.get(c, "A6"))
 
@@ -3170,7 +3254,7 @@ def gls_create_label(order, weight_kg=1.0, shipment_reference=None, service_code
             raise RuntimeError("GLS Labelantwort ohne PDF-Daten.")
 
     label_path = _save_shipping_label_pdf("gls", order["order_name"], track_id, pdf_blob)
-    label_id = insert_gls_label_history(
+    label_id = insert_shipping_label_history(
         order=order,
         shipment_reference=shipment_reference,
         track_id=track_id,
@@ -3255,7 +3339,7 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     parcel_number = (first_voucher.get("trackId") or "").strip() or None
     tracking_url = _tracking_url_for_carrier("post", track_id or parcel_number or _reference)
     label_path = _save_shipping_label_pdf("post", order["order_name"], track_id or _reference, pdf_blob)
-    label_id = insert_gls_label_history(
+    label_id = insert_shipping_label_history(
         order=order,
         shipment_reference=_reference,
         track_id=track_id or _reference,
@@ -3308,7 +3392,7 @@ def free_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
             pass
 
     label_path = _save_shipping_label_pdf("free", order["order_name"], internal_id, pdf_blob)
-    label_id = insert_gls_label_history(
+    label_id = insert_shipping_label_history(
         order=order,
         shipment_reference=shipment_reference,
         track_id=internal_id,
@@ -3334,7 +3418,7 @@ def test_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     parcel_number = f"999{datetime.datetime.now().strftime('%H%M%S')}"
     pdf_blob = _build_test_label_pdf(order.get("order_name") or "TEST", shipment_reference, track_id)
     label_path = _save_shipping_label_pdf("test", order["order_name"], track_id, pdf_blob)
-    label_id = insert_gls_label_history(
+    label_id = insert_shipping_label_history(
         order=order,
         shipment_reference=shipment_reference,
         track_id=track_id,
@@ -3398,7 +3482,7 @@ def gls_reprint_label(label_row):
         raise RuntimeError("GLS Reprint ohne PDF-Daten.")
 
     label_path = _save_shipping_label_pdf("gls", label_row["order_name"], chosen_identifier, pdf_blob, suffix="reprint")
-    update_gls_label_reprint(label_row["id"], label_path)
+    update_shipping_label_reprint(label_row["id"], label_path)
     return label_path
 
 
@@ -3421,7 +3505,7 @@ def gls_cancel_label(label_row):
         raise RuntimeError("GLS Storno fehlgeschlagen.")
     if status_code >= 400:
         error_detail = _gls_error_summary(data, raw)
-        update_gls_label_status(label_row["id"], "CANCEL_FAILED", f"HTTP {status_code} {error_detail[:120]}".strip())
+        update_shipping_label_status(label_row["id"], "CANCEL_FAILED", f"HTTP {status_code} {error_detail[:120]}".strip())
         LOGGER.error(
             "GLS Storno Fehler status=%s identifiers=%s detail=%s",
             status_code,
@@ -3436,11 +3520,11 @@ def gls_cancel_label(label_row):
     if isinstance(data, dict):
         result = (data.get("result") or "").strip().upper()
     if result == "CANCELLED":
-        update_gls_label_status(label_row["id"], "CANCELLED")
+        update_shipping_label_status(label_row["id"], "CANCELLED")
     elif result == "CANCELLATION_PENDING":
-        update_gls_label_status(label_row["id"], "CANCELLATION_PENDING")
+        update_shipping_label_status(label_row["id"], "CANCELLATION_PENDING")
     else:
-        update_gls_label_status(label_row["id"], "CANCEL_REQUESTED")
+        update_shipping_label_status(label_row["id"], "CANCEL_REQUESTED")
     return result or "CANCEL_REQUESTED"
 
 
@@ -3571,33 +3655,22 @@ def effective_shipping_carrier(requested_carrier=None):
     return active[0] if active else "gls"
 
 
+def _shipping_label_creator(carrier):
+    return {
+        "gls": gls_create_label,
+        "post": post_create_label,
+        "free": free_create_label,
+        "test": test_create_label,
+    }.get((carrier or "").strip().lower())
+
+
 def create_shipping_label(order, weight_kg=None, shipment_reference=None, service_codes=None, carrier=None):
     selected_carrier = effective_shipping_carrier(carrier)
     if weight_kg is None:
         weight_kg, _total_grams = calculate_order_shipping_weight(order)
-    if selected_carrier == "gls":
-        return gls_create_label(
-            order,
-            weight_kg=weight_kg,
-            shipment_reference=shipment_reference,
-            service_codes=service_codes,
-        )
-    if selected_carrier == "post":
-        return post_create_label(
-            order,
-            weight_kg=weight_kg,
-            shipment_reference=shipment_reference,
-            service_codes=service_codes,
-        )
-    if selected_carrier == "free":
-        return free_create_label(
-            order,
-            weight_kg=weight_kg,
-            shipment_reference=shipment_reference,
-            service_codes=service_codes,
-        )
-    if selected_carrier == "test":
-        return test_create_label(
+    creator = _shipping_label_creator(selected_carrier)
+    if creator:
+        return creator(
             order,
             weight_kg=weight_kg,
             shipment_reference=shipment_reference,
@@ -5042,8 +5115,102 @@ def post_product_dialog(stdscr, current_selection=None, scope="domestic"):
         }
 
 
+def _shipping_printer_tab_fields():
+    fields = [
+        ("picklist_printer", "field_picklist_printer"),
+        ("delivery_note_printer", "field_delivery_printer"),
+        ("delivery_note_format", "field_delivery_format"),
+    ]
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        printer_label_key = definition.get("printer_field_label_key")
+        if printer_field and printer_label_key:
+            fields.append((printer_field, printer_label_key))
+    fields.append(("shipping_label_printer", "field_shipping_printer_fallback"))
+    return fields
+
+
+def _shipping_settings_tab_fields():
+    fields = [
+        ("shipping_label_output_dir", "field_shipping_label_output_dir"),
+        ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
+        ("shipping_active_carriers_display", "field_shipping_active_carriers"),
+    ]
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        fields.append((f"_heading_{code}", definition.get("label") or code.upper()))
+        format_field = definition.get("format_field")
+        format_label_key = definition.get("format_field_label_key")
+        if format_field and format_label_key:
+            fields.append((format_field, format_label_key))
+        template_field = definition.get("template_field")
+        template_label_key = definition.get("template_field_label_key")
+        if template_field and template_label_key:
+            fields.append((template_field, template_label_key))
+        tracking_mode_field = definition.get("tracking_mode_field")
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_mode_field:
+            fields.append((tracking_mode_field, f"field_{tracking_mode_field}"))
+        if tracking_url_field:
+            fields.append((tracking_url_field, f"field_{tracking_url_field}"))
+        fields.extend(definition.get("extra_settings_fields") or [])
+    return fields
+
+
+def _shipping_settings_initial_values():
+    values = {
+        "shipping_active_carriers": _normalize_active_shipping_carriers(
+            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+        ),
+        "shipping_active_carriers_display": _shipping_active_carriers_summary(
+            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+        ),
+        "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
+        "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
+        "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
+        "shipping_services": _normalize_shipping_services(SETTINGS.get("shipping_services", [])),
+        "shipping_services_display": _shipping_services_summary(SETTINGS.get("shipping_services", [])),
+        "shipping_packaging_weight_grams": str(
+            SETTINGS.get("shipping_packaging_weight_grams", DEFAULT_SETTINGS.get("shipping_packaging_weight_grams", 400))
+        ),
+    }
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        if printer_field:
+            values[printer_field] = SETTINGS.get(printer_field, "")
+        format_field = definition.get("format_field")
+        if format_field:
+            values[format_field] = _normalize_shipping_label_format(
+                SETTINGS.get(format_field, definition.get("default_format", "A6"))
+            )
+        tracking_mode_field = definition.get("tracking_mode_field")
+        if tracking_mode_field:
+            values[tracking_mode_field] = (
+                SETTINGS.get(tracking_mode_field)
+                or DEFAULT_SETTINGS.get(tracking_mode_field, "company")
+            ).strip().lower()
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_url_field:
+            values[tracking_url_field] = SETTINGS.get(tracking_url_field, "")
+        template_field = definition.get("template_field")
+        if template_field:
+            values[template_field] = SETTINGS.get(template_field, "")
+        for field_name, _label_key in definition.get("extra_settings_fields") or []:
+            if field_name == "shipping_services_display":
+                continue
+            values[field_name] = SETTINGS.get(field_name, "")
+    return values
+
+
 def settings_dialog(stdscr):
     global SETTINGS
+
+    shipping_printer_fields = _shipping_printer_field_map()
+    shipping_format_fields = _shipping_format_field_map()
+    shipping_template_fields = _shipping_template_field_map()
+    shipping_tracking_mode_fields = _shipping_tracking_mode_field_map()
 
     values = {
         "db_host": SETTINGS["db_host"],
@@ -5066,47 +5233,6 @@ def settings_dialog(stdscr):
         "delivery_note_format": _normalize_shipping_label_format(
             SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))
         ),
-        "shipping_active_carriers": _normalize_active_shipping_carriers(
-            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
-        ),
-        "shipping_active_carriers_display": _shipping_active_carriers_summary(
-            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
-        ),
-        "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
-        "shipping_label_printer_gls": SETTINGS.get("shipping_label_printer_gls", ""),
-        "shipping_label_printer_free": SETTINGS.get("shipping_label_printer_free", ""),
-        "shipping_label_printer_post": SETTINGS.get("shipping_label_printer_post", ""),
-        "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
-        "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
-        "shipping_label_format_gls": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_gls", SETTINGS.get("shipping_label_format", "A6"))
-        ),
-        "shipping_label_format_free": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_free", "A6")
-        ),
-        "shipping_label_format_post": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_post", "100x62")
-        ),
-        "shipping_services": _normalize_shipping_services(SETTINGS.get("shipping_services", [])),
-        "shipping_services_display": _shipping_services_summary(SETTINGS.get("shipping_services", [])),
-        "shipping_packaging_weight_grams": str(
-            SETTINGS.get("shipping_packaging_weight_grams", DEFAULT_SETTINGS.get("shipping_packaging_weight_grams", 400))
-        ),
-        "shopify_tracking_mode_gls": (SETTINGS.get("shopify_tracking_mode_gls") or DEFAULT_SETTINGS.get("shopify_tracking_mode_gls", "company")).strip().lower(),
-        "shopify_tracking_mode_post": (SETTINGS.get("shopify_tracking_mode_post") or DEFAULT_SETTINGS.get("shopify_tracking_mode_post", "company_and_url")).strip().lower(),
-        "shopify_tracking_url_gls": SETTINGS.get("shopify_tracking_url_gls", ""),
-        "shopify_tracking_url_post": SETTINGS.get("shopify_tracking_url_post", ""),
-        "gls_api_url": SETTINGS.get("gls_api_url", ""),
-        "gls_user": SETTINGS.get("gls_user", ""),
-        "gls_password": SETTINGS.get("gls_password", ""),
-        "gls_contact_id": SETTINGS.get("gls_contact_id", ""),
-        "post_api_url": SETTINGS.get("post_api_url", ""),
-        "post_api_key": SETTINGS.get("post_api_key", ""),
-        "post_api_secret": SETTINGS.get("post_api_secret", ""),
-        "post_user": SETTINGS.get("post_user", ""),
-        "post_password": SETTINGS.get("post_password", ""),
-        "post_partner_id": SETTINGS.get("post_partner_id", ""),
-        "free_label_template_path": SETTINGS.get("free_label_template_path", ""),
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
         "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
         "delivery_note_logo_source": SETTINGS.get("delivery_note_logo_source", ""),
@@ -5115,6 +5241,7 @@ def settings_dialog(stdscr):
         "delivery_note_sender_city": SETTINGS["delivery_note_sender_city"],
         "delivery_note_sender_email": SETTINGS["delivery_note_sender_email"],
     }
+    values.update(_shipping_settings_initial_values())
     tabs = [
         {
             "title": "Allgemein",
@@ -5143,45 +5270,11 @@ def settings_dialog(stdscr):
         },
         {
             "title": "Drucker",
-            "fields": [
-                ("picklist_printer", "field_picklist_printer"),
-                ("delivery_note_printer", "field_delivery_printer"),
-                ("delivery_note_format", "field_delivery_format"),
-                ("shipping_label_printer_gls", "field_shipping_printer_gls"),
-                ("shipping_label_printer_free", "field_shipping_printer_free"),
-                ("shipping_label_printer_post", "field_shipping_printer_post"),
-                ("shipping_label_printer", "field_shipping_printer_fallback"),
-            ],
+            "fields": _shipping_printer_tab_fields(),
         },
         {
             "title": "Versand",
-            "fields": [
-                ("shipping_label_output_dir", "field_shipping_label_output_dir"),
-                ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
-                ("shipping_active_carriers_display", "field_shipping_active_carriers"),
-                ("_heading_gls", "GLS"),
-                ("shipping_label_format_gls", "field_shipping_format_gls"),
-                ("shipping_services_display", "field_shipping_services"),
-                ("shopify_tracking_mode_gls", "field_shopify_tracking_mode_gls"),
-                ("shopify_tracking_url_gls", "field_shopify_tracking_url_gls"),
-                ("gls_api_url", "field_gls_api_url"),
-                ("gls_user", "field_gls_user"),
-                ("gls_password", "field_gls_password"),
-                ("gls_contact_id", "field_gls_contact_id"),
-                ("_heading_post", "POST"),
-                ("shipping_label_format_post", "field_shipping_format_post"),
-                ("shopify_tracking_mode_post", "field_shopify_tracking_mode_post"),
-                ("shopify_tracking_url_post", "field_shopify_tracking_url_post"),
-                ("post_api_url", "field_post_api_url"),
-                ("post_api_key", "field_post_api_key"),
-                ("post_api_secret", "field_post_api_secret"),
-                ("post_user", "field_post_user"),
-                ("post_password", "field_post_password"),
-                ("post_partner_id", "field_post_partner_id"),
-                ("_heading_free", "Adresslabel"),
-                ("shipping_label_format_free", "field_shipping_format_free"),
-                ("free_label_template_path", "field_free_label_template"),
-            ],
+            "fields": _shipping_settings_tab_fields(),
         },
         {
             "title": "Lieferschein",
@@ -5376,34 +5469,23 @@ def settings_dialog(stdscr):
             "picklist_printer",
             "delivery_note_printer",
             "shipping_label_printer",
-            "shipping_label_printer_gls",
-            "shipping_label_printer_free",
-            "shipping_label_printer_post",
+            *shipping_printer_fields.keys(),
         }:
             values[active_name] = cups_printer_dialog(stdscr, values[active_name])
             cursor_positions[active_name] = len(str(values[active_name]))
             continue
 
-        if key == curses.KEY_F4 and active_name in {
-            "delivery_note_format",
-            "shipping_label_format_gls",
-            "shipping_label_format_free",
-            "shipping_label_format_post",
-        }:
+        if key == curses.KEY_F4 and active_name in {"delivery_note_format", *shipping_format_fields.keys()}:
             printer_name = ""
             title = "Druckformat"
             if active_name == "delivery_note_format":
                 printer_name = values.get("delivery_note_printer", "")
                 title = "Lieferschein Format"
-            elif active_name == "shipping_label_format_gls":
-                printer_name = values.get("shipping_label_printer_gls") or values.get("shipping_label_printer")
-                title = "GLS Labelformat"
-            elif active_name == "shipping_label_format_free":
-                printer_name = values.get("shipping_label_printer_free") or values.get("shipping_label_printer")
-                title = "Adresslabel Format"
-            elif active_name == "shipping_label_format_post":
-                printer_name = values.get("shipping_label_printer_post") or values.get("shipping_label_printer")
-                title = "POST Labelformat"
+            elif active_name in shipping_format_fields:
+                carrier_code = shipping_format_fields[active_name]
+                printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
+                printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
+                title = f"{_shipping_carrier_label(carrier_code)} Format"
             values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
             cursor_positions[active_name] = len(str(values[active_name]))
             continue
@@ -5425,8 +5507,14 @@ def settings_dialog(stdscr):
                 values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
                 cursor_positions[active_name] = len(str(values.get(active_name, "")))
                 continue
-            if active_name == "free_label_template_path":
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Adresslabel Vorlage waehlen", extensions={".html", ".htm"})
+            if active_name in shipping_template_fields:
+                carrier_code = shipping_template_fields[active_name]
+                values[active_name] = file_dialog(
+                    stdscr,
+                    values.get(active_name, ""),
+                    f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
+                    extensions={".html", ".htm"},
+                )
                 cursor_positions[active_name] = len(str(values.get(active_name, "")))
                 continue
             if active_name == "delivery_note_logo_source":
@@ -5445,23 +5533,16 @@ def settings_dialog(stdscr):
                 "picklist_printer",
                 "delivery_note_printer",
                 "shipping_label_printer",
-                "shipping_label_printer_gls",
-                "shipping_label_printer_free",
-                "shipping_label_printer_post",
+                *shipping_printer_fields.keys(),
             }:
                 values[active_name] = cups_printer_dialog(stdscr, values[active_name])
-            elif active_name in {"shipping_label_format_gls", "shipping_label_format_free", "shipping_label_format_post"}:
+            elif active_name in shipping_format_fields:
                 printer_name = ""
                 title = "Labelformat"
-                if active_name == "shipping_label_format_gls":
-                    printer_name = values.get("shipping_label_printer_gls") or values.get("shipping_label_printer")
-                    title = "GLS Labelformat"
-                elif active_name == "shipping_label_format_free":
-                    printer_name = values.get("shipping_label_printer_free") or values.get("shipping_label_printer")
-                    title = "Adresslabel Format"
-                elif active_name == "shipping_label_format_post":
-                    printer_name = values.get("shipping_label_printer_post") or values.get("shipping_label_printer")
-                    title = "POST Labelformat"
+                carrier_code = shipping_format_fields[active_name]
+                printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
+                printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
+                title = f"{_shipping_carrier_label(carrier_code)} Format"
                 values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
             elif active_name == "delivery_note_format":
                 values[active_name] = cups_media_dialog(
@@ -5478,9 +5559,15 @@ def settings_dialog(stdscr):
                 values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
             elif active_name == "delivery_note_template_path":
                 values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
-            elif active_name == "free_label_template_path":
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Adresslabel Vorlage waehlen", extensions={".html", ".htm"})
-            elif active_name in {"shopify_tracking_mode_gls", "shopify_tracking_mode_post"}:
+            elif active_name in shipping_template_fields:
+                carrier_code = shipping_template_fields[active_name]
+                values[active_name] = file_dialog(
+                    stdscr,
+                    values.get(active_name, ""),
+                    f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
+                    extensions={".html", ".htm"},
+                )
+            elif active_name in shipping_tracking_mode_fields:
                 values[active_name] = choice_dialog(
                     stdscr,
                     "Shopify Tracking",
@@ -5547,31 +5634,10 @@ def settings_dialog(stdscr):
             fallback_to_defaults=False,
         ),
         "shipping_label_printer": values["shipping_label_printer"].strip(),
-        "shipping_label_printer_gls": values["shipping_label_printer_gls"].strip(),
-        "shipping_label_printer_free": values["shipping_label_printer_free"].strip(),
-        "shipping_label_printer_post": values["shipping_label_printer_post"].strip(),
         "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
-        "shipping_label_format_gls": _normalize_shipping_label_format(values["shipping_label_format_gls"].strip()),
-        "shipping_label_format_free": _normalize_shipping_label_format(values["shipping_label_format_free"].strip()),
-        "shipping_label_format_post": _normalize_shipping_label_format(values["shipping_label_format_post"].strip()),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
-        "shopify_tracking_mode_gls": values["shopify_tracking_mode_gls"].strip().lower(),
-        "shopify_tracking_mode_post": values["shopify_tracking_mode_post"].strip().lower(),
-        "shopify_tracking_url_gls": values["shopify_tracking_url_gls"].strip(),
-        "shopify_tracking_url_post": values["shopify_tracking_url_post"].strip(),
-        "gls_api_url": values["gls_api_url"].strip(),
-        "gls_user": values["gls_user"].strip(),
-        "gls_password": values["gls_password"],
-        "gls_contact_id": values["gls_contact_id"].strip(),
-        "post_api_url": values["post_api_url"].strip(),
-        "post_api_key": values["post_api_key"].strip(),
-        "post_api_secret": values["post_api_secret"].strip(),
-        "post_user": values["post_user"].strip(),
-        "post_password": values["post_password"],
-        "post_partner_id": values["post_partner_id"].strip(),
-        "free_label_template_path": os.path.expanduser(values["free_label_template_path"].strip()),
         "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
         "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
         "delivery_note_logo_source": values["delivery_note_logo_source"].strip(),
@@ -5580,6 +5646,30 @@ def settings_dialog(stdscr):
         "delivery_note_sender_city": values["delivery_note_sender_city"].strip(),
         "delivery_note_sender_email": values["delivery_note_sender_email"].strip(),
     }
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        if printer_field:
+            updated[printer_field] = values.get(printer_field, "").strip()
+        format_field = definition.get("format_field")
+        if format_field:
+            updated[format_field] = _normalize_shipping_label_format(values.get(format_field, "").strip())
+        tracking_mode_field = definition.get("tracking_mode_field")
+        if tracking_mode_field:
+            updated[tracking_mode_field] = values.get(tracking_mode_field, "").strip().lower()
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_url_field:
+            updated[tracking_url_field] = values.get(tracking_url_field, "").strip()
+        template_field = definition.get("template_field")
+        if template_field:
+            updated[template_field] = os.path.expanduser(values.get(template_field, "").strip())
+        for field_name, _label_key in definition.get("extra_settings_fields") or []:
+            if field_name == "shipping_services_display":
+                continue
+            if field_name.endswith("_password"):
+                updated[field_name] = values.get(field_name, "")
+            else:
+                updated[field_name] = values.get(field_name, "").strip()
 
     missing = [
         label for key, label in [
@@ -5654,21 +5744,18 @@ def settings_dialog(stdscr):
     if not updated["shipping_active_carriers"]:
         message_box(stdscr, t("error"), "Mindestens ein Versanddienst muss aktiv sein.")
         return
-    for key in ("shipping_label_format_gls", "shipping_label_format_free", "shipping_label_format_post"):
-        if not updated[key]:
-            message_box(stdscr, t("error"), f"{key} darf nicht leer sein.")
-            return
-    if not updated.get("shipping_label_format_gls"):
-        updated["shipping_label_format_gls"] = "A6"
-    if not updated.get("shipping_label_format_free"):
-        updated["shipping_label_format_free"] = "A6"
-    if not updated.get("shipping_label_format_post"):
-        updated["shipping_label_format_post"] = "100x62"
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        format_field = definition.get("format_field")
+        if format_field and not updated.get(format_field):
+            updated[format_field] = definition.get("default_format", "A6")
     if not updated.get("shipping_label_format"):
         updated["shipping_label_format"] = "A6"
-    if updated["free_label_template_path"] and not os.path.isfile(updated["free_label_template_path"]):
-        message_box(stdscr, t("error"), "Adresslabel Vorlage existiert nicht.")
-        return
+    for code in _configurable_shipping_carrier_codes():
+        template_field = _shipping_carrier_setting_field(code, "template")
+        if template_field and updated.get(template_field) and not os.path.isfile(updated[template_field]):
+            message_box(stdscr, t("error"), f"{_shipping_carrier_label(code)} Vorlage existiert nicht."[:56])
+            return
     try:
         packaging_weight = int(updated["shipping_packaging_weight_grams"])
     except ValueError:
@@ -7180,19 +7267,19 @@ def run_partial_execution_for_order(stdscr, order, order_items):
         if print_mode in {"both", "label"} and created.get("label_path"):
             printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier.upper()} {created['shipment_reference']}", carrier=carrier)
             if printed and created.get("label_id") is not None:
-                update_gls_label_status(created["label_id"], "PRINTED")
+                update_shipping_label_status(created["label_id"], "PRINTED")
 
         note_path, _rows = create_delivery_note_pdf(order, selected_for_note)
         if print_mode in {"both", "note"}:
             _print_delivery_note_pdf_path(order, note_path)
 
         if created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
-            fresh_rows = list_gls_labels(order["order_id"])
+            fresh_rows = list_shipping_labels(order["order_id"])
             current_label = next((row for row in fresh_rows if row["id"] == created["label_id"]), None)
             if current_label:
                 queue_result = enqueue_shopify_fulfillment_job_for_items(current_label, selected_items, notify_customer=False)
                 if queue_result.get("created"):
-                    update_gls_label_status(created["label_id"], "SHOPIFY_QUEUED")
+                    update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
         message_box(
             stdscr,
             "Teilausfuehrung",
@@ -7302,7 +7389,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                 note_paths_to_print.append(note_path)
 
             if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
-                labels_for_order = list_gls_labels(order["order_id"])
+                labels_for_order = list_shipping_labels(order["order_id"])
                 created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
                 if created_row:
                     try:
@@ -7313,7 +7400,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     else:
                         if queue_result.get("created"):
                             queued_count += 1
-                            update_gls_label_status(created["label_id"], "SHOPIFY_QUEUED")
+                            update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
 
             success_count += 1
         except DatabaseUnavailableError:
@@ -7354,7 +7441,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                 printed = _print_pdf_via_lp(stdscr, merged_label_pdf, f"{carrier.upper()} Sammeldruck", carrier=carrier)
                 if printed:
                     for label_id in printed_label_ids:
-                        update_gls_label_status(label_id, "PRINTED")
+                        update_shipping_label_status(label_id, "PRINTED")
             if note_paths_to_print:
                 merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
                 _merge_pdf_files(note_paths_to_print, merged_note_pdf)
@@ -7394,11 +7481,11 @@ def create_shipping_label_for_order(stdscr, order):
     printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=resolved_carrier)
     if printed:
         if created["label_id"] is not None:
-            update_gls_label_status(created["label_id"], "PRINTED")
+            update_shipping_label_status(created["label_id"], "PRINTED")
         message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(resolved_carrier, created)} {total_grams}g gedruckt"[:56])
     else:
         if created["label_id"] is not None:
-            update_gls_label_status(created["label_id"], "CREATED")
+            update_shipping_label_status(created["label_id"], "CREATED")
         message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(resolved_carrier, created)} {total_grams}g nur PDF"[:56])
 
 
@@ -7541,7 +7628,7 @@ def create_manual_shipping_label(stdscr):
     if print_mode == "print":
         printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier_key)
         if printed and created.get("label_id") is not None:
-            update_gls_label_status(created["label_id"], "PRINTED")
+            update_shipping_label_status(created["label_id"], "PRINTED")
         if printed:
             message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} gedruckt"[:56])
         else:
@@ -7574,7 +7661,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
     while True:
         if reload_rows:
             filter_order_id = None if show_all else (selected_order["order_id"] if selected_order else None)
-            rows = list_gls_labels(filter_order_id)
+            rows = list_shipping_labels(filter_order_id)
             reload_rows = False
             if selected >= len(rows):
                 selected = max(0, len(rows) - 1)
@@ -7671,7 +7758,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
                 carrier=(chosen.get("carrier") or "gls").lower(),
             ):
-                update_gls_label_status(chosen["id"], "REPRINTED")
+                update_shipping_label_status(chosen["id"], "REPRINTED")
                 message_box(stdscr, "History", "Label erneut gedruckt.")
                 reload_rows = True
         elif key == curses.KEY_F7 and chosen:
@@ -7687,7 +7774,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
                     f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
                     carrier=(chosen.get("carrier") or "gls").lower(),
                 ):
-                    update_gls_label_status(chosen["id"], "REPRINTED")
+                    update_shipping_label_status(chosen["id"], "REPRINTED")
                     message_box(stdscr, "Reprint", "Label erneut gedruckt.")
                     reload_rows = True
         elif key == curses.KEY_F6 and chosen:
@@ -7717,11 +7804,11 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 queue_result = enqueue_shopify_fulfillment_job(chosen, notify_customer=False)
             except Exception as exc:
                 PRINT_LOGGER.exception("Shopify Queue fehlgeschlagen track=%s", chosen.get("track_id"))
-                update_gls_label_status(chosen["id"], "SHOPIFY_QUEUE_FAILED", str(exc)[:160])
+                update_shipping_label_status(chosen["id"], "SHOPIFY_QUEUE_FAILED", str(exc)[:160])
                 message_box(stdscr, "Shopify Queue", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
             else:
                 if queue_result.get("created"):
-                    update_gls_label_status(chosen["id"], "SHOPIFY_QUEUED")
+                    update_shipping_label_status(chosen["id"], "SHOPIFY_QUEUED")
                     message_box(stdscr, "Shopify Queue", f"Job {queue_result['job_id']} eingereiht.")
                 else:
                     message_box(stdscr, "Shopify Queue", f"Job {queue_result['job_id']} laeuft bereits.")
@@ -7831,7 +7918,7 @@ def orders_dialog(stdscr):
             selected_weight_kg, selected_weight_grams = calculate_order_shipping_weight(selected_order, order_items)
             country = _localized_country_display(selected_order.get("shipping_country"))
             try:
-                order_shipments = list_gls_labels(selected_order["order_id"])
+                order_shipments = list_shipping_labels(selected_order["order_id"])
             except (DatabaseUnavailableError, DatabaseBusyError) as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return

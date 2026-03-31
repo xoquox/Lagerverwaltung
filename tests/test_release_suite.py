@@ -119,7 +119,7 @@ class BundleScriptTests(unittest.TestCase):
     def _install_bundle_scripts(self, root):
         scripts_dir = Path(root) / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("create_local_bundle.sh", "apply_local_bundle.sh"):
+        for name in ("create_local_bundle.sh", "apply_local_bundle.sh", "local_bundle.py"):
             source = ROOT / "scripts" / name
             target = scripts_dir / name
             shutil.copy2(source, target)
@@ -946,7 +946,7 @@ class LagerMcLogicTests(unittest.TestCase):
             mock.patch.object(self.lager_mc, "calculate_selected_shipping_weight", return_value=(0.4, 400)),
             mock.patch.object(self.lager_mc, "create_shipping_label", return_value=created),
             mock.patch.object(self.lager_mc, "create_delivery_note_pdf", return_value=("/tmp/note.pdf", [])),
-            mock.patch.object(self.lager_mc, "list_gls_labels") as list_mock,
+            mock.patch.object(self.lager_mc, "list_shipping_labels") as list_mock,
             mock.patch.object(self.lager_mc, "enqueue_shopify_fulfillment_job_for_items") as queue_mock,
             mock.patch.object(self.lager_mc, "message_box") as message_mock,
         ):
@@ -973,7 +973,7 @@ class LagerMcLogicTests(unittest.TestCase):
             mock.patch.object(self.lager_mc, "calculate_order_shipping_weight", return_value=(0.5, 500)),
             mock.patch.object(self.lager_mc, "create_shipping_label", return_value=created),
             mock.patch.object(self.lager_mc, "create_delivery_note_pdf", return_value=("/tmp/note.pdf", [])),
-            mock.patch.object(self.lager_mc, "list_gls_labels") as list_mock,
+            mock.patch.object(self.lager_mc, "list_shipping_labels") as list_mock,
             mock.patch.object(self.lager_mc, "enqueue_shopify_fulfillment_job") as queue_mock,
             mock.patch.object(self.lager_mc, "message_box") as message_mock,
         ):
@@ -1089,7 +1089,7 @@ class LagerMcLogicTests(unittest.TestCase):
         with (
             mock.patch.object(self.lager_mc, "build_address_label_pdf", side_effect=fake_build),
             mock.patch.object(self.lager_mc, "_save_shipping_label_pdf", return_value="/tmp/free.pdf") as save_mock,
-            mock.patch.object(self.lager_mc, "insert_gls_label_history", return_value=77) as insert_mock,
+            mock.patch.object(self.lager_mc, "insert_shipping_label_history", return_value=77) as insert_mock,
         ):
             result = self.lager_mc.free_create_label(order, weight_kg=0.4, shipment_reference="ADR-1")
 
@@ -1166,7 +1166,7 @@ class LagerMcLogicTests(unittest.TestCase):
             mock.patch.object(self.lager_mc, "load_gls_credentials", return_value={"api_url": "https://example.test/api"}) as creds_mock,
             mock.patch.object(self.lager_mc, "_gls_api_json_request", side_effect=responses) as api_mock,
             mock.patch.object(self.lager_mc, "_save_shipping_label_pdf", return_value="/tmp/reprint.pdf") as save_mock,
-            mock.patch.object(self.lager_mc, "update_gls_label_reprint") as update_mock,
+            mock.patch.object(self.lager_mc, "update_shipping_label_reprint") as update_mock,
         ):
             result = self.lager_mc.gls_reprint_label(label_row)
 
