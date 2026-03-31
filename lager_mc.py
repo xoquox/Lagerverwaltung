@@ -1688,14 +1688,6 @@ def update_shipping_label_reprint(label_id, label_path):
     cur.close()
     con.close()
 
-
-# Rueckwaertskompatible Aliasnamen; interne Versandhistorie ist nicht mehr GLS-spezifisch.
-list_gls_labels = list_shipping_labels
-insert_gls_label_history = insert_shipping_label_history
-update_gls_label_status = update_shipping_label_status
-update_gls_label_reprint = update_shipping_label_reprint
-
-
 def get_latest_shopify_job_for_label(label_id):
     con = db()
     cur = con.cursor()
