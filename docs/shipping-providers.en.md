@@ -111,10 +111,12 @@ Carrier-specific defaults for tracking mode and tracking URL are controlled thro
 
 - product selection via imported product price list
 - INTERNETMARKE purchase
+- PDF output
 - Shopify tracking with configurable tracking URL
 
 ### Address label
 
+- local PDF
 - no external API
 - no Shopify handover
 

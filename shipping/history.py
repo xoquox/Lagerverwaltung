@@ -10,6 +10,26 @@ SHOPIFY_FULFILLMENT_JOB_TABLE = "shopify_fulfillment_jobs"
 
 def ensure_shipping_history_schema(cur):
     cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'gls_labels'
+            ) AND NOT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'shipping_labels'
+            ) THEN
+                ALTER TABLE gls_labels RENAME TO shipping_labels;
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {SHIPPING_LABEL_TABLE} (
             id serial PRIMARY KEY,
@@ -47,75 +67,6 @@ def ensure_shipping_history_schema(cur):
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
-    cur.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = current_schema()
-                  AND table_name = 'gls_labels'
-            ) THEN
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS carrier text NOT NULL DEFAULT 'gls';
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shipment_reference text;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS parcel_number text;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS weight_kg numeric(8,3) NOT NULL DEFAULT 1.0;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'CREATED';
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS label_path text NOT NULL DEFAULT '';
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS last_error text;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local';
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz;
-                ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text;
-
-                INSERT INTO shipping_labels (
-                    carrier,
-                    order_id,
-                    order_name,
-                    shipment_reference,
-                    track_id,
-                    parcel_number,
-                    weight_kg,
-                    status,
-                    label_path,
-                    last_error,
-                    source,
-                    shopify_fulfillment_id,
-                    shopify_synced_at,
-                    tracking_url,
-                    created_at,
-                    updated_at,
-                    cancel_requested_at,
-                    cancelled_at
-                )
-                SELECT
-                    COALESCE(carrier, 'gls'),
-                    order_id,
-                    order_name,
-                    COALESCE(shipment_reference, order_name),
-                    track_id,
-                    parcel_number,
-                    COALESCE(weight_kg, 1.0),
-                    COALESCE(status, 'CREATED'),
-                    COALESCE(label_path, ''),
-                    last_error,
-                    COALESCE(source, 'local'),
-                    shopify_fulfillment_id,
-                    shopify_synced_at,
-                    tracking_url,
-                    COALESCE(created_at, NOW()),
-                    COALESCE(updated_at, created_at, NOW()),
-                    cancel_requested_at,
-                    cancelled_at
-                FROM gls_labels
-                ON CONFLICT (track_id) DO NOTHING;
-            END IF;
-        END $$;
-        """
-    )
     cur.execute(
         f"""
         CREATE INDEX IF NOT EXISTS idx_shipping_labels_order_created

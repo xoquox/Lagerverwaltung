@@ -111,10 +111,12 @@ Carrier-spezifische Defaults fuer Tracking-Modus und Tracking-URL werden ueber d
 
 - Produktwahl ueber importierte Produktpreisliste
 - Kauf von INTERNETMARKEN
+- PDF-Ausgabe
 - Shopify-Tracking mit konfigurierbarer Tracking-URL
 
 ### Adresslabel
 
+- lokales PDF
 - keine externe API
 - keine Shopify-Weitergabe
 

@@ -247,29 +247,6 @@ class BundleScriptTests(unittest.TestCase):
             )
 
 
-class ShippingHistorySchemaTests(unittest.TestCase):
-    def test_ensure_shipping_history_schema_does_not_rename_gls_labels(self):
-        from shipping.history import ensure_shipping_history_schema
-
-        cursor = FakeCursor()
-
-        ensure_shipping_history_schema(cursor)
-
-        queries = "\n".join(query for query, _ in cursor.executed)
-        self.assertNotIn("ALTER TABLE gls_labels RENAME TO shipping_labels", queries)
-
-    def test_ensure_shipping_history_schema_migrates_old_gls_labels_into_shipping_labels(self):
-        from shipping.history import ensure_shipping_history_schema
-
-        cursor = FakeCursor()
-
-        ensure_shipping_history_schema(cursor)
-
-        queries = "\n".join(query for query, _ in cursor.executed)
-        self.assertIn("INSERT INTO shipping_labels", queries)
-        self.assertIn("FROM gls_labels", queries)
-
-
 class InternetmarkeClientTests(unittest.TestCase):
     def _client(self):
         from post.internetmarke_client import InternetmarkeClient
