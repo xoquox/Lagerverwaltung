@@ -119,7 +119,7 @@ class BundleScriptTests(unittest.TestCase):
     def _install_bundle_scripts(self, root):
         scripts_dir = Path(root) / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("create_local_bundle.sh", "apply_local_bundle.sh", "local_bundle.py"):
+        for name in ("create_local_bundle.py", "apply_local_bundle.py", "local_bundle.py"):
             source = ROOT / "scripts" / name
             target = scripts_dir / name
             shutil.copy2(source, target)
@@ -174,7 +174,7 @@ class BundleScriptTests(unittest.TestCase):
             self._zip_directory(bundle_stage, bundle_zip)
 
             subprocess.run(
-                ["bash", str(target_root / "scripts" / "apply_local_bundle.sh"), str(bundle_zip)],
+                [sys.executable, str(target_root / "scripts" / "apply_local_bundle.py"), str(bundle_zip)],
                 check=True,
                 cwd=target_root,
             )
@@ -210,7 +210,7 @@ class BundleScriptTests(unittest.TestCase):
             )
 
             create_result = subprocess.run(
-                ["bash", str(source_root / "scripts" / "create_local_bundle.sh")],
+                [sys.executable, str(source_root / "scripts" / "create_local_bundle.py")],
                 check=True,
                 cwd=source_root,
                 text=True,
@@ -229,7 +229,7 @@ class BundleScriptTests(unittest.TestCase):
             )
 
             subprocess.run(
-                ["bash", str(target_root / "scripts" / "apply_local_bundle.sh"), str(bundle_zip)],
+                [sys.executable, str(target_root / "scripts" / "apply_local_bundle.py"), str(bundle_zip)],
                 check=True,
                 cwd=target_root,
             )

@@ -113,7 +113,7 @@ def create_bundle(root_dir):
                 "Installationsablauf:",
                 "1. Git-Repo normal klonen.",
                 "2. Dieses Archiv in das Projektverzeichnis kopieren.",
-                "3. ./scripts/apply_local_bundle.sh <archiv.zip> ausfuehren.",
+                "3. ./scripts/apply_local_bundle.py <archiv.zip> ausfuehren.",
                 "",
                 "Enthalten sind portable/private Projektdateien wie:",
                 "- API-Zugaenge und portable Settings",

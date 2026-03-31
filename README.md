@@ -28,6 +28,10 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
   Etikettendruck fuer Brother-QL-Drucker.
 - [delivery_note.py](/home/chrisi/Lagerverwaltung/delivery_note.py)
   PDF-Erzeugung fuer Lieferscheine auf Basis der Vorlage.
+- [shipping/carriers.py](/home/chrisi/Lagerverwaltung/shipping/carriers.py)
+  Zentrale Carrier-Definitionen und Carrier-Faehigkeiten fuer TUI und Versandlogik.
+- [shipping/history.py](/home/chrisi/Lagerverwaltung/shipping/history.py)
+  Gemeinsame Versandhistory- und Shopify-Fulfillment-Queue-Logik fuer TUI und Sync.
 - [app_settings.py](/home/chrisi/Lagerverwaltung/app_settings.py)
   Laedt Projekt-Defaults und lokale Overrides.
 - [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py)
@@ -46,6 +50,10 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
   Release-Historie nur fuer den Shopify-Sync.
 - [post/internetmarke_client.py](/home/chrisi/Lagerverwaltung/post/internetmarke_client.py)
   Vorbereitung fuer Deutsche Post INTERNETMARKE.
+- [scripts/create_local_bundle.py](/home/chrisi/Lagerverwaltung/scripts/create_local_bundle.py)
+  Erzeugt ein lokales Umzugsarchiv fuer neue Arbeitsplaetze.
+- [scripts/apply_local_bundle.py](/home/chrisi/Lagerverwaltung/scripts/apply_local_bundle.py)
+  Spielt ein lokales Umzugsarchiv auf einem neuen Arbeitsplatz ein.
 
 ## Voraussetzungen
 
@@ -164,6 +172,18 @@ Falls Pakete fehlen:
 ```bash
 pip install psycopg2-binary pillow python-barcode brother_ql requests python-dotenv
 ```
+
+## Arbeitsplatz-Bundles
+
+Zum Uebernehmen lokaler, nicht versionierter Projektdateien auf einen neuen Arbeitsplatz:
+
+```bash
+python3 scripts/create_local_bundle.py
+python3 scripts/apply_local_bundle.py /pfad/zum/lager_mc_local_bundle_*.zip
+```
+
+Das Bundle enthaelt portable/private Projektdateien wie API-Zugaenge, Sync-`.env`, Fonts, Logos und ausgewaehlte Vorlagen.
+Lokale Arbeitsplatz-Einstellungen wie Drucker, Druckformate und Zielordner bleiben beim Import unveraendert.
 
 ## Druck
 

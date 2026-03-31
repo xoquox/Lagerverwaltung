@@ -30,6 +30,35 @@ from app_version import APP_VERSION
 from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
 from post.internetmarke_client import InternetmarkeClient
 from post.product_catalog import find_post_product, list_post_base_products
+from shipping.carriers import (
+    DEFAULT_ACTIVE_SHIPPING_CARRIERS,
+    SHIPPING_CARRIER_DEFINITIONS,
+    SHIPPING_CARRIER_ORDER,
+    ShippingCarrierRuntime,
+    carrier_allows_shopify as _shipping_carrier_allows_shopify,
+    carrier_definition as _shipping_carrier_definition,
+    carrier_field_to_code as _shipping_carrier_field_to_code,
+    carrier_label as _shipping_carrier_label,
+    carrier_option_mode as _shipping_carrier_option_mode,
+    carrier_setting_field as _shipping_carrier_setting_field,
+    configurable_carrier_codes as _configurable_shipping_carrier_codes,
+    default_tracking_mode_for_carrier as _default_tracking_mode_for_carrier,
+    normalize_active_carriers as _normalize_active_shipping_carriers,
+    shipping_active_carrier_values as _shipping_active_carrier_values,
+    shipping_carrier_options as _shipping_carrier_options_impl,
+    shopify_tracking_company as _shopify_tracking_company,
+)
+from shipping.history import (
+    SHIPPING_LABEL_TABLE,
+    ensure_shipping_history_schema,
+    find_or_create_shopify_fulfillment_job as _find_or_create_shopify_fulfillment_job,
+    get_latest_shopify_job_for_label as _get_latest_shopify_job_for_label,
+    get_latest_shipping_label_for_order as _get_latest_shipping_label_for_order,
+    insert_shipping_label_history as _insert_shipping_label_history,
+    list_shipping_labels as _list_shipping_labels,
+    update_shipping_label_reprint as _update_shipping_label_reprint,
+    update_shipping_label_status as _update_shipping_label_status,
+)
 
 locale.setlocale(locale.LC_ALL, "")
 
@@ -47,7 +76,6 @@ _SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
 _POST_PAGE_FORMAT_CACHE = {"loaded_at": 0.0, "formats": []}
 _POST_SELECTION_CACHE = {}
 _SHIPPING_CARRIER_CACHE = "gls"
-SHIPPING_LABEL_TABLE = "shipping_labels"
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label": "FlexDelivery - Zustelloptionen fuer den Empfaenger", "locked": False},
@@ -56,74 +84,6 @@ SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_preadvice", "label": "PreAdvice - Vorabankuendigung an den Empfaenger", "locked": False},
     {"code": "service_smsservice", "label": "SMS Service - Versandinfo per SMS", "locked": False},
 ]
-
-SHIPPING_CARRIER_DEFINITIONS = {
-    "gls": {
-        "label": "GLS",
-        "short_label": "GLS",
-        "default_format": "A6",
-        "shopify_allowed": True,
-        "option_mode": "gls_services",
-        "printer_field": "shipping_label_printer_gls",
-        "printer_field_label_key": "field_shipping_printer_gls",
-        "format_field": "shipping_label_format_gls",
-        "format_field_label_key": "field_shipping_format_gls",
-        "tracking_mode_field": "shopify_tracking_mode_gls",
-        "tracking_url_field": "shopify_tracking_url_gls",
-        "extra_settings_fields": [
-            ("shipping_services_display", "field_shipping_services"),
-            ("gls_api_url", "field_gls_api_url"),
-            ("gls_user", "field_gls_user"),
-            ("gls_password", "field_gls_password"),
-            ("gls_contact_id", "field_gls_contact_id"),
-        ],
-    },
-    "post": {
-        "label": "POST",
-        "short_label": "POST",
-        "default_format": "100x62",
-        "shopify_allowed": True,
-        "option_mode": "post_products",
-        "printer_field": "shipping_label_printer_post",
-        "printer_field_label_key": "field_shipping_printer_post",
-        "format_field": "shipping_label_format_post",
-        "format_field_label_key": "field_shipping_format_post",
-        "tracking_mode_field": "shopify_tracking_mode_post",
-        "tracking_url_field": "shopify_tracking_url_post",
-        "extra_settings_fields": [
-            ("post_api_url", "field_post_api_url"),
-            ("post_api_key", "field_post_api_key"),
-            ("post_api_secret", "field_post_api_secret"),
-            ("post_user", "field_post_user"),
-            ("post_password", "field_post_password"),
-            ("post_partner_id", "field_post_partner_id"),
-        ],
-    },
-    "free": {
-        "label": "Adresslabel",
-        "short_label": "ADR",
-        "default_format": "A6",
-        "shopify_allowed": False,
-        "option_mode": None,
-        "printer_field": "shipping_label_printer_free",
-        "printer_field_label_key": "field_shipping_printer_free",
-        "format_field": "shipping_label_format_free",
-        "format_field_label_key": "field_shipping_format_free",
-        "template_field": "free_label_template_path",
-        "template_field_label_key": "field_free_label_template",
-        "extra_settings_fields": [],
-    },
-    "test": {
-        "label": "TEST",
-        "short_label": "TEST",
-        "default_format": "A6",
-        "shopify_allowed": False,
-        "option_mode": None,
-        "extra_settings_fields": [],
-    },
-}
-SHIPPING_CARRIER_ORDER = list(SHIPPING_CARRIER_DEFINITIONS.keys())
-DEFAULT_ACTIVE_SHIPPING_CARRIERS = ["gls", "post", "free"]
 
 MANUAL_LABEL_COUNTRY_OPTIONS = [
     {"value": "AD", "label": "Andorra"},
@@ -821,120 +781,7 @@ def init_db():
     )
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
-    cur.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = current_schema()
-                  AND table_name = 'gls_labels'
-            ) AND NOT EXISTS (
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = current_schema()
-                  AND table_name = 'shipping_labels'
-            ) THEN
-                ALTER TABLE gls_labels RENAME TO shipping_labels;
-            END IF;
-        END $$;
-        """
-    )
-    cur.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {SHIPPING_LABEL_TABLE} (
-            id serial PRIMARY KEY,
-            carrier text NOT NULL DEFAULT 'gls',
-            order_id text NOT NULL,
-            order_name text NOT NULL,
-            shipment_reference text NOT NULL,
-            track_id text NOT NULL UNIQUE,
-            parcel_number text,
-            weight_kg numeric(8,3) NOT NULL DEFAULT 1.0,
-            status text NOT NULL DEFAULT 'CREATED',
-            label_path text NOT NULL,
-            last_error text,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            updated_at timestamptz NOT NULL DEFAULT NOW(),
-            cancel_requested_at timestamptz,
-            cancelled_at timestamptz
-        )
-        """
-    )
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS carrier text NOT NULL DEFAULT 'gls'")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shipment_reference text")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS parcel_number text")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS weight_kg numeric(8,3) NOT NULL DEFAULT 1.0")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'CREATED'")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS label_path text NOT NULL DEFAULT ''")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS last_error text")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS cancelled_at timestamptz")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
-    cur.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_shipping_labels_order_created
-        ON {SHIPPING_LABEL_TABLE}(order_id, created_at DESC)
-        """
-    )
-    cur.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_shipping_labels_created
-        ON {SHIPPING_LABEL_TABLE}(created_at DESC)
-        """
-    )
-    cur.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_shipping_labels_shopify_fulfillment
-        ON {SHIPPING_LABEL_TABLE}(shopify_fulfillment_id)
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_fulfillment_jobs (
-            id serial PRIMARY KEY,
-            label_id integer,
-            order_id text NOT NULL,
-            tracking_number text NOT NULL,
-            tracking_url text,
-            carrier text NOT NULL,
-            line_items_json text,
-            notify_customer boolean NOT NULL DEFAULT FALSE,
-            status text NOT NULL DEFAULT 'pending',
-            attempts integer NOT NULL DEFAULT 0,
-            result_message text,
-            shopify_fulfillment_id text,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            updated_at timestamptz NOT NULL DEFAULT NOW(),
-            processed_at timestamptz
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS label_id integer")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS tracking_url text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS line_items_json text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS result_message text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS processed_at timestamptz")
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_status_created
-        ON shopify_fulfillment_jobs(status, created_at)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_label_created
-        ON shopify_fulfillment_jobs(label_id, created_at DESC)
-        """
-    )
+    ensure_shipping_history_schema(cur)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS service_runtime_state (
@@ -1484,242 +1331,6 @@ def get_local_fulfilled_quantities_for_order(order_id):
     return totals
 
 
-def list_shipping_labels(order_id=None):
-    con = db()
-    cur = con.cursor()
-    if order_id:
-        cur.execute(
-            """
-            SELECT
-                id,
-                carrier,
-                order_id,
-                order_name,
-                shipment_reference,
-                track_id,
-                parcel_number,
-                status,
-                weight_kg,
-                label_path,
-                last_error,
-                source,
-                shopify_fulfillment_id,
-                shopify_synced_at,
-                tracking_url,
-                created_at,
-                updated_at,
-                cancel_requested_at,
-                cancelled_at
-            FROM shipping_labels
-            WHERE order_id = %s
-            ORDER BY created_at DESC, id DESC
-            """,
-            (order_id,),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT
-                id,
-                carrier,
-                order_id,
-                order_name,
-                shipment_reference,
-                track_id,
-                parcel_number,
-                status,
-                weight_kg,
-                label_path,
-                last_error,
-                source,
-                shopify_fulfillment_id,
-                shopify_synced_at,
-                tracking_url,
-                created_at,
-                updated_at,
-                cancel_requested_at,
-                cancelled_at
-            FROM shipping_labels
-            ORDER BY created_at DESC, id DESC
-            LIMIT 400
-            """
-        )
-    rows = cur.fetchall()
-    cur.close()
-    con.close()
-    return rows
-
-
-def insert_shipping_label_history(
-    order,
-    shipment_reference,
-    track_id,
-    parcel_number,
-    label_path,
-    status,
-    weight_kg=1.0,
-    carrier="gls",
-    source="local",
-    shopify_fulfillment_id=None,
-    tracking_url=None,
-):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        INSERT INTO shipping_labels (
-            carrier,
-            order_id,
-            order_name,
-            shipment_reference,
-            track_id,
-            parcel_number,
-            weight_kg,
-            status,
-            label_path,
-            source,
-            shopify_fulfillment_id,
-            shopify_synced_at,
-            tracking_url
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (track_id)
-        DO UPDATE
-           SET carrier = EXCLUDED.carrier,
-               order_id = EXCLUDED.order_id,
-               order_name = EXCLUDED.order_name,
-               shipment_reference = EXCLUDED.shipment_reference,
-               parcel_number = EXCLUDED.parcel_number,
-               weight_kg = EXCLUDED.weight_kg,
-               status = EXCLUDED.status,
-               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), shipping_labels.label_path),
-               source = CASE
-                   WHEN shipping_labels.source = 'local' AND EXCLUDED.source = 'shopify' THEN shipping_labels.source
-                   ELSE EXCLUDED.source
-               END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, shipping_labels.shopify_fulfillment_id),
-               shopify_synced_at = COALESCE(EXCLUDED.shopify_synced_at, shipping_labels.shopify_synced_at),
-               tracking_url = COALESCE(EXCLUDED.tracking_url, shipping_labels.tracking_url),
-               updated_at = NOW(),
-               last_error = NULL
-        RETURNING id
-        """,
-        (
-            carrier,
-            order["order_id"],
-            order["order_name"],
-            shipment_reference,
-            track_id,
-            parcel_number,
-            weight_kg,
-            status,
-            label_path,
-            (source or "local").strip().lower() or "local",
-            shopify_fulfillment_id,
-            datetime.datetime.now() if shopify_fulfillment_id else None,
-            (tracking_url or "").strip() or None,
-        ),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return row["id"] if row else None
-
-
-def update_shipping_label_status(label_id, status, last_error=None):
-    con = db()
-    cur = con.cursor()
-    if status == "CANCELLED":
-        cur.execute(
-            """
-            UPDATE shipping_labels
-            SET status = %s,
-                last_error = %s,
-                cancelled_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (status, last_error, label_id),
-        )
-    elif status == "CANCELLATION_PENDING":
-        cur.execute(
-            """
-            UPDATE shipping_labels
-            SET status = %s,
-                last_error = %s,
-                cancel_requested_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (status, last_error, label_id),
-        )
-    else:
-        cur.execute(
-            """
-            UPDATE shipping_labels
-            SET status = %s,
-                last_error = %s,
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (status, last_error, label_id),
-        )
-    con.commit()
-    cur.close()
-    con.close()
-
-
-def update_shipping_label_reprint(label_id, label_path):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        UPDATE shipping_labels
-        SET label_path = %s,
-            status = 'REPRINTED',
-            last_error = NULL,
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (label_path, label_id),
-    )
-    con.commit()
-    cur.close()
-    con.close()
-
-def get_latest_shopify_job_for_label(label_id):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT
-            id,
-            order_id,
-            tracking_number,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            result_message,
-            shopify_fulfillment_id,
-            created_at,
-            updated_at,
-            processed_at
-        FROM shopify_fulfillment_jobs
-        WHERE label_id = %s
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    con.close()
-    return row
-
-
 def _shipment_number(row):
     carrier = (row.get("carrier") or "").strip().lower()
     if carrier == "free":
@@ -1727,48 +1338,24 @@ def _shipment_number(row):
     return ((row.get("parcel_number") or "").strip() or (row.get("track_id") or "").strip() or "-")
 
 
-def _shipping_carrier_label(carrier, short=False):
-    normalized = (carrier or "").strip().lower()
-    definition = SHIPPING_CARRIER_DEFINITIONS.get(normalized) or {}
-    if short:
-        return definition.get("short_label") or definition.get("label") or normalized.upper() or "-"
-    return definition.get("label") or normalized.upper() or "-"
+def list_shipping_labels(order_id=None):
+    return _list_shipping_labels(db, order_id=order_id)
 
 
-def _shipping_carrier_definition(carrier):
-    normalized = (carrier or "").strip().lower()
-    return SHIPPING_CARRIER_DEFINITIONS.get(normalized) or {}
+def insert_shipping_label_history(*args, **kwargs):
+    return _insert_shipping_label_history(db, *args, **kwargs)
 
 
-def _configurable_shipping_carrier_codes(include_test=False):
-    codes = []
-    for code in SHIPPING_CARRIER_ORDER:
-        if code == "test" and not include_test:
-            continue
-        if SHIPPING_CARRIER_DEFINITIONS.get(code):
-            codes.append(code)
-    return codes
+def update_shipping_label_status(label_id, status, last_error=None):
+    return _update_shipping_label_status(db, label_id, status, last_error=last_error)
 
 
-def _shipping_carrier_allows_shopify(carrier):
-    return bool(_shipping_carrier_definition(carrier).get("shopify_allowed"))
+def update_shipping_label_reprint(label_id, label_path):
+    return _update_shipping_label_reprint(db, label_id, label_path)
 
 
-def _shipping_carrier_option_mode(carrier):
-    return _shipping_carrier_definition(carrier).get("option_mode")
-
-
-def _shipping_carrier_setting_field(carrier, field_kind):
-    return _shipping_carrier_definition(carrier).get(f"{field_kind}_field")
-
-
-def _shipping_carrier_field_to_code(field_kind):
-    mapping = {}
-    for code in _configurable_shipping_carrier_codes():
-        field_name = _shipping_carrier_setting_field(code, field_kind)
-        if field_name:
-            mapping[field_name] = code
-    return mapping
+def get_latest_shopify_job_for_label(label_id):
+    return _get_latest_shopify_job_for_label(db, label_id)
 
 
 def _shipping_printer_field_map():
@@ -1791,42 +1378,15 @@ def _shipping_tracking_url_field_map():
     return _shipping_carrier_field_to_code("tracking_url")
 
 
-def _shipping_active_carrier_values(values):
-    if isinstance(values, str):
-        raw_values = [part.strip().lower() for part in values.split(",")]
-    else:
-        raw_values = [str(value or "").strip().lower() for value in (values or [])]
-    normalized = []
-    for code in SHIPPING_CARRIER_ORDER:
-        if code in raw_values and code not in normalized:
-            normalized.append(code)
-    return normalized
-
-
-def _normalize_active_shipping_carriers(values, fallback_to_defaults=True):
-    normalized = _shipping_active_carrier_values(values)
-    if normalized:
-        return normalized
-    if not fallback_to_defaults:
-        return []
-    return list(DEFAULT_ACTIVE_SHIPPING_CARRIERS)
-
-
 def _active_shipping_carriers():
     return _normalize_active_shipping_carriers(SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS))
 
-
 def _shipping_carrier_options(include_test=True):
-    allowed = _active_shipping_carriers()
-    if include_test and "test" in SHIPPING_CARRIER_ORDER and "test" not in allowed:
-        allowed = list(allowed) + ["test"]
-    options = []
-    for code in allowed:
-        definition = SHIPPING_CARRIER_DEFINITIONS.get(code)
-        if not definition:
-            continue
-        options.append({"value": code, "label": definition["label"]})
-    return options
+    return _shipping_carrier_options_from_settings(include_test=include_test)
+
+
+def _shipping_carrier_options_from_settings(include_test=True):
+    return _shipping_carrier_options_impl(_active_shipping_carriers(), include_test=include_test)
 
 
 def _shipping_active_carriers_summary(values, fallback_to_defaults=True):
@@ -1834,15 +1394,6 @@ def _shipping_active_carriers_summary(values, fallback_to_defaults=True):
     if not normalized:
         return "Keine"
     return ", ".join(_shipping_carrier_label(code) for code in normalized)
-
-
-def _shopify_tracking_company(carrier):
-    normalized = (carrier or "").strip().lower()
-    if normalized == "gls":
-        return "GLS"
-    if normalized == "post":
-        return "Deutsche Post"
-    return _shipping_carrier_label(normalized)
 
 
 def _tracking_url_for_carrier(carrier, tracking_number):
@@ -1863,7 +1414,7 @@ def _tracking_url_for_carrier(carrier, tracking_number):
 def _shopify_tracking_mode_for_carrier(carrier):
     normalized = (carrier or "").strip().lower()
     tracking_mode_field = _shipping_carrier_setting_field(normalized, "tracking_mode")
-    default_mode = "company_and_url" if normalized == "post" else "company"
+    default_mode = _default_tracking_mode_for_carrier(normalized)
     if tracking_mode_field:
         return (SETTINGS.get(tracking_mode_field) or default_mode).strip().lower()
     return "company"
@@ -2086,50 +1637,16 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
     if not tracking_number:
         raise RuntimeError("track_id fehlt.")
 
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT id, status
-        FROM shopify_fulfillment_jobs
-        WHERE label_id = %s
-          AND status IN ('pending', 'processing')
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
+    return _find_or_create_shopify_fulfillment_job(
+        db,
+        label_id=label_id,
+        order_id=order_id,
+        tracking_number=tracking_number,
+        tracking_url=tracking_url,
+        carrier=carrier,
+        line_items_json=None,
+        notify_customer=notify_customer,
     )
-    existing = cur.fetchone()
-    if existing:
-        cur.close()
-        con.close()
-        return {"job_id": existing["id"], "status": existing["status"], "created": False}
-
-    cur.execute(
-        """
-        INSERT INTO shopify_fulfillment_jobs (
-            label_id,
-            order_id,
-            tracking_number,
-            tracking_url,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
-        RETURNING id, status
-        """,
-        (label_id, order_id, tracking_number, tracking_url, carrier, None, bool(notify_customer)),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return {"job_id": row["id"], "status": row["status"], "created": True}
 
 
 def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_customer=False):
@@ -2175,58 +1692,16 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
     if not line_items:
         raise RuntimeError("Keine gueltigen Positionen fuer Shopify-Fulfillment.")
 
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT id, status
-        FROM shopify_fulfillment_jobs
-        WHERE label_id = %s
-          AND status IN ('pending', 'processing')
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
+    return _find_or_create_shopify_fulfillment_job(
+        db,
+        label_id=label_id,
+        order_id=order_id,
+        tracking_number=tracking_number,
+        tracking_url=tracking_url,
+        carrier=carrier,
+        line_items_json=json.dumps(line_items, ensure_ascii=True),
+        notify_customer=notify_customer,
     )
-    existing = cur.fetchone()
-    if existing:
-        cur.close()
-        con.close()
-        return {"job_id": existing["id"], "status": existing["status"], "created": False}
-
-    cur.execute(
-        """
-        INSERT INTO shopify_fulfillment_jobs (
-            label_id,
-            order_id,
-            tracking_number,
-            tracking_url,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
-        RETURNING id, status
-        """,
-        (
-            label_id,
-            order_id,
-            tracking_number,
-            tracking_url,
-            carrier,
-            json.dumps(line_items, ensure_ascii=True),
-            bool(notify_customer),
-        ),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return {"job_id": row["id"], "status": row["status"], "created": True}
 
 
 def _gls_extract_from_pdf(pdf_path):
@@ -3541,6 +3016,18 @@ def gls_cancel_label(label_row):
     return result or "CANCEL_REQUESTED"
 
 
+SHIPPING_CARRIER_RUNTIME_SPECS = {
+    "gls": {
+        "create_label": "gls_create_label",
+        "reprint_label": "gls_reprint_label",
+        "cancel_label": "gls_cancel_label",
+    },
+    "post": {"create_label": "post_create_label"},
+    "free": {"create_label": "free_create_label"},
+    "test": {"create_label": "test_create_label"},
+}
+
+
 def _normalize_shipping_services(raw_value):
     if isinstance(raw_value, list):
         selected = [str(item).strip() for item in raw_value if str(item).strip()]
@@ -3668,22 +3155,24 @@ def effective_shipping_carrier(requested_carrier=None):
     return active[0] if active else "gls"
 
 
-def _shipping_label_creator(carrier):
-    return {
-        "gls": gls_create_label,
-        "post": post_create_label,
-        "free": free_create_label,
-        "test": test_create_label,
-    }.get((carrier or "").strip().lower())
+def _shipping_carrier_runtime(carrier):
+    spec = SHIPPING_CARRIER_RUNTIME_SPECS.get((carrier or "").strip().lower())
+    if not spec:
+        return None
+    return ShippingCarrierRuntime(
+        create_label=globals().get(spec.get("create_label")),
+        reprint_label=globals().get(spec.get("reprint_label")),
+        cancel_label=globals().get(spec.get("cancel_label")),
+    )
 
 
 def create_shipping_label(order, weight_kg=None, shipment_reference=None, service_codes=None, carrier=None):
     selected_carrier = effective_shipping_carrier(carrier)
     if weight_kg is None:
         weight_kg, _total_grams = calculate_order_shipping_weight(order)
-    creator = _shipping_label_creator(selected_carrier)
-    if creator:
-        return creator(
+    runtime = _shipping_carrier_runtime(selected_carrier)
+    if runtime and runtime.create_label:
+        return runtime.create_label(
             order,
             weight_kg=weight_kg,
             shipment_reference=shipment_reference,
@@ -3704,15 +3193,17 @@ def reprint_shipping_label(label_row):
     if existing_path and os.path.isfile(existing_path):
         return existing_path
     carrier = (label_row.get("carrier") or "gls").strip().lower()
-    if carrier == "gls":
-        return gls_reprint_label(label_row)
+    runtime = _shipping_carrier_runtime(carrier)
+    if runtime and runtime.reprint_label:
+        return runtime.reprint_label(label_row)
     raise RuntimeError(f"Reprint fuer {carrier} ist noch nicht implementiert.")
 
 
 def cancel_shipping_label(label_row):
     carrier = (label_row.get("carrier") or "gls").strip().lower()
-    if carrier == "gls":
-        return gls_cancel_label(label_row)
+    runtime = _shipping_carrier_runtime(carrier)
+    if runtime and runtime.cancel_label:
+        return runtime.cancel_label(label_row)
     raise RuntimeError(f"Storno fuer {carrier} ist noch nicht implementiert.")
 
 
@@ -7221,30 +6712,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
 
 
 def get_latest_label_for_order(order_id):
-    if not order_id:
-        return None
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT
-            id,
-            carrier,
-            track_id,
-            parcel_number,
-            status,
-            created_at
-        FROM shipping_labels
-        WHERE order_id = %s
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (order_id,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    con.close()
-    return row
+    return _get_latest_shipping_label_for_order(db, order_id)
 
 
 def run_partial_execution_for_order(stdscr, order, order_items):
