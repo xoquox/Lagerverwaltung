@@ -24,7 +24,7 @@ Zusaetzlich vorhanden:
 
 - `Adresslabel` fuer interne Adresslabels ohne Carrier-API
 
-Die Carrier-Struktur ist fuer weitere Versanddienstleister vorbereitet.
+Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shopify-Anbindung.
 
 Details zur Carrier-Struktur und zu den Integrationspunkten stehen in [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md).
 
@@ -329,4 +329,3 @@ Wichtige Logdateien:
 - [logs/lagerverwaltung.log](/home/chrisi/Lagerverwaltung/logs/lagerverwaltung.log)
 - [logs/druck.log](/home/chrisi/Lagerverwaltung/logs/druck.log)
 - [logs/shopify-sync.log](/home/chrisi/Lagerverwaltung/logs/shopify-sync.log)
-

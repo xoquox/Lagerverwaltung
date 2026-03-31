@@ -17,7 +17,7 @@ Also available:
 
 Additional carrier APIs such as DHL, DPD, UPS or Hermes are not implemented at this time.
 
-The software is prepared for additional carriers because carrier definitions, shipping history and Shopify fulfillment are now separated more clearly.
+The carrier structure includes central carrier definitions, shared shipping history and Shopify fulfillment handover.
 
 ## Carrier definition
 

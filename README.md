@@ -29,7 +29,7 @@ Zusaetzlich vorhanden:
 
 - `Adresslabel` fuer interne Labels ohne Carrier-API
 
-Die Carrier-Struktur ist fuer weitere Versanddienstleister vorbereitet.
+Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shopify-Anbindung.
 
 ## Dokumentation
 

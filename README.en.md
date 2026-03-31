@@ -29,7 +29,7 @@ Also available:
 
 - `Address label` for internal labels without a carrier API
 
-The carrier structure is prepared for additional shipping providers.
+The carrier structure uses central carrier definitions with shared shipping history and Shopify handover.
 
 ## Documentation
 

@@ -17,7 +17,7 @@ Zusaetzlich vorhanden:
 
 Nicht umgesetzt sind derzeit weitere Carrier-APIs wie DHL, DPD, UPS oder Hermes.
 
-Die Software ist auf weitere Carrier vorbereitet, da Carrier-Definition, Versandhistory und Shopify-Fulfillment inzwischen getrennt organisiert sind.
+Die Carrier-Struktur umfasst zentrale Carrier-Definitionen, gemeinsame Versandhistory und Shopify-Fulfillment-Anbindung.
 
 ## Carrier-Definition
 
@@ -125,4 +125,3 @@ Carrier-spezifische Defaults fuer Tracking-Modus und Tracking-URL werden ueber d
 Dieses Dokument beschreibt die vorhandenen technischen Integrationspunkte.
 
 Betriebsanleitung und Benutzerablauf stehen in [docs/bedienungsanleitung.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.md).
-

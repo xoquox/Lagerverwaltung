@@ -24,7 +24,7 @@ Also available:
 
 - `Address label` for internal labels without a carrier API
 
-The carrier structure is prepared for additional shipping providers.
+The carrier structure uses central carrier definitions with shared shipping history and Shopify handover.
 
 Details about carrier integration points are available in [docs/shipping-providers.en.md](/home/chrisi/Lagerverwaltung/docs/shipping-providers.en.md).
 
@@ -329,4 +329,3 @@ Important log files:
 - [logs/lagerverwaltung.log](/home/chrisi/Lagerverwaltung/logs/lagerverwaltung.log)
 - [logs/druck.log](/home/chrisi/Lagerverwaltung/logs/druck.log)
 - [logs/shopify-sync.log](/home/chrisi/Lagerverwaltung/logs/shopify-sync.log)
-
