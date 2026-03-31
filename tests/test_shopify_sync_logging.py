@@ -46,6 +46,25 @@ class ShopifySyncLoggingTests(unittest.TestCase):
     def setUpClass(cls):
         cls.shopify_sync = load_shopify_sync_module()
 
+    def test_resolve_sync_base_dir_uses_repo_root_when_shipping_package_exists(self):
+        script_path = ROOT / "shopify-sync" / "shopify_sync.py"
+
+        base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
+
+        self.assertEqual(base_dir, ROOT)
+
+    def test_resolve_sync_base_dir_falls_back_to_app_dir_for_standalone_layout(self):
+        script_path = Path("/app/shopify_sync.py")
+
+        with mock.patch.object(Path, "is_dir", autospec=True) as is_dir_mock:
+            def fake_is_dir(path_obj):
+                return str(path_obj) == "/app"
+
+            is_dir_mock.side_effect = fake_is_dir
+            base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
+
+        self.assertEqual(base_dir, Path("/app"))
+
     def test_shorten_text_truncates_and_flattens_newlines(self):
         value = "abc\ndefghijkl"
         shortened = self.shopify_sync.shorten_text(value, limit=8)

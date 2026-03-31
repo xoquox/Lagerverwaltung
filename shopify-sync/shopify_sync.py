@@ -24,7 +24,17 @@ try:
 except ModuleNotFoundError:
     def load_dotenv():
         return None
-BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def resolve_sync_base_dir(script_path=None):
+    app_dir = Path(script_path or __file__).resolve().parent
+    repo_root = app_dir.parent
+    if (repo_root / "shipping").is_dir():
+        return repo_root
+    return app_dir
+
+
+BASE_DIR = resolve_sync_base_dir()
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
