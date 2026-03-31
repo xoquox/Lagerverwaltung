@@ -73,6 +73,7 @@ Grundregeln:
 - `↑↓` bewegen die Auswahl
 - `Enter` bestaetigt die aktuelle Auswahl oder wechselt ins naechste Feld
 - `F9` schliesst den aktuellen Dialog
+- `Tab` wechselt in der Lageransicht zwischen Teileliste und Regalliste
 - `Tab` und `Shift+Tab` wechseln in den Einstellungen zwischen Tabs
 - Suchfilter werden in Listen direkt ueber die Tastatur eingegeben
 
@@ -81,6 +82,8 @@ Die untere Statuszeile zeigt die gueltigen Tasten fuer den aktuellen Dialog.
 ## Lageransicht
 
 Die Lageransicht ist der Hauptbildschirm fuer Artikel und Lagerplaetze.
+
+Mit `Tab` wird zwischen Teileliste und Regalliste gewechselt.
 
 Wichtige Aktionen:
 

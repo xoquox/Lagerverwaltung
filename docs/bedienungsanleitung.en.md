@@ -73,6 +73,7 @@ Core rules:
 - `↑↓` move the selection
 - `Enter` confirms the current selection or moves to the next field
 - `F9` closes the current dialog
+- `Tab` switches between the item list and the storage location list in the inventory view
 - `Tab` and `Shift+Tab` switch tabs in settings
 - list filters are typed directly from the keyboard
 
@@ -81,6 +82,8 @@ The bottom status line shows the valid keys for the current dialog.
 ## Inventory view
 
 The inventory view is the main screen for items and storage locations.
+
+`Tab` switches between the item list and the storage location list.
 
 Important actions:
 
