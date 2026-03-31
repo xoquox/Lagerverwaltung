@@ -27,24 +27,5 @@ Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 
 ## Varianten
 
-- Vollversion mit Shopify und Versand: dieses Repository
-- reduzierte Variante ohne Shopify- und Versandfunktionen: <https://github.com/b4ckspace/simple-storage-core>
-
-## Schnellstart
-
-```bash
-git clone git@github.com:xoquox/Lagerverwaltung.git
-cd Lagerverwaltung
-./scripts/install-linux.sh
-```
-
-Manueller Start:
-
-```bash
-python3 lager_mc.py
-```
-
-## Hinweise
-
-- lokale Laufzeitwerte liegen in `settings.local.json`
-- neue Arbeitsplaetze lassen sich mit `scripts/create_local_bundle.py` und `scripts/apply_local_bundle.py` vorbereiten
+- Repository mit Shopify- und Versandfunktionen: dieses Repository
+- Repository ohne Shopify- und Versandfunktionen: <https://github.com/b4ckspace/simple-storage-core>
