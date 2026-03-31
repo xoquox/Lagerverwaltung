@@ -998,6 +998,17 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(cursor.executed[0][1][-1], 25)
         self.assertEqual(rows[0]["display_name"], "Max Mustermann")
 
+    def test_list_shipping_labels_queries_shipping_labels_table(self):
+        cursor = FakeCursor(fetchall_results=[[{"id": 1}]])
+        connection = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=connection):
+            rows = self.lager_mc.list_shipping_labels("OID-1")
+
+        self.assertEqual(rows, [{"id": 1}])
+        self.assertIn("FROM shipping_labels", cursor.executed[0][0])
+        self.assertEqual(cursor.executed[0][1], ("OID-1",))
+
     def test_apply_shopify_customer_to_manual_state_fills_address(self):
         state = {
             "name": "",

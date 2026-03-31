@@ -47,6 +47,7 @@ _SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
 _POST_PAGE_FORMAT_CACHE = {"loaded_at": 0.0, "formats": []}
 _POST_SELECTION_CACHE = {}
 _SHIPPING_CARRIER_CACHE = "gls"
+SHIPPING_LABEL_TABLE = "shipping_labels"
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label": "FlexDelivery - Zustelloptionen fuer den Empfaenger", "locked": False},
@@ -822,7 +823,27 @@ def init_db():
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS gls_labels (
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'gls_labels'
+            ) AND NOT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'shipping_labels'
+            ) THEN
+                ALTER TABLE gls_labels RENAME TO shipping_labels;
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SHIPPING_LABEL_TABLE} (
             id serial PRIMARY KEY,
             carrier text NOT NULL DEFAULT 'gls',
             order_id text NOT NULL,
@@ -841,35 +862,35 @@ def init_db():
         )
         """
     )
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS carrier text NOT NULL DEFAULT 'gls'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shipment_reference text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS parcel_number text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS weight_kg numeric(8,3) NOT NULL DEFAULT 1.0")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'CREATED'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS label_path text NOT NULL DEFAULT ''")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS last_error text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancelled_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS carrier text NOT NULL DEFAULT 'gls'")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shipment_reference text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS parcel_number text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS weight_kg numeric(8,3) NOT NULL DEFAULT 1.0")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'CREATED'")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS label_path text NOT NULL DEFAULT ''")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS last_error text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS cancelled_at timestamptz")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_order_created
-        ON gls_labels(order_id, created_at DESC)
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shipping_labels_order_created
+        ON {SHIPPING_LABEL_TABLE}(order_id, created_at DESC)
         """
     )
     cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_created
-        ON gls_labels(created_at DESC)
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shipping_labels_created
+        ON {SHIPPING_LABEL_TABLE}(created_at DESC)
         """
     )
     cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_shopify_fulfillment
-        ON gls_labels(shopify_fulfillment_id)
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shipping_labels_shopify_fulfillment
+        ON {SHIPPING_LABEL_TABLE}(shopify_fulfillment_id)
         """
     )
     cur.execute(
@@ -1489,7 +1510,7 @@ def list_shipping_labels(order_id=None):
                 updated_at,
                 cancel_requested_at,
                 cancelled_at
-            FROM gls_labels
+            FROM shipping_labels
             WHERE order_id = %s
             ORDER BY created_at DESC, id DESC
             """,
@@ -1518,7 +1539,7 @@ def list_shipping_labels(order_id=None):
                 updated_at,
                 cancel_requested_at,
                 cancelled_at
-            FROM gls_labels
+            FROM shipping_labels
             ORDER BY created_at DESC, id DESC
             LIMIT 400
             """
@@ -1546,7 +1567,7 @@ def insert_shipping_label_history(
     cur = con.cursor()
     cur.execute(
         """
-        INSERT INTO gls_labels (
+        INSERT INTO shipping_labels (
             carrier,
             order_id,
             order_name,
@@ -1571,14 +1592,14 @@ def insert_shipping_label_history(
                parcel_number = EXCLUDED.parcel_number,
                weight_kg = EXCLUDED.weight_kg,
                status = EXCLUDED.status,
-               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), gls_labels.label_path),
+               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), shipping_labels.label_path),
                source = CASE
-                   WHEN gls_labels.source = 'local' AND EXCLUDED.source = 'shopify' THEN gls_labels.source
+                   WHEN shipping_labels.source = 'local' AND EXCLUDED.source = 'shopify' THEN shipping_labels.source
                    ELSE EXCLUDED.source
                END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, gls_labels.shopify_fulfillment_id),
-               shopify_synced_at = COALESCE(EXCLUDED.shopify_synced_at, gls_labels.shopify_synced_at),
-               tracking_url = COALESCE(EXCLUDED.tracking_url, gls_labels.tracking_url),
+               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, shipping_labels.shopify_fulfillment_id),
+               shopify_synced_at = COALESCE(EXCLUDED.shopify_synced_at, shipping_labels.shopify_synced_at),
+               tracking_url = COALESCE(EXCLUDED.tracking_url, shipping_labels.tracking_url),
                updated_at = NOW(),
                last_error = NULL
         RETURNING id
@@ -1612,7 +1633,7 @@ def update_shipping_label_status(label_id, status, last_error=None):
     if status == "CANCELLED":
         cur.execute(
             """
-            UPDATE gls_labels
+            UPDATE shipping_labels
             SET status = %s,
                 last_error = %s,
                 cancelled_at = NOW(),
@@ -1624,7 +1645,7 @@ def update_shipping_label_status(label_id, status, last_error=None):
     elif status == "CANCELLATION_PENDING":
         cur.execute(
             """
-            UPDATE gls_labels
+            UPDATE shipping_labels
             SET status = %s,
                 last_error = %s,
                 cancel_requested_at = NOW(),
@@ -1636,7 +1657,7 @@ def update_shipping_label_status(label_id, status, last_error=None):
     else:
         cur.execute(
             """
-            UPDATE gls_labels
+            UPDATE shipping_labels
             SET status = %s,
                 last_error = %s,
                 updated_at = NOW()
@@ -1654,7 +1675,7 @@ def update_shipping_label_reprint(label_id, label_path):
     cur = con.cursor()
     cur.execute(
         """
-        UPDATE gls_labels
+        UPDATE shipping_labels
         SET label_path = %s,
             status = 'REPRINTED',
             last_error = NULL,
@@ -7221,7 +7242,7 @@ def get_latest_label_for_order(order_id):
             parcel_number,
             status,
             created_at
-        FROM gls_labels
+        FROM shipping_labels
         WHERE order_id = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1

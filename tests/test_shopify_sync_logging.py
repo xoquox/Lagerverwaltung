@@ -236,6 +236,24 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(insert_params[7], "Musterstr. 1")
         self.assertEqual(insert_params[10], "Germany")
 
+    def test_upsert_shopify_shipment_writes_shipping_labels_table(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+        order = {"id": "gid://shopify/Order/1", "name": "#1001"}
+        fulfillment = {"id": "gid://shopify/Fulfillment/1", "status": "SUCCESS", "createdAt": "2026-03-31T10:00:00Z"}
+        tracking = {"number": "1234567890", "url": "https://example.invalid/track/1234567890", "company": "GLS"}
+
+        self.shopify_sync.upsert_shopify_shipment(FakeCursor(), order, fulfillment, tracking)
+
+        query, params = executed[0]
+        self.assertIn("INSERT INTO shipping_labels", query)
+        self.assertEqual(params[0], "gls")
+        self.assertEqual(params[4], "1234567890")
+
 
 if __name__ == "__main__":
     unittest.main()

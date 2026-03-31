@@ -45,6 +45,7 @@ GRAPHQL_URL = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
 SYNC_INTERVAL = 60
 REQUEST_TIMEOUT_SECONDS = 45
 _LOGGER = None
+SHIPPING_LABEL_TABLE = "shipping_labels"
 
 
 def configure_logging():
@@ -300,7 +301,27 @@ def init_db():
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS gls_labels (
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'gls_labels'
+            ) AND NOT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'shipping_labels'
+            ) THEN
+                ALTER TABLE gls_labels RENAME TO shipping_labels;
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SHIPPING_LABEL_TABLE} (
             id serial PRIMARY KEY,
             carrier text NOT NULL DEFAULT 'gls',
             order_id text NOT NULL,
@@ -323,20 +344,20 @@ def init_db():
         )
         """
     )
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_order_created
-        ON gls_labels(order_id, created_at DESC)
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shipping_labels_order_created
+        ON {SHIPPING_LABEL_TABLE}(order_id, created_at DESC)
         """
     )
     cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_shopify_fulfillment
-        ON gls_labels(shopify_fulfillment_id)
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shipping_labels_shopify_fulfillment
+        ON {SHIPPING_LABEL_TABLE}(shopify_fulfillment_id)
         """
     )
     cur.execute(
@@ -1184,7 +1205,7 @@ def upsert_shopify_shipment(cur, order, fulfillment, tracking):
     created_at = fulfillment.get("createdAt") or datetime.datetime.now(datetime.timezone.utc)
     cur.execute(
         """
-        INSERT INTO gls_labels (
+        INSERT INTO shipping_labels (
             carrier,
             order_id,
             order_name,
@@ -1209,16 +1230,16 @@ def upsert_shopify_shipment(cur, order, fulfillment, tracking):
                order_id = EXCLUDED.order_id,
                order_name = EXCLUDED.order_name,
                shipment_reference = EXCLUDED.shipment_reference,
-               parcel_number = COALESCE(EXCLUDED.parcel_number, gls_labels.parcel_number),
+               parcel_number = COALESCE(EXCLUDED.parcel_number, shipping_labels.parcel_number),
                status = EXCLUDED.status,
-               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), gls_labels.label_path),
+               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), shipping_labels.label_path),
                source = CASE
-                   WHEN gls_labels.source = 'local' THEN gls_labels.source
+                   WHEN shipping_labels.source = 'local' THEN shipping_labels.source
                    ELSE 'shopify'
                END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, gls_labels.shopify_fulfillment_id),
+               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, shipping_labels.shopify_fulfillment_id),
                shopify_synced_at = NOW(),
-               tracking_url = COALESCE(EXCLUDED.tracking_url, gls_labels.tracking_url),
+               tracking_url = COALESCE(EXCLUDED.tracking_url, shipping_labels.tracking_url),
                updated_at = NOW()
         """,
         (
@@ -1456,7 +1477,7 @@ def _update_label_status_from_job(cur, label_id, status, message=None):
         return
     cur.execute(
         """
-        UPDATE gls_labels
+        UPDATE shipping_labels
         SET status = %s,
             last_error = %s,
             updated_at = NOW()
@@ -1486,7 +1507,7 @@ def mark_fulfillment_job_done(job_id, label_id, fulfillment_id, status):
     if label_id:
         cur.execute(
             """
-            UPDATE gls_labels
+            UPDATE shipping_labels
             SET shopify_fulfillment_id = COALESCE(%s, shopify_fulfillment_id),
                 shopify_synced_at = NOW(),
                 updated_at = NOW()
