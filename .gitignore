@@ -23,3 +23,5 @@ delivery_note_template.pdf
 local_only/
 webspace/
 fonts/
+.codex
+.codex/
