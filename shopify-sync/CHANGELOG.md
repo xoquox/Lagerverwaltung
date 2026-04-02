@@ -2,7 +2,7 @@
 
 Nur Releases des separaten Shopify-Syncs. Entwicklungszwischenstaende werden ueber Git-Branches und Commits nachvollzogen.
 
-## [1.0.0] - in Vorbereitung
+## [1.0.0] - 2026-04-02
 
 ### Added
 - Laufzeitstatus mit Version, Heartbeat, letztem Pull, letztem Push und Fehlerstatus in `service_runtime_state`.

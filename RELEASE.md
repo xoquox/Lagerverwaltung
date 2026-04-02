@@ -36,11 +36,10 @@ Regeln:
   und wird nicht ueber die TUI-Version mitversioniert
 - nach einem Release auf `main` uebernimmt `develop` dieselbe Release-Nummer wieder mit `-dev.0`
 
-Aktueller Uebergang:
+Aktueller Stand:
 
-- laufender Entwicklungsstand: TUI `1.21.0-dev.35`, Shopify-Sync `0.1.0-dev.10`
-- geplanter naechster Release auf `main`: TUI `1.22.0`, Shopify-Sync `1.0.0`
-- erster Entwicklungsstand danach auf `develop`: TUI `1.22.0-dev.0`, Shopify-Sync `1.0.0-dev.0`
+- letzter Release auf `main`: TUI `1.22.0`, Shopify-Sync `1.0.0`
+- naechster Entwicklungsstand auf `develop`: TUI `1.22.0-dev.0`, Shopify-Sync `1.0.0-dev.0`
 
 ## Changelog
 
@@ -68,15 +67,12 @@ Aktueller Uebergang:
 7. Git-Tag fuer den Release setzen, z. B. `v1.22.0`
 8. `develop` danach wieder auf dieselbe Release-Nummer mit `-dev.0` stellen
 
-## Geplanter naechster Release
+## Naechster Schritt nach einem Release
 
-1. TUI-Version auf `1.22.0` setzen
-2. Shopify-Sync-Version auf `1.0.0` setzen
-3. Changelog-Block `1.22.0` mit Datum versehen
-4. Shopify-Sync-Changelog-Block `1.0.0` mit Datum versehen
-5. `develop` nach `main` mergen
-6. Tag `v1.22.0` setzen
-7. `develop` anschliessend auf `1.22.0-dev.0` und `1.0.0-dev.0` stellen
+1. `main` auf `develop` zurueckfuehren
+2. [version.json](/home/chrisi/Lagerverwaltung/version.json) auf `1.22.0-dev.0` stellen
+3. [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json) auf `1.0.0-dev.0` stellen
+4. beide Aenderungen auf `develop` committen und pushen
 
 ## Mindest-Checkliste vor Merge nach `main`
 
