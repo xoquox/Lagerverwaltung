@@ -4,7 +4,7 @@ Nur Releases auf `main`. Entwicklungszwischenstaende werden ueber Git-Branches u
 Release-Eintraege nennen die zugehoerige Shopify-Sync-Version und verweisen auf
 [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md).
 
-## [1.22.0] - in Vorbereitung
+## [1.22.0] - 2026-04-02
 
 Zugehoeriger Shopify-Sync-Release: `1.0.0`
 
