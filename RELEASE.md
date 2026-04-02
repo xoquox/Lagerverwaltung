@@ -21,30 +21,32 @@ Es gilt ein einfaches Release-Schema:
 
 - Produktive Releases auf `main`: `MAJOR.MINOR.PATCH`
   - Beispiel: `1.21.0`
-- Entwicklungsstaende auf `develop`: `MAJOR.MINOR.PATCH-dev`
-  - Beispiel: `1.21.0-dev`
+- Entwicklungsstaende auf `develop`: `MAJOR.MINOR.PATCH-dev.BUILD`
+  - Beispiel: `1.21.0-dev.1`
 
 Regeln:
 
 - `MAJOR` nur bei groben, inkompatiblen Umstellungen erhoehen
 - `MINOR` bei groesseren neuen Funktionsbloecken erhoehen
 - `PATCH` fuer produktive Hotfixes auf derselben Release-Linie erhoehen
-- `VERSION_STAGE` in [app_version.py](/home/chrisi/Lagerverwaltung/app_version.py) ist
-  - leer auf `main`
-  - `dev` auf `develop`
-- der Shopify-Sync fuehrt seine eigene Version separat in [sync_version.py](/home/chrisi/Lagerverwaltung/shopify-sync/sync_version.py)
-  und wird nicht ueber `app_version.py` mitversioniert
+- die TUI liest ihre Version aus [version.json](/home/chrisi/Lagerverwaltung/version.json)
+- auf `develop` bleibt `stage = "dev"` und `build` wird fuer jeden neuen testbaren Stand weiter hochgezaehlt
+- auf `main` ist `stage = ""` und `build = 0`
+- der Shopify-Sync fuehrt seine eigene Version separat in [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json)
+  und wird nicht ueber die TUI-Version mitversioniert
+- nach einem Release auf `main` uebernimmt `develop` dieselbe Release-Nummer wieder mit `-dev.0`
 
 Aktueller Uebergang:
 
-- letzter produktiver Stand vor der Umstellung: `1.20.028`
-- laufender Entwicklungsstand nach der Umstellung: `1.21.0-dev`
-- naechster Release auf `main`: `1.21.0`
+- laufender Entwicklungsstand: TUI `1.21.0-dev.35`, Shopify-Sync `0.1.0-dev.10`
+- geplanter naechster Release auf `main`: TUI `1.22.0`, Shopify-Sync `1.0.0`
+- erster Entwicklungsstand danach auf `develop`: TUI `1.22.0-dev.0`, Shopify-Sync `1.0.0-dev.0`
 
 ## Changelog
 
-- [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) wird nur fuer Releases auf `main` gepflegt
+- [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) beschreibt nur Releases auf `main`
 - kein Eintrag fuer unfertige Zwischenstaende auf `develop`
+- der naechste Release-Block kann auf `develop` vorbereitet und beim Merge nach `main` mit Datum versehen werden
 - ein Changelog-Eintrag fasst alle relevanten Aenderungen seit dem letzten Release auf `main` zusammen
 - der Shopify-Sync pflegt zusaetzlich sein eigenes Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md)
 - Eintraege im Haupt-Changelog nennen die zugehoerige Sync-Version und verweisen auf das separate Sync-Changelog
@@ -56,13 +58,25 @@ Aktueller Uebergang:
 3. Merge nach `develop`
 4. Gesamtstand auf `develop` testen
 5. Vor Release:
-   - `app_version.py` auf finale Release-Version setzen
-   - `VERSION_STAGE = ""`
+   - [version.json](/home/chrisi/Lagerverwaltung/version.json) auf finale Release-Version setzen
+   - [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json) auf finale Release-Version setzen
+   - `stage = ""`
+   - `build = 0`
    - Changelog fuer alle Aenderungen seit dem letzten Release ergaenzen
    - zugehoerige Shopify-Sync-Version notieren und auf `shopify-sync/CHANGELOG.md` verweisen
 6. `develop` nach `main` mergen
-7. Git-Tag fuer den Release setzen, z. B. `v1.21.0`
-8. `develop` danach auf die naechste Zielversion bzw. wieder auf `-dev` stellen
+7. Git-Tag fuer den Release setzen, z. B. `v1.22.0`
+8. `develop` danach wieder auf dieselbe Release-Nummer mit `-dev.0` stellen
+
+## Geplanter naechster Release
+
+1. TUI-Version auf `1.22.0` setzen
+2. Shopify-Sync-Version auf `1.0.0` setzen
+3. Changelog-Block `1.22.0` mit Datum versehen
+4. Shopify-Sync-Changelog-Block `1.0.0` mit Datum versehen
+5. `develop` nach `main` mergen
+6. Tag `v1.22.0` setzen
+7. `develop` anschliessend auf `1.22.0-dev.0` und `1.0.0-dev.0` stellen
 
 ## Mindest-Checkliste vor Merge nach `main`
 

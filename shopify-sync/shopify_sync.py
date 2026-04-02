@@ -4,6 +4,7 @@ import json
 import argparse
 import datetime
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -23,11 +24,32 @@ try:
 except ModuleNotFoundError:
     def load_dotenv():
         return None
+
+
+def resolve_sync_base_dir(script_path=None):
+    app_dir = Path(script_path or __file__).resolve().parent
+    repo_root = app_dir.parent
+    if (repo_root / "shipping").is_dir():
+        return repo_root
+    return app_dir
+
+
+BASE_DIR = resolve_sync_base_dir()
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from shipping.history import (
+    SHIPPING_LABEL_TABLE,
+    claim_shopify_fulfillment_jobs as _claim_shopify_fulfillment_jobs,
+    ensure_shipping_history_schema,
+    mark_shopify_fulfillment_job_done as _mark_shopify_fulfillment_job_done,
+    mark_shopify_fulfillment_job_failed as _mark_shopify_fulfillment_job_failed,
+    upsert_shopify_shipment as _upsert_shopify_shipment_record,
+)
 from sync_version import SYNC_VERSION
 
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = BASE_DIR / "logs"
 SYNC_LOG_PATH = LOG_DIR / "shopify-sync.log"
 
@@ -129,6 +151,77 @@ def build_sync_version_payload():
     }
 
 
+def update_service_runtime_state(
+    *,
+    status=None,
+    mark_seen=False,
+    mark_started=False,
+    mark_finished=False,
+    mark_pull=False,
+    mark_push=False,
+    last_error=None,
+    clear_error=False,
+):
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO service_runtime_state (
+            service,
+            version,
+            status,
+            last_seen_at,
+            last_started_at,
+            last_finished_at,
+            last_pull_at,
+            last_push_at,
+            last_error,
+            updated_at
+        )
+        VALUES (
+            'shopify-sync',
+            %s,
+            %s,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            CASE WHEN %s THEN NOW() ELSE NULL END,
+            %s,
+            NOW()
+        )
+        ON CONFLICT (service) DO UPDATE SET
+            version = COALESCE(EXCLUDED.version, service_runtime_state.version),
+            status = COALESCE(EXCLUDED.status, service_runtime_state.status),
+            last_seen_at = COALESCE(EXCLUDED.last_seen_at, service_runtime_state.last_seen_at),
+            last_started_at = COALESCE(EXCLUDED.last_started_at, service_runtime_state.last_started_at),
+            last_finished_at = COALESCE(EXCLUDED.last_finished_at, service_runtime_state.last_finished_at),
+            last_pull_at = COALESCE(EXCLUDED.last_pull_at, service_runtime_state.last_pull_at),
+            last_push_at = COALESCE(EXCLUDED.last_push_at, service_runtime_state.last_push_at),
+            last_error = CASE
+                WHEN %s THEN NULL
+                WHEN EXCLUDED.last_error IS NOT NULL THEN EXCLUDED.last_error
+                ELSE service_runtime_state.last_error
+            END,
+            updated_at = NOW()
+        """,
+        (
+            SYNC_VERSION,
+            status,
+            bool(mark_seen),
+            bool(mark_started),
+            bool(mark_finished),
+            bool(mark_pull),
+            bool(mark_push),
+            (last_error or "")[:1000] if last_error else None,
+            bool(clear_error),
+        ),
+    )
+    con.commit()
+    cur.close()
+    con.close()
+
+
 def ensure_runtime_dependencies():
     missing = []
     if psycopg2 is None:
@@ -227,81 +320,65 @@ def init_db():
     )
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
+    ensure_shipping_history_schema(cur)
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS gls_labels (
-            id serial PRIMARY KEY,
-            carrier text NOT NULL DEFAULT 'gls',
-            order_id text NOT NULL,
-            order_name text NOT NULL,
-            shipment_reference text NOT NULL,
-            track_id text NOT NULL UNIQUE,
-            parcel_number text,
-            weight_kg numeric(8,3) NOT NULL DEFAULT 1.0,
-            status text NOT NULL DEFAULT 'CREATED',
-            label_path text NOT NULL DEFAULT '',
+        CREATE TABLE IF NOT EXISTS service_runtime_state (
+            service text PRIMARY KEY,
+            version text,
+            status text NOT NULL DEFAULT 'unknown',
+            last_seen_at timestamptz,
+            last_started_at timestamptz,
+            last_finished_at timestamptz,
+            last_pull_at timestamptz,
+            last_push_at timestamptz,
             last_error text,
-            source text NOT NULL DEFAULT 'local',
-            shopify_fulfillment_id text,
-            shopify_synced_at timestamptz,
-            tracking_url text,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            updated_at timestamptz NOT NULL DEFAULT NOW(),
-            cancel_requested_at timestamptz,
-            cancelled_at timestamptz
+            updated_at timestamptz NOT NULL DEFAULT NOW()
         )
         """
     )
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_order_created
-        ON gls_labels(order_id, created_at DESC)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_shopify_fulfillment
-        ON gls_labels(shopify_fulfillment_id)
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_fulfillment_jobs (
-            id serial PRIMARY KEY,
-            label_id integer,
-            order_id text NOT NULL,
-            tracking_number text NOT NULL,
-            carrier text NOT NULL,
-            line_items_json text,
-            notify_customer boolean NOT NULL DEFAULT FALSE,
-            status text NOT NULL DEFAULT 'pending',
-            attempts integer NOT NULL DEFAULT 0,
-            result_message text,
-            shopify_fulfillment_id text,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            updated_at timestamptz NOT NULL DEFAULT NOW(),
-            processed_at timestamptz
+        CREATE TABLE IF NOT EXISTS shopify_customers (
+            customer_id text PRIMARY KEY,
+            first_name text,
+            last_name text,
+            display_name text,
+            email text,
+            phone text,
+            default_name text,
+            default_address1 text,
+            default_zip text,
+            default_city text,
+            default_country text,
+            default_phone text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
         )
         """
     )
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS label_id integer")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS line_items_json text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS result_message text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS processed_at timestamptz")
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_status_created
-        ON shopify_fulfillment_jobs(status, created_at)
-        """
-    )
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS first_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS last_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS display_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS email text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_address1 text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_zip text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_city text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_country text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_display_name ON shopify_customers(display_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_email ON shopify_customers(email)")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_started_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_finished_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_pull_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_push_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_error text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
     con.commit()
     cur.close()
     con.close()
@@ -399,7 +476,7 @@ def push_inventory_changes():
 
     if not rows:
         con.close()
-        return
+        return 0
 
     log_info("Push %s Lageraenderungen zu Shopify", len(rows))
 
@@ -408,6 +485,7 @@ def push_inventory_changes():
         "Content-Type": "application/json",
     }
 
+    pushed_count = 0
     for sku, available_qty, inventory_item_id in rows:
         payload = {
             "location_id": SHOPIFY_LOCATION_ID,
@@ -437,11 +515,13 @@ def push_inventory_changes():
         """,
         (sku,),
         )
+        pushed_count += 1
 
         time.sleep(0.5)
 
     con.commit()
     con.close()
+    return pushed_count
 
 
 def get_location_inventory_levels():
@@ -528,7 +608,7 @@ def sync_inventory_levels():
 
     if not inventory_by_sku:
         log_warning("Keine Inventory-Levels von Shopify geladen")
-        return
+        return 0
 
     con = db()
     cur = con.cursor()
@@ -584,6 +664,7 @@ def sync_inventory_levels():
     con.commit()
     con.close()
     log_info("Inventory-Levels synchronisiert: %s", len(inventory_by_sku))
+    return len(inventory_by_sku)
 
 
 def sync_products():
@@ -704,6 +785,7 @@ def sync_products():
 
     con.commit()
     con.close()
+    return len(products)
 
 
 def _chunks(values, size):
@@ -815,6 +897,97 @@ def get_all_orders():
         time.sleep(0.5)
 
 
+def get_all_customers():
+    query = """
+    query CustomersPage($after: String) {
+      customers(first: 50, after: $after, sortKey: UPDATED_AT) {
+        nodes {
+          id
+          firstName
+          lastName
+          displayName
+          email
+          phone
+          defaultAddress {
+            name
+            address1
+            zip
+            city
+            country
+            phone
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    """
+
+    customers = []
+    after = None
+    while True:
+        data = graphql_request(query, {"after": after})
+        page = data["customers"]
+        customers.extend(page["nodes"])
+        log_info("Customers-Seite geladen: gesamt=%s has_next=%s", len(customers), page["pageInfo"]["hasNextPage"])
+        if not page["pageInfo"]["hasNextPage"]:
+            return customers
+        after = page["pageInfo"]["endCursor"]
+        time.sleep(0.5)
+
+
+def sync_customers():
+    customers = get_all_customers()
+    con = db()
+    cur = con.cursor()
+    cur.execute("TRUNCATE TABLE shopify_customers")
+
+    for customer in customers:
+        default_address = customer.get("defaultAddress") or {}
+        cur.execute(
+            """
+            INSERT INTO shopify_customers (
+                customer_id,
+                first_name,
+                last_name,
+                display_name,
+                email,
+                phone,
+                default_name,
+                default_address1,
+                default_zip,
+                default_city,
+                default_country,
+                default_phone,
+                updated_at
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            """,
+            (
+                customer.get("id"),
+                customer.get("firstName"),
+                customer.get("lastName"),
+                customer.get("displayName"),
+                customer.get("email"),
+                customer.get("phone"),
+                default_address.get("name"),
+                default_address.get("address1"),
+                default_address.get("zip"),
+                default_address.get("city"),
+                default_address.get("country"),
+                default_address.get("phone"),
+            ),
+        )
+
+    con.commit()
+    cur.close()
+    con.close()
+    log_info("Kunden synchronisiert: %s", len(customers))
+    return len(customers)
+
+
 def sync_orders():
     orders = get_all_orders()
     stats = summarize_orders(orders)
@@ -903,6 +1076,7 @@ def sync_orders():
         stats["latest_name"],
         stats["latest_created_at"],
     )
+    return len(orders)
 
 
 def _normalize_carrier_name(value):
@@ -912,11 +1086,18 @@ def _normalize_carrier_name(value):
     normalized = raw.lower()
     if "gls" in normalized:
         return "gls"
-    if "dhl" in normalized:
-        return "dhl"
     if "post" in normalized:
         return "post"
     return normalized[:32]
+
+
+def _shopify_tracking_company(value):
+    normalized = _normalize_carrier_name(value)
+    if normalized == "gls":
+        return "GLS"
+    if normalized == "post":
+        return "Deutsche Post"
+    return (value or "").strip() or "GLS"
 
 
 def _iter_fulfillments(order):
@@ -947,57 +1128,18 @@ def upsert_shopify_shipment(cur, order, fulfillment, tracking):
     carrier = _normalize_carrier_name(tracking.get("company"))
     parcel_number = tracking_number if tracking_number.isdigit() else None
     created_at = fulfillment.get("createdAt") or datetime.datetime.now(datetime.timezone.utc)
-    cur.execute(
-        """
-        INSERT INTO gls_labels (
-            carrier,
-            order_id,
-            order_name,
-            shipment_reference,
-            track_id,
-            parcel_number,
-            weight_kg,
-            status,
-            label_path,
-            last_error,
-            source,
-            shopify_fulfillment_id,
-            shopify_synced_at,
-            tracking_url,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, 1.0, %s, '', NULL, 'shopify', %s, NOW(), %s, %s, NOW())
-        ON CONFLICT (track_id)
-        DO UPDATE
-           SET carrier = EXCLUDED.carrier,
-               order_id = EXCLUDED.order_id,
-               order_name = EXCLUDED.order_name,
-               shipment_reference = EXCLUDED.shipment_reference,
-               parcel_number = COALESCE(EXCLUDED.parcel_number, gls_labels.parcel_number),
-               status = EXCLUDED.status,
-               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), gls_labels.label_path),
-               source = CASE
-                   WHEN gls_labels.source = 'local' THEN gls_labels.source
-                   ELSE 'shopify'
-               END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, gls_labels.shopify_fulfillment_id),
-               shopify_synced_at = NOW(),
-               tracking_url = COALESCE(EXCLUDED.tracking_url, gls_labels.tracking_url),
-               updated_at = NOW()
-        """,
-        (
-            carrier,
-            order["id"],
-            order["name"],
-            order["name"],
-            tracking_number,
-            parcel_number,
-            status,
-            fulfillment_id,
-            tracking_url,
-            created_at,
-        ),
+    _upsert_shopify_shipment_record(
+        cur,
+        carrier=carrier,
+        order_id=order["id"],
+        order_name=order["name"],
+        shipment_reference=order["name"],
+        tracking_number=tracking_number,
+        parcel_number=parcel_number,
+        status=status,
+        fulfillment_id=fulfillment_id,
+        tracking_url=tracking_url,
+        created_at=created_at,
     )
 
 
@@ -1123,7 +1265,7 @@ def _build_line_items_by_fulfillment_order(open_targets, requested_items):
     return payload
 
 
-def create_fulfillment(order_id, tracking_number, company, notify_customer=False, line_items=None):
+def create_fulfillment(order_id, tracking_number, company, tracking_url=None, notify_customer=False, line_items=None):
     open_targets = get_open_fulfillment_order_targets(order_id)
     mutation = """
     mutation CreateFulfillment($fulfillment: FulfillmentInput!, $message: String) {
@@ -1146,14 +1288,18 @@ def create_fulfillment(order_id, tracking_number, company, notify_customer=False
     """
 
     line_items_payload = _build_line_items_by_fulfillment_order(open_targets, line_items)
+    tracking_info = {
+        "number": tracking_number,
+        "company": _shopify_tracking_company(company),
+    }
+    if (tracking_url or "").strip():
+        tracking_info["url"] = tracking_url.strip()
+
     variables = {
         "fulfillment": {
             "notifyCustomer": bool(notify_customer),
             "lineItemsByFulfillmentOrder": line_items_payload,
-            "trackingInfo": {
-                "number": tracking_number,
-                "company": company,
-            },
+            "trackingInfo": tracking_info,
         },
         "message": "Lagerverwaltung Versand abgeschlossen",
     }
@@ -1174,137 +1320,19 @@ def create_fulfillment(order_id, tracking_number, company, notify_customer=False
 
 
 def claim_fulfillment_jobs(limit=20):
-    con = db()
-    cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute(
-        """
-        WITH claimed AS (
-            SELECT id
-            FROM shopify_fulfillment_jobs
-            WHERE status = 'pending'
-            ORDER BY created_at
-            FOR UPDATE SKIP LOCKED
-            LIMIT %s
-        )
-        UPDATE shopify_fulfillment_jobs j
-        SET status = 'processing',
-            attempts = COALESCE(j.attempts, 0) + 1,
-            updated_at = NOW()
-        FROM claimed
-        WHERE j.id = claimed.id
-        RETURNING
-            j.id,
-            j.label_id,
-            j.order_id,
-            j.tracking_number,
-            j.carrier,
-            j.line_items_json,
-            j.notify_customer,
-            j.attempts
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
-    con.commit()
-    cur.close()
-    con.close()
-    return rows
-
-
-def _update_label_status_from_job(cur, label_id, status, message=None):
-    if not label_id:
-        return
-    cur.execute(
-        """
-        UPDATE gls_labels
-        SET status = %s,
-            last_error = %s,
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (status, message, label_id),
+    return _claim_shopify_fulfillment_jobs(
+        db,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        limit=limit,
     )
 
 
 def mark_fulfillment_job_done(job_id, label_id, fulfillment_id, status):
-    con = db()
-    cur = con.cursor()
-    cur.execute("SELECT order_id, line_items_json FROM shopify_fulfillment_jobs WHERE id = %s", (job_id,))
-    job_row = cur.fetchone()
-    cur.execute(
-        """
-        UPDATE shopify_fulfillment_jobs
-        SET status = 'done',
-            shopify_fulfillment_id = %s,
-            result_message = %s,
-            processed_at = NOW(),
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (fulfillment_id, status, job_id),
-    )
-    if label_id:
-        cur.execute(
-            """
-            UPDATE gls_labels
-            SET shopify_fulfillment_id = COALESCE(%s, shopify_fulfillment_id),
-                shopify_synced_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (fulfillment_id, label_id),
-        )
-    if job_row and job_row[1]:
-        order_id = job_row[0]
-        try:
-            payload = json.loads(job_row[1])
-        except json.JSONDecodeError:
-            payload = []
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            line_item_id = (item.get("order_line_item_id") or "").strip()
-            if not line_item_id:
-                continue
-            try:
-                qty = int(item.get("quantity") or 0)
-            except (TypeError, ValueError):
-                continue
-            if qty <= 0:
-                continue
-            cur.execute(
-                """
-                UPDATE shopify_order_items
-                SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + %s)
-                WHERE order_id = %s
-                  AND order_line_item_id = %s
-                """,
-                (qty, order_id, line_item_id),
-            )
-    _update_label_status_from_job(cur, label_id, "SHOPIFY_FULFILLED", None)
-    con.commit()
-    cur.close()
-    con.close()
+    return _mark_shopify_fulfillment_job_done(db, job_id, label_id, fulfillment_id, status)
 
 
 def mark_fulfillment_job_failed(job_id, label_id, message):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        UPDATE shopify_fulfillment_jobs
-        SET status = 'failed',
-            result_message = %s,
-            processed_at = NOW(),
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (message[:1000], job_id),
-    )
-    _update_label_status_from_job(cur, label_id, "SHOPIFY_FAILED", message[:160])
-    con.commit()
-    cur.close()
-    con.close()
+    return _mark_shopify_fulfillment_job_failed(db, job_id, label_id, message)
 
 
 def process_fulfillment_jobs(limit=20):
@@ -1326,6 +1354,7 @@ def process_fulfillment_jobs(limit=20):
                 order_id=job["order_id"],
                 tracking_number=job["tracking_number"],
                 company=job["carrier"],
+                tracking_url=job.get("tracking_url"),
                 notify_customer=job["notify_customer"],
                 line_items=line_items,
             )
@@ -1346,8 +1375,10 @@ def process_fulfillment_jobs(limit=20):
 
 def run_sync_loop():
     init_db()
+    update_service_runtime_state(status="idle", mark_seen=True, clear_error=True)
     while True:
         run_started_at = time.monotonic()
+        update_service_runtime_state(status="running", mark_seen=True, mark_started=True, clear_error=True)
         log_info(
             "Starte Shopify Sync version=%s shop=%s db_host=%s interval=%ss log=%s",
             SYNC_VERSION,
@@ -1360,11 +1391,16 @@ def run_sync_loop():
             ok_jobs, failed_jobs = process_fulfillment_jobs(limit=20)
             if ok_jobs or failed_jobs:
                 log_info("Fulfillment Jobs verarbeitet: ok=%s failed=%s", ok_jobs, failed_jobs)
-            push_inventory_changes()
+            pushed_inventory = push_inventory_changes()
+            if ok_jobs > 0 or pushed_inventory > 0:
+                update_service_runtime_state(mark_seen=True, mark_push=True)
             sync_products()
             sync_inventory_levels()
+            sync_customers()
             sync_orders()
+            update_service_runtime_state(status="ok", mark_seen=True, mark_pull=True, mark_finished=True, clear_error=True)
         except Exception as exc:
+            update_service_runtime_state(status="error", mark_seen=True, mark_finished=True, last_error=str(exc))
             log_exception("Sync-Fehler: %s", exc)
         else:
             duration = time.monotonic() - run_started_at

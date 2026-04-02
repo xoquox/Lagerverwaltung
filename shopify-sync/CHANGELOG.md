@@ -2,6 +2,22 @@
 
 Nur Releases des separaten Shopify-Syncs. Entwicklungszwischenstaende werden ueber Git-Branches und Commits nachvollzogen.
 
+## [1.0.0] - in Vorbereitung
+
+### Added
+- Laufzeitstatus mit Version, Heartbeat, letztem Pull, letztem Push und Fehlerstatus in `service_runtime_state`.
+- Shopify-Kundensync in die lokale Tabelle `shopify_customers`.
+- Carrierabhaengige Tracking-URL-Unterstuetzung fuer Shopify-Fulfillments.
+
+### Changed
+- Versandhistory nutzt die gemeinsame Tabelle `shipping_labels`.
+- Historienlogik liegt in einem eigenen Modul und wird von TUI und Sync gemeinsam verwendet.
+- Der Sync laeuft auch als eigenstaendiger Docker-Build aus `shopify-sync/`, einschliesslich der benoetigten `shipping`-Module.
+
+### Fixed
+- Fulfillment-Import und Tracking-Ruecklesung bleiben mit dem aktuellen Lager-MC-Datenmodell konsistent.
+- Laufzeitversion des Sync wird aus `shopify-sync/version.json` gelesen und im Runtime-Status geschrieben.
+
 ## [0.1.0] - 2026-03-25
 
 ### Added

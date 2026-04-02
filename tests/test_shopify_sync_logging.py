@@ -46,6 +46,25 @@ class ShopifySyncLoggingTests(unittest.TestCase):
     def setUpClass(cls):
         cls.shopify_sync = load_shopify_sync_module()
 
+    def test_resolve_sync_base_dir_uses_repo_root_when_shipping_package_exists(self):
+        script_path = ROOT / "shopify-sync" / "shopify_sync.py"
+
+        base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
+
+        self.assertEqual(base_dir, ROOT)
+
+    def test_resolve_sync_base_dir_falls_back_to_app_dir_for_standalone_layout(self):
+        script_path = Path("/app/shopify_sync.py")
+
+        with mock.patch.object(Path, "is_dir", autospec=True) as is_dir_mock:
+            def fake_is_dir(path_obj):
+                return str(path_obj) == "/app"
+
+            is_dir_mock.side_effect = fake_is_dir
+            base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
+
+        self.assertEqual(base_dir, Path("/app"))
+
     def test_shorten_text_truncates_and_flattens_newlines(self):
         value = "abc\ndefghijkl"
         shortened = self.shopify_sync.shorten_text(value, limit=8)
@@ -91,6 +110,35 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(payload["service"], "shopify-sync")
         self.assertEqual(payload["version"], self.shopify_sync.SYNC_VERSION)
         self.assertEqual(payload["reported_at"], "2026-03-25T21:00:00+00:00")
+
+    def test_update_service_runtime_state_writes_version_and_status(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+            def close(self):
+                return None
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+            self.shopify_sync.update_service_runtime_state(status="running", mark_seen=True, mark_started=True, clear_error=True)
+
+        self.assertTrue(executed)
+        query, params = executed[0]
+        self.assertIn("INSERT INTO service_runtime_state", query)
+        self.assertEqual(params[0], self.shopify_sync.SYNC_VERSION)
+        self.assertEqual(params[1], "running")
 
     def test_iter_fulfillments_accepts_plain_list_shape(self):
         order = {
@@ -154,6 +202,76 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         payload = json.loads(print_mock.call_args.args[0])
         self.assertEqual(payload["service"], "shopify-sync")
         self.assertEqual(payload["version"], self.shopify_sync.SYNC_VERSION)
+
+    def test_sync_customers_truncates_and_inserts_default_address(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+            def close(self):
+                return None
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        customers = [
+            {
+                "id": "gid://shopify/Customer/1",
+                "firstName": "Max",
+                "lastName": "Mustermann",
+                "displayName": "Max Mustermann",
+                "email": "max@example.com",
+                "phone": "01234",
+                "defaultAddress": {
+                    "name": "Max Mustermann",
+                    "address1": "Musterstr. 1",
+                    "zip": "12345",
+                    "city": "Berlin",
+                    "country": "Germany",
+                    "phone": "01234",
+                },
+            }
+        ]
+
+        with mock.patch.object(self.shopify_sync, "get_all_customers", return_value=customers):
+            with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+                count = self.shopify_sync.sync_customers()
+
+        self.assertEqual(count, 1)
+        self.assertTrue(any("TRUNCATE TABLE shopify_customers" in query for query, _ in executed))
+        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shopify_customers" in q)
+        self.assertIn("INSERT INTO shopify_customers", insert_query)
+        self.assertEqual(insert_params[0], "gid://shopify/Customer/1")
+        self.assertEqual(insert_params[3], "Max Mustermann")
+        self.assertEqual(insert_params[7], "Musterstr. 1")
+        self.assertEqual(insert_params[10], "Germany")
+
+    def test_upsert_shopify_shipment_writes_shipping_labels_table(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+        order = {"id": "gid://shopify/Order/1", "name": "#1001"}
+        fulfillment = {"id": "gid://shopify/Fulfillment/1", "status": "SUCCESS", "createdAt": "2026-03-31T10:00:00Z"}
+        tracking = {"number": "1234567890", "url": "https://example.invalid/track/1234567890", "company": "GLS"}
+
+        self.shopify_sync.upsert_shopify_shipment(FakeCursor(), order, fulfillment, tracking)
+
+        query, params = executed[0]
+        self.assertIn("INSERT INTO shipping_labels", query)
+        self.assertEqual(params[0], "gls")
+        self.assertEqual(params[4], "1234567890")
 
 
 if __name__ == "__main__":

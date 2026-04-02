@@ -14,17 +14,51 @@ import re
 import ssl
 import subprocess
 import string
+import shutil
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from address_label import build_address_label_pdf
 from app_logging import MAIN_LOG_PATH, PRINT_LOG_PATH, get_logger
 from app_settings import DEFAULT_SETTINGS, load_settings, save_settings
+from app_version import APP_VERSION
 from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
 from post.internetmarke_client import InternetmarkeClient
+from post.product_catalog import find_post_product, list_post_base_products
+from shipping.carriers import (
+    DEFAULT_ACTIVE_SHIPPING_CARRIERS,
+    SHIPPING_CARRIER_DEFINITIONS,
+    SHIPPING_CARRIER_ORDER,
+    ShippingCarrierRuntime,
+    carrier_allows_shopify as _shipping_carrier_allows_shopify,
+    carrier_definition as _shipping_carrier_definition,
+    carrier_field_to_code as _shipping_carrier_field_to_code,
+    carrier_label as _shipping_carrier_label,
+    carrier_option_mode as _shipping_carrier_option_mode,
+    carrier_setting_field as _shipping_carrier_setting_field,
+    configurable_carrier_codes as _configurable_shipping_carrier_codes,
+    default_tracking_mode_for_carrier as _default_tracking_mode_for_carrier,
+    normalize_active_carriers as _normalize_active_shipping_carriers,
+    shipping_active_carrier_values as _shipping_active_carrier_values,
+    shipping_carrier_options as _shipping_carrier_options_impl,
+    shopify_tracking_company as _shopify_tracking_company,
+)
+from shipping.history import (
+    SHIPPING_LABEL_TABLE,
+    ensure_shipping_history_schema,
+    find_or_create_shopify_fulfillment_job as _find_or_create_shopify_fulfillment_job,
+    get_latest_shopify_job_for_label as _get_latest_shopify_job_for_label,
+    get_latest_shipping_label_for_order as _get_latest_shipping_label_for_order,
+    insert_shipping_label_history as _insert_shipping_label_history,
+    list_shipping_labels as _list_shipping_labels,
+    update_shipping_label_reprint as _update_shipping_label_reprint,
+    update_shipping_label_status as _update_shipping_label_status,
+)
 
 locale.setlocale(locale.LC_ALL, "")
 
@@ -37,21 +71,19 @@ GLS_DIR = BASE_DIR / "gls"
 GLS_LABEL_DIR = GLS_DIR / "labels"
 POST_DIR = BASE_DIR / "post"
 POST_LABEL_DIR = POST_DIR / "labels"
-VERSION_MAJOR = 1
-VERSION_MINOR = 20
-# Increase patch for bugfix/small changes within the current feature phase.
-VERSION_PATCH = 28
-APP_VERSION = f"{VERSION_MAJOR}.{VERSION_MINOR}.{VERSION_PATCH:03d}"
+SHOPIFY_SYNC_SERVICE = "shopify-sync"
+_SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
+_POST_PAGE_FORMAT_CACHE = {"loaded_at": 0.0, "formats": []}
+_POST_SELECTION_CACHE = {}
+_SHIPPING_CARRIER_CACHE = "gls"
 
 SHIPPING_SERVICE_OPTIONS = [
-    {"code": "service_flexdelivery", "label": "FlexDelivery", "locked": True},
-    {"code": "service_addresseeonly", "label": "AddresseeOnly", "locked": False},
-    {"code": "service_guaranteed24", "label": "Guaranteed24", "locked": False},
-    {"code": "service_preadvice", "label": "PreAdvice", "locked": False},
-    {"code": "service_smsservice", "label": "SMS Service", "locked": False},
+    {"code": "service_flexdelivery", "label": "FlexDelivery - Zustelloptionen fuer den Empfaenger", "locked": False},
+    {"code": "service_addresseeonly", "label": "AddresseeOnly - Nur an den Empfaenger persoenlich", "locked": False},
+    {"code": "service_guaranteed24", "label": "Guaranteed24 - Garantierte Zustellung am naechsten Werktag", "locked": False},
+    {"code": "service_preadvice", "label": "PreAdvice - Vorabankuendigung an den Empfaenger", "locked": False},
+    {"code": "service_smsservice", "label": "SMS Service - Versandinfo per SMS", "locked": False},
 ]
-
-IMPLEMENTED_SHIPPING_CARRIERS = {"gls", "test"}
 
 MANUAL_LABEL_COUNTRY_OPTIONS = [
     {"value": "AD", "label": "Andorra"},
@@ -131,8 +163,51 @@ COUNTRY_NAME_DE = {
     "VA": "Vatikanstadt",
 }
 
+COUNTRY_ALPHA3 = {
+    "AD": "AND",
+    "AT": "AUT",
+    "BE": "BEL",
+    "BG": "BGR",
+    "CH": "CHE",
+    "CY": "CYP",
+    "CZ": "CZE",
+    "DE": "DEU",
+    "DK": "DNK",
+    "EE": "EST",
+    "ES": "ESP",
+    "FI": "FIN",
+    "FR": "FRA",
+    "GB": "GBR",
+    "GR": "GRC",
+    "HR": "HRV",
+    "HU": "HUN",
+    "IE": "IRL",
+    "IS": "ISL",
+    "IT": "ITA",
+    "LI": "LIE",
+    "LT": "LTU",
+    "LU": "LUX",
+    "LV": "LVA",
+    "MC": "MCO",
+    "MT": "MLT",
+    "NL": "NLD",
+    "NO": "NOR",
+    "PL": "POL",
+    "PT": "PRT",
+    "RO": "ROU",
+    "SE": "SWE",
+    "SI": "SVN",
+    "SK": "SVK",
+    "SM": "SMR",
+    "VA": "VAT",
+}
+
 FULFILLMENT_FILTER_SEQUENCE = ["all", "open", "unfulfilled", "partial", "fulfilled"]
 PAYMENT_FILTER_SEQUENCE = ["all", "paid", "pending", "authorized", "partially_paid", "refunded", "voided"]
+ITEMS_AUTO_REFRESH_SECONDS = 10.0
+ORDERS_AUTO_REFRESH_SECONDS = 10.0
+ORDER_DETAILS_LOAD_DELAY_SECONDS = 0.25
+SERVICE_RUNTIME_CACHE_SECONDS = 30.0
 
 
 COLS = [
@@ -298,27 +373,35 @@ TRANSLATIONS = {
         "field_regex_platz": "Regex Platz",
         "field_picklist_printer": "Pickliste Drucker",
         "field_delivery_printer": "Lieferschein Drucker",
+        "field_delivery_format": "Lieferschein Format",
         "field_shipping_printer": "Versandlabel Drucker",
         "field_shipping_printer_gls": "GLS Label Drucker",
-        "field_shipping_printer_dhl": "DHL Label Drucker",
+        "field_shipping_printer_free": "Adresslabel Drucker",
         "field_shipping_printer_post": "POST Label Drucker",
         "field_shipping_printer_fallback": "Label Drucker Fallback",
-        "field_shipping_carrier": "Versand Dienstleister",
+        "field_shipping_active_carriers": "Aktive Versanddienste",
         "field_shipping_label_output_dir": "Versandlabel Ordner",
         "field_shipping_format": "Versand Labelformat",
         "field_shipping_format_gls": "GLS Labelformat",
-        "field_shipping_format_dhl": "DHL Labelformat",
+        "field_shipping_format_free": "Adresslabel Format",
         "field_shipping_format_post": "POST Labelformat",
         "field_shipping_services": "Versand Services",
         "field_shipping_packaging_weight": "Verpackung Gewicht (g)",
+        "field_shopify_tracking_mode_gls": "Shopify Tracking GLS",
+        "field_shopify_tracking_mode_post": "Shopify Tracking POST",
+        "field_shopify_tracking_url_gls": "Shopify Tracking URL GLS",
+        "field_shopify_tracking_url_post": "Shopify Tracking URL POST",
         "field_gls_api_url": "GLS API URL",
         "field_gls_user": "GLS User",
         "field_gls_password": "GLS Passwort",
         "field_gls_contact_id": "GLS ContactID",
         "field_post_api_url": "POST API URL",
+        "field_post_api_key": "POST API Key",
+        "field_post_api_secret": "POST API Secret",
         "field_post_user": "POST User",
         "field_post_password": "POST Passwort",
         "field_post_partner_id": "POST Partner-ID",
+        "field_free_label_template": "Adresslabel Vorlage",
         "field_pdf_dir": "PDF Ordner",
         "field_template": "LS Vorlage",
         "field_logo": "LS Logo URL/Pfad",
@@ -395,27 +478,35 @@ TRANSLATIONS = {
         "field_regex_platz": "Regex Slot",
         "field_picklist_printer": "Picklist Printer",
         "field_delivery_printer": "Delivery Printer",
+        "field_delivery_format": "Delivery Format",
         "field_shipping_printer": "Shipping Label Printer",
         "field_shipping_printer_gls": "GLS Label Printer",
-        "field_shipping_printer_dhl": "DHL Label Printer",
+        "field_shipping_printer_free": "Address Label Printer",
         "field_shipping_printer_post": "POST Label Printer",
         "field_shipping_printer_fallback": "Label Printer Fallback",
-        "field_shipping_carrier": "Shipping Carrier",
+        "field_shipping_active_carriers": "Active Shipping Carriers",
         "field_shipping_label_output_dir": "Shipping Label Folder",
         "field_shipping_format": "Shipping Label Format",
         "field_shipping_format_gls": "GLS Label Format",
-        "field_shipping_format_dhl": "DHL Label Format",
+        "field_shipping_format_free": "Address Label Format",
         "field_shipping_format_post": "POST Label Format",
         "field_shipping_services": "Shipping Services",
         "field_shipping_packaging_weight": "Packaging Weight (g)",
+        "field_shopify_tracking_mode_gls": "Shopify Tracking GLS",
+        "field_shopify_tracking_mode_post": "Shopify Tracking POST",
+        "field_shopify_tracking_url_gls": "Shopify Tracking URL GLS",
+        "field_shopify_tracking_url_post": "Shopify Tracking URL POST",
         "field_gls_api_url": "GLS API URL",
         "field_gls_user": "GLS User",
         "field_gls_password": "GLS Password",
         "field_gls_contact_id": "GLS ContactID",
         "field_post_api_url": "POST API URL",
+        "field_post_api_key": "POST API Key",
+        "field_post_api_secret": "POST API Secret",
         "field_post_user": "POST User",
         "field_post_password": "POST Password",
         "field_post_partner_id": "POST Partner ID",
+        "field_free_label_template": "Address Label Template",
         "field_pdf_dir": "PDF Folder",
         "field_template": "Delivery Template",
         "field_logo": "Delivery Logo URL/Path",
@@ -693,98 +784,65 @@ def init_db():
     )
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
+    ensure_shipping_history_schema(cur)
     cur.execute(
         """
-        CREATE TABLE IF NOT EXISTS gls_labels (
-            id serial PRIMARY KEY,
-            carrier text NOT NULL DEFAULT 'gls',
-            order_id text NOT NULL,
-            order_name text NOT NULL,
-            shipment_reference text NOT NULL,
-            track_id text NOT NULL UNIQUE,
-            parcel_number text,
-            weight_kg numeric(8,3) NOT NULL DEFAULT 1.0,
-            status text NOT NULL DEFAULT 'CREATED',
-            label_path text NOT NULL,
+        CREATE TABLE IF NOT EXISTS service_runtime_state (
+            service text PRIMARY KEY,
+            version text,
+            status text NOT NULL DEFAULT 'unknown',
+            last_seen_at timestamptz,
+            last_started_at timestamptz,
+            last_finished_at timestamptz,
+            last_pull_at timestamptz,
+            last_push_at timestamptz,
             last_error text,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            updated_at timestamptz NOT NULL DEFAULT NOW(),
-            cancel_requested_at timestamptz,
-            cancelled_at timestamptz
+            updated_at timestamptz NOT NULL DEFAULT NOW()
         )
         """
     )
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS carrier text NOT NULL DEFAULT 'gls'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shipment_reference text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS parcel_number text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS weight_kg numeric(8,3) NOT NULL DEFAULT 1.0")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'CREATED'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS label_path text NOT NULL DEFAULT ''")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS last_error text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS cancelled_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
-    cur.execute("ALTER TABLE gls_labels ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_order_created
-        ON gls_labels(order_id, created_at DESC)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_created
-        ON gls_labels(created_at DESC)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_gls_labels_shopify_fulfillment
-        ON gls_labels(shopify_fulfillment_id)
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_fulfillment_jobs (
-            id serial PRIMARY KEY,
-            label_id integer,
-            order_id text NOT NULL,
-            tracking_number text NOT NULL,
-            carrier text NOT NULL,
-            line_items_json text,
-            notify_customer boolean NOT NULL DEFAULT FALSE,
-            status text NOT NULL DEFAULT 'pending',
-            attempts integer NOT NULL DEFAULT 0,
-            result_message text,
-            shopify_fulfillment_id text,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            updated_at timestamptz NOT NULL DEFAULT NOW(),
-            processed_at timestamptz
+        CREATE TABLE IF NOT EXISTS shopify_customers (
+            customer_id text PRIMARY KEY,
+            first_name text,
+            last_name text,
+            display_name text,
+            email text,
+            phone text,
+            default_name text,
+            default_address1 text,
+            default_zip text,
+            default_city text,
+            default_country text,
+            default_phone text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
         )
         """
     )
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS label_id integer")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS line_items_json text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS result_message text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute("ALTER TABLE shopify_fulfillment_jobs ADD COLUMN IF NOT EXISTS processed_at timestamptz")
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_status_created
-        ON shopify_fulfillment_jobs(status, created_at)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_label_created
-        ON shopify_fulfillment_jobs(label_id, created_at DESC)
-        """
-    )
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS first_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS last_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS display_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS email text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_name text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_address1 text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_zip text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_city text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_country text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_phone text")
+    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_display_name ON shopify_customers(display_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_email ON shopify_customers(email)")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_started_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_finished_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_pull_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_push_at timestamptz")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_error text")
+    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS inventory_sessions (
@@ -816,15 +874,184 @@ def init_db():
     con.close()
 
 
+class DatabaseUnavailableError(RuntimeError):
+    pass
+
+
+class DatabaseBusyError(RuntimeError):
+    pass
+
+
+def _summarize_db_error(exc):
+    text = str(exc or "").strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "Datenbank ist nicht erreichbar."
+    return " | ".join(lines[:2])[:180]
+
+
+def _execute_db_query(cur, query, params=None, deadlock_retries=1):
+    params = params or []
+    for attempt in range(deadlock_retries + 1):
+        try:
+            cur.execute(query, params)
+            return
+        except psycopg2.errors.DeadlockDetected as exc:
+            if attempt < deadlock_retries:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise DatabaseBusyError("Datenbank ist kurzzeitig blockiert. Bitte erneut versuchen.") from exc
+
+
+def _probe_database_ready():
+    if _is_default_db_settings(SETTINGS):
+        return False, "Bitte zuerst DB Einstellungen in Shift+F11 speichern."
+    try:
+        init_db()
+        return True, ""
+    except Exception as exc:
+        return False, _summarize_db_error(exc)
+
+
+def database_connection_dialog(stdscr, error_text):
+    message = (error_text or "Datenbank ist nicht erreichbar.").strip()
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(max(78, int(w * 0.72)), w - 4)
+        height = 11
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.timeout(1000)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, " DB Problem ")
+        host_line = f"Host: {SETTINGS.get('db_host') or '-'}  DB: {SETTINGS.get('db_name') or '-'}"
+        status_line = "Warte auf Verbindung, starte automatisch bei Erfolg."
+        footer = "Enter Neu versuchen  F2 Einstellungen  F9 Beenden"
+        wrapped_error = textwrap.wrap(message, width=max(20, width - 4)) or ["Datenbank ist nicht erreichbar."]
+
+        win.addstr(2, 2, _fit(host_line, width - 4))
+        for index, line in enumerate(wrapped_error[:3]):
+            win.addstr(4 + index, 2, _fit(line, width - 4))
+        win.addstr(height - 3, 2, _fit(status_line, width - 4))
+        win.attrset(curses.color_pair(3))
+        win.addstr(height - 2, 2, _fit(footer, width - 4))
+        win.attrset(curses.color_pair(1))
+        win.refresh()
+
+        key = win.getch()
+        if key == -1 or key in (10, 13, curses.KEY_ENTER):
+            ready, latest_error = _probe_database_ready()
+            if ready:
+                return True
+            if latest_error:
+                message = latest_error
+            continue
+        if key == curses.KEY_F2:
+            settings_dialog(stdscr)
+            ready, latest_error = _probe_database_ready()
+            if ready:
+                return True
+            if latest_error:
+                message = latest_error
+            continue
+        if key in (27, curses.KEY_F9):
+            return False
+
 
 def db():
-    return psycopg2.connect(
-        host=SETTINGS["db_host"],
-        dbname=SETTINGS["db_name"],
-        user=SETTINGS["db_user"],
-        password=SETTINGS["db_pass"],
-        cursor_factory=psycopg2.extras.RealDictCursor
-    )
+    try:
+        return psycopg2.connect(
+            host=SETTINGS["db_host"],
+            dbname=SETTINGS["db_name"],
+            user=SETTINGS["db_user"],
+            password=SETTINGS["db_pass"],
+            cursor_factory=psycopg2.extras.RealDictCursor
+        )
+    except psycopg2.OperationalError as exc:
+        raise DatabaseUnavailableError(_summarize_db_error(exc)) from exc
+
+
+def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=SERVICE_RUNTIME_CACHE_SECONDS, force=False):
+    now = time.monotonic()
+    cached = _SERVICE_RUNTIME_CACHE["rows"].get(service)
+    if not force and cached is not None and now - _SERVICE_RUNTIME_CACHE["loaded_at"] < max_age_seconds:
+        return cached
+
+    con = None
+    cur = None
+    try:
+        con = db()
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT
+                service,
+                version,
+                status,
+                last_seen_at,
+                last_started_at,
+                last_finished_at,
+                last_pull_at,
+                last_push_at,
+                last_error,
+                updated_at
+            FROM service_runtime_state
+            WHERE service = %s
+            """,
+            (service,),
+        )
+        row = cur.fetchone()
+        _SERVICE_RUNTIME_CACHE["rows"][service] = row
+        _SERVICE_RUNTIME_CACHE["loaded_at"] = now
+        return row
+    except Exception:
+        return cached
+    finally:
+        if cur is not None:
+            cur.close()
+        if con is not None:
+            con.close()
+
+
+def _format_runtime_time_short(value):
+    if not value:
+        return "-"
+    if not isinstance(value, datetime.datetime):
+        return str(value)
+    try:
+        localized = value.astimezone() if value.tzinfo is not None else value
+    except Exception:
+        localized = value
+    return localized.strftime("%H:%M")
+
+
+def format_shopify_sync_status_label(row=None, now=None):
+    data = row if row is not None else get_service_runtime_state()
+    if not data:
+        return "Sync: -"
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    last_seen = data.get("last_seen_at")
+    if isinstance(last_seen, datetime.datetime) and last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=datetime.timezone.utc)
+    stale = bool(isinstance(last_seen, datetime.datetime) and (current - last_seen).total_seconds() > 180)
+    prefix = "Sync!" if stale else "Sync:"
+    parts = []
+    if data.get("last_pull_at"):
+        parts.append(f"In {_format_runtime_time_short(data['last_pull_at'])}")
+    if data.get("last_push_at"):
+        parts.append(f"Out {_format_runtime_time_short(data['last_push_at'])}")
+    if not parts and last_seen:
+        parts.append(_format_runtime_time_short(last_seen))
+    label = f"{prefix} {' '.join(parts) if parts else '-'}"
+    if (data.get("status") or "").strip().lower() == "error":
+        label += " ERR"
+    return label
 
 
 def test_db_connection(settings):
@@ -845,21 +1072,10 @@ def _is_default_db_settings(settings):
 
 
 def ensure_database_ready(stdscr):
-    while True:
-        if _is_default_db_settings(SETTINGS):
-            message_box(stdscr, "Setup", "Bitte zuerst DB Einstellungen in Shift+F11 speichern.")
-            settings_dialog(stdscr)
-            if _is_default_db_settings(SETTINGS):
-                if confirm_box(stdscr, "Setup", "Keine DB Daten gesetzt. Programm beenden?"):
-                    return False
-                continue
-
-        try:
-            init_db()
-            return True
-        except Exception as exc:
-            message_box(stdscr, "DB Fehler", str(exc)[:56])
-            settings_dialog(stdscr)
+    ready, error_text = _probe_database_ready()
+    if ready:
+        return True
+    return database_connection_dialog(stdscr, error_text)
 
 
 def get_items(filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
@@ -941,6 +1157,104 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
     return rows
 
 
+def _load_items_snapshot():
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT
+            sku,
+            name,
+            regal,
+            fach,
+            platz,
+            menge,
+            COALESCE(reserved, 0) AS reserved,
+            COALESCE(committed, 0) AS committed,
+            COALESCE(unavailable, COALESCE(reserved, 0)) AS unavailable,
+            COALESCE(
+                available,
+                GREATEST(
+                    menge
+                    - COALESCE(unavailable, COALESCE(reserved, 0))
+                    - COALESCE(committed, 0),
+                    0
+                )
+            ) AS available,
+            dirty,
+            shopify_variant_id,
+            barcode,
+            shopify_product_status,
+            shopify_description,
+            shopify_price,
+            shopify_compare_at_price,
+            shopify_unit_cost,
+            shopify_unit_cost_currency,
+            shopify_weight_grams,
+            sync_status,
+            COALESCE(external_fulfillment, FALSE) AS external_fulfillment
+        FROM items
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _match_item_filter(row, filter_text):
+    needle = str(filter_text or "").strip().casefold()
+    if not needle:
+        return True
+    fields = (
+        row.get("name") or "",
+        row.get("sku") or "",
+        row.get("barcode") or "",
+    )
+    return any(needle in str(value).casefold() for value in fields)
+
+
+def _sort_items_snapshot(rows, sort_mode):
+    data = list(rows or [])
+    if sort_mode == "name":
+        data.sort(key=lambda row: (str(row.get("name") or "").casefold(), str(row.get("sku") or "").casefold()))
+        return data
+    if sort_mode == "sku":
+        data.sort(key=lambda row: str(row.get("sku") or "").casefold())
+        return data
+    data.sort(
+        key=lambda row: (
+            _sort_location_value(row.get("regal")),
+            _sort_location_value(row.get("fach")),
+            _sort_location_value(row.get("platz")),
+            str(row.get("sku") or "").casefold(),
+        )
+    )
+    return data
+
+
+def _filter_items_snapshot(rows, filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
+    filtered = []
+    for row in rows or []:
+        if not _match_item_filter(row, filter_text):
+            continue
+        if filter_no_location:
+            regal = (row.get("regal") or "").strip()
+            fach = row.get("fach")
+            platz = row.get("platz")
+            if regal and fach not in (None, "") and platz not in (None, ""):
+                continue
+        if filter_local and (row.get("sync_status") or "") != "local":
+            continue
+        is_external = bool(row.get("external_fulfillment"))
+        if external_mode == "only" and not is_external:
+            continue
+        if external_mode == "hide" and is_external:
+            continue
+        filtered.append(row)
+    return _sort_items_snapshot(filtered, sort_mode)
+
+
 def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", payment_filter="all"):
     con = db()
     cur = con.cursor()
@@ -984,7 +1298,8 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
     if conditions:
         where = "WHERE " + " AND ".join(conditions)
 
-    cur.execute(
+    _execute_db_query(
+        cur,
         f"""
         SELECT
             so.order_id,
@@ -1023,6 +1338,97 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
     cur.close()
     con.close()
     return rows
+
+
+def _load_orders_snapshot():
+    con = db()
+    cur = con.cursor()
+    _execute_db_query(
+        cur,
+        """
+        SELECT
+            so.order_id,
+            so.order_name,
+            so.created_at,
+            so.shipping_name,
+            so.shipping_address1,
+            so.shipping_zip,
+            so.shipping_city,
+            so.shipping_country,
+            so.shipping_email,
+            so.shipping_phone,
+            so.fulfillment_status,
+            so.payment_status,
+            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty
+        FROM shopify_orders so
+        LEFT JOIN (
+            SELECT
+                oi.order_id,
+                SUM(
+                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                    THEN oi.quantity
+                    ELSE 0
+                    END
+                ) AS local_internal_qty
+            FROM shopify_order_items oi
+            LEFT JOIN items i ON i.sku = oi.sku
+            GROUP BY oi.order_id
+        ) AS order_stats ON order_stats.order_id = so.order_id
+        ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
+        """,
+        [],
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _matches_fulfillment_filter(status_value, fulfillment_filter, only_pending=False):
+    status_text = str(status_value or "").strip().lower()
+    if only_pending and status_text in {"fulfilled", "cancelled"}:
+        return False
+    if fulfillment_filter == "all":
+        return True
+    if fulfillment_filter == "open":
+        return status_text not in {"fulfilled", "cancelled"}
+    if fulfillment_filter == "unfulfilled":
+        return status_text == "" or "unfulfilled" in status_text
+    if fulfillment_filter == "partial":
+        return "partial" in status_text or "in_progress" in status_text
+    if fulfillment_filter == "fulfilled":
+        return status_text == "fulfilled"
+    return True
+
+
+def _filter_orders_snapshot(rows, order_filter=None, only_pending=False, fulfillment_filter="all", payment_filter="all"):
+    needle_raw = (order_filter or "").strip()
+    needle = needle_raw.replace("#", "").casefold()
+    filtered = []
+    for row in rows or []:
+        if needle:
+            order_name = str(row.get("order_name") or "").replace("#", "").casefold()
+            shipping_name = str(row.get("shipping_name") or "").casefold()
+            shipping_city = str(row.get("shipping_city") or "").casefold()
+            if needle not in order_name and needle_raw.casefold() not in shipping_name and needle_raw.casefold() not in shipping_city:
+                continue
+        if not _matches_fulfillment_filter(row.get("fulfillment_status"), fulfillment_filter, only_pending=only_pending):
+            continue
+        if payment_filter != "all":
+            payment_value = str(row.get("payment_status") or "").strip().lower()
+            if payment_value != payment_filter.lower():
+                continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: str(row.get("order_name") or ""), reverse=True)
+    filtered.sort(key=lambda row: row.get("created_at") or datetime.datetime.min, reverse=True)
+    return filtered
+
+
+def should_refresh_orders(last_refresh_at, now=None, interval_seconds=ORDERS_AUTO_REFRESH_SECONDS):
+    if last_refresh_at is None:
+        return True
+    current = time.monotonic() if now is None else now
+    return (current - last_refresh_at) >= max(0.0, float(interval_seconds))
 
 
 def get_order_items(order_id):
@@ -1110,245 +1516,100 @@ def get_local_fulfilled_quantities_for_order(order_id):
     return totals
 
 
-def list_gls_labels(order_id=None):
-    con = db()
-    cur = con.cursor()
-    if order_id:
-        cur.execute(
-            """
-            SELECT
-                id,
-                carrier,
-                order_id,
-                order_name,
-                shipment_reference,
-                track_id,
-                parcel_number,
-                status,
-                weight_kg,
-                label_path,
-                last_error,
-                source,
-                shopify_fulfillment_id,
-                shopify_synced_at,
-                tracking_url,
-                created_at,
-                updated_at,
-                cancel_requested_at,
-                cancelled_at
-            FROM gls_labels
-            WHERE order_id = %s
-            ORDER BY created_at DESC, id DESC
-            """,
-            (order_id,),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT
-                id,
-                carrier,
-                order_id,
-                order_name,
-                shipment_reference,
-                track_id,
-                parcel_number,
-                status,
-                weight_kg,
-                label_path,
-                last_error,
-                source,
-                shopify_fulfillment_id,
-                shopify_synced_at,
-                tracking_url,
-                created_at,
-                updated_at,
-                cancel_requested_at,
-                cancelled_at
-            FROM gls_labels
-            ORDER BY created_at DESC, id DESC
-            LIMIT 400
-            """
-        )
-    rows = cur.fetchall()
-    cur.close()
-    con.close()
-    return rows
+def _shipment_number(row):
+    carrier = (row.get("carrier") or "").strip().lower()
+    if carrier == "free":
+        return "-"
+    return ((row.get("parcel_number") or "").strip() or (row.get("track_id") or "").strip() or "-")
 
 
-def insert_gls_label_history(
-    order,
-    shipment_reference,
-    track_id,
-    parcel_number,
-    label_path,
-    status,
-    weight_kg=1.0,
-    carrier="gls",
-    source="local",
-    shopify_fulfillment_id=None,
-    tracking_url=None,
-):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        INSERT INTO gls_labels (
-            carrier,
-            order_id,
-            order_name,
-            shipment_reference,
-            track_id,
-            parcel_number,
-            weight_kg,
-            status,
-            label_path,
-            source,
-            shopify_fulfillment_id,
-            shopify_synced_at,
-            tracking_url
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (track_id)
-        DO UPDATE
-           SET carrier = EXCLUDED.carrier,
-               order_id = EXCLUDED.order_id,
-               order_name = EXCLUDED.order_name,
-               shipment_reference = EXCLUDED.shipment_reference,
-               parcel_number = EXCLUDED.parcel_number,
-               weight_kg = EXCLUDED.weight_kg,
-               status = EXCLUDED.status,
-               label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), gls_labels.label_path),
-               source = CASE
-                   WHEN gls_labels.source = 'local' AND EXCLUDED.source = 'shopify' THEN gls_labels.source
-                   ELSE EXCLUDED.source
-               END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, gls_labels.shopify_fulfillment_id),
-               shopify_synced_at = COALESCE(EXCLUDED.shopify_synced_at, gls_labels.shopify_synced_at),
-               tracking_url = COALESCE(EXCLUDED.tracking_url, gls_labels.tracking_url),
-               updated_at = NOW(),
-               last_error = NULL
-        RETURNING id
-        """,
-        (
-            carrier,
-            order["order_id"],
-            order["order_name"],
-            shipment_reference,
-            track_id,
-            parcel_number,
-            weight_kg,
-            status,
-            label_path,
-            (source or "local").strip().lower() or "local",
-            shopify_fulfillment_id,
-            datetime.datetime.now() if shopify_fulfillment_id else None,
-            (tracking_url or "").strip() or None,
-        ),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return row["id"] if row else None
+def list_shipping_labels(order_id=None):
+    return _list_shipping_labels(db, order_id=order_id)
 
 
-def update_gls_label_status(label_id, status, last_error=None):
-    con = db()
-    cur = con.cursor()
-    if status == "CANCELLED":
-        cur.execute(
-            """
-            UPDATE gls_labels
-            SET status = %s,
-                last_error = %s,
-                cancelled_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (status, last_error, label_id),
-        )
-    elif status == "CANCELLATION_PENDING":
-        cur.execute(
-            """
-            UPDATE gls_labels
-            SET status = %s,
-                last_error = %s,
-                cancel_requested_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (status, last_error, label_id),
-        )
-    else:
-        cur.execute(
-            """
-            UPDATE gls_labels
-            SET status = %s,
-                last_error = %s,
-                updated_at = NOW()
-            WHERE id = %s
-            """,
-            (status, last_error, label_id),
-        )
-    con.commit()
-    cur.close()
-    con.close()
+def insert_shipping_label_history(*args, **kwargs):
+    return _insert_shipping_label_history(db, *args, **kwargs)
 
 
-def update_gls_label_reprint(label_id, label_path):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        UPDATE gls_labels
-        SET label_path = %s,
-            status = 'REPRINTED',
-            last_error = NULL,
-            updated_at = NOW()
-        WHERE id = %s
-        """,
-        (label_path, label_id),
-    )
-    con.commit()
-    cur.close()
-    con.close()
+def update_shipping_label_status(label_id, status, last_error=None):
+    return _update_shipping_label_status(db, label_id, status, last_error=last_error)
+
+
+def update_shipping_label_reprint(label_id, label_path):
+    return _update_shipping_label_reprint(db, label_id, label_path)
 
 
 def get_latest_shopify_job_for_label(label_id):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT
-            id,
-            order_id,
-            tracking_number,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            result_message,
-            shopify_fulfillment_id,
-            created_at,
-            updated_at,
-            processed_at
-        FROM shopify_fulfillment_jobs
-        WHERE label_id = %s
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    con.close()
-    return row
+    return _get_latest_shopify_job_for_label(db, label_id)
 
 
-def _shipment_number(row):
-    return ((row.get("parcel_number") or "").strip() or (row.get("track_id") or "").strip() or "-")
+def _shipping_printer_field_map():
+    return _shipping_carrier_field_to_code("printer")
+
+
+def _shipping_format_field_map():
+    return _shipping_carrier_field_to_code("format")
+
+
+def _shipping_template_field_map():
+    return _shipping_carrier_field_to_code("template")
+
+
+def _shipping_tracking_mode_field_map():
+    return _shipping_carrier_field_to_code("tracking_mode")
+
+
+def _shipping_tracking_url_field_map():
+    return _shipping_carrier_field_to_code("tracking_url")
+
+
+def _active_shipping_carriers():
+    return _normalize_active_shipping_carriers(SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS))
+
+def _shipping_carrier_options(include_test=True):
+    return _shipping_carrier_options_from_settings(include_test=include_test)
+
+
+def _shipping_carrier_options_from_settings(include_test=True):
+    return _shipping_carrier_options_impl(_active_shipping_carriers(), include_test=include_test)
+
+
+def _shipping_active_carriers_summary(values, fallback_to_defaults=True):
+    normalized = _normalize_active_shipping_carriers(values, fallback_to_defaults=fallback_to_defaults)
+    if not normalized:
+        return "Keine"
+    return ", ".join(_shipping_carrier_label(code) for code in normalized)
+
+
+def _tracking_url_for_carrier(carrier, tracking_number):
+    number = (tracking_number or "").strip()
+    if not number:
+        return None
+    normalized = (carrier or "").strip().lower()
+    template_field = _shipping_carrier_setting_field(normalized, "tracking_url")
+    template = (SETTINGS.get(template_field) or "").strip() if template_field else ""
+    if not template:
+        return None
+    try:
+        return template.format(tracking_number=number, number=number)
+    except Exception:
+        return template.replace("{tracking_number}", number).replace("{number}", number)
+
+
+def _shopify_tracking_mode_for_carrier(carrier):
+    normalized = (carrier or "").strip().lower()
+    tracking_mode_field = _shipping_carrier_setting_field(normalized, "tracking_mode")
+    default_mode = _default_tracking_mode_for_carrier(normalized)
+    if tracking_mode_field:
+        return (SETTINGS.get(tracking_mode_field) or default_mode).strip().lower()
+    return "company"
+
+
+def _effective_tracking_url_for_shopify(carrier, tracking_number, tracking_url=None):
+    mode = _shopify_tracking_mode_for_carrier(carrier)
+    if mode == "company_and_url":
+        return (tracking_url or "").strip() or _tracking_url_for_carrier(carrier, tracking_number)
+    return None
 
 
 def _shipment_source_label(value):
@@ -1366,12 +1627,171 @@ def _shipment_source_label(value):
     return labels.get(normalized, value or "-")
 
 
+def search_shopify_customers(search_text="", limit=100):
+    con = db()
+    cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    needle = f"%{(search_text or '').strip()}%"
+    cur.execute(
+        """
+        SELECT
+            customer_id,
+            first_name,
+            last_name,
+            display_name,
+            email,
+            phone,
+            default_name,
+            default_address1,
+            default_zip,
+            default_city,
+            default_country,
+            default_phone
+        FROM shopify_customers
+        WHERE
+            %s = '%%'
+            OR COALESCE(display_name, '') ILIKE %s
+            OR COALESCE(email, '') ILIKE %s
+            OR COALESCE(default_name, '') ILIKE %s
+            OR COALESCE(default_address1, '') ILIKE %s
+            OR COALESCE(default_city, '') ILIKE %s
+        ORDER BY COALESCE(display_name, default_name, email, customer_id)
+        LIMIT %s
+        """,
+        (needle, needle, needle, needle, needle, needle, int(limit)),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _shopify_customer_dialog_label(row, width):
+    name = (row.get("display_name") or row.get("default_name") or row.get("email") or "-").strip()
+    address = (row.get("default_address1") or "").strip()
+    postal = (row.get("default_zip") or "").strip()
+    city = (row.get("default_city") or "").strip()
+    email = (row.get("email") or "").strip()
+    city_block = " ".join(part for part in [postal, city] if part).strip()
+    line = " | ".join(part for part in [name, address, city_block, email] if part)
+    return _fit(line, width)
+
+
+def _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code):
+    updated = dict(state)
+    if not chosen_customer:
+        return updated, country_code
+    updated["name"] = (
+        (chosen_customer.get("default_name") or "").strip()
+        or (chosen_customer.get("display_name") or "").strip()
+    )
+    updated["street"] = (chosen_customer.get("default_address1") or "").strip()
+    updated["zip"] = (chosen_customer.get("default_zip") or "").strip()
+    updated["city"] = (chosen_customer.get("default_city") or "").strip()
+    customer_country = _normalized_country_code_for_display(chosen_customer.get("default_country"))
+    return updated, (customer_country or country_code)
+
+
+def shopify_customer_dialog(stdscr, search_text=""):
+    query = search_text or ""
+    selected = 0
+    top_index = 0
+    cursor_pos = len(query)
+    base_h, base_w = stdscr.getmaxyx()
+    width = min(max(84, int(base_w * 0.86)), base_w - 4)
+    height = min(max(18, int(base_h * 0.7)), base_h - 2)
+    y = max(1, (base_h - height) // 2)
+    x = max(2, (base_w - width) // 2)
+
+    while True:
+        rows = search_shopify_customers(query, limit=150)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, " Shopify Kunde waehlen ")
+
+        prompt = "Suche: "
+        input_width = max(1, width - len(prompt) - 4)
+        input_scroll = max(0, cursor_pos - input_width + 1)
+        visible_query = query[input_scroll: input_scroll + input_width]
+        win.addstr(1, 2, prompt)
+        win.attrset(curses.color_pair(2))
+        win.addstr(1, 2 + len(prompt), visible_query.ljust(input_width))
+        win.attrset(curses.color_pair(1))
+
+        visible_rows = max(1, height - 5)
+        if selected >= len(rows):
+            selected = max(0, len(rows) - 1)
+        if selected < top_index:
+            top_index = selected
+        if selected >= top_index + visible_rows:
+            top_index = selected - visible_rows + 1
+
+        if not rows:
+            win.addstr(3, 2, _fit("Keine Kunden gefunden", width - 4))
+        else:
+            for row_index, row in enumerate(rows[top_index:top_index + visible_rows]):
+                real_index = top_index + row_index
+                line = _shopify_customer_dialog_label(row, width - 4)
+                y_pos = 3 + row_index
+                if real_index == selected:
+                    win.attrset(curses.color_pair(2))
+                    win.addstr(y_pos, 2, line.ljust(width - 4))
+                    win.attrset(curses.color_pair(1))
+                else:
+                    win.addstr(y_pos, 2, line.ljust(width - 4))
+
+        win.attrset(curses.color_pair(3))
+        draw_footer_line(win, height - 1, 1, width - 2, "Text eingeben  ↑↓ waehlen  Enter uebernehmen  F9 Zurueck")
+        win.attrset(curses.color_pair(1))
+        cursor_x = 2 + len(prompt) + min(max(0, cursor_pos - input_scroll), input_width - 1)
+        win.move(1, min(width - 2, cursor_x))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return None
+        if key == curses.KEY_DOWN:
+            if rows:
+                selected = move_selection(rows, selected, 1)
+            continue
+        if key == curses.KEY_UP:
+            if rows:
+                selected = move_selection(rows, selected, -1)
+            continue
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            if rows:
+                return rows[selected]
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
+            if cursor_pos > 0:
+                query = query[:cursor_pos - 1] + query[cursor_pos:]
+                cursor_pos -= 1
+                selected = 0
+                top_index = 0
+            continue
+        if key == curses.KEY_LEFT:
+            cursor_pos = max(0, cursor_pos - 1)
+            continue
+        if key == curses.KEY_RIGHT:
+            cursor_pos = min(len(query), cursor_pos + 1)
+            continue
+        if isinstance(key, str) and key.isprintable():
+            query = query[:cursor_pos] + key + query[cursor_pos:]
+            cursor_pos += 1
+            selected = 0
+            top_index = 0
+
+
 def _shipment_summary_lines(rows, width):
     if not rows:
         return ["Sendungen: -"]
     entries = []
     for row in rows:
-        carrier = (row.get("carrier") or "-").upper()
+        carrier = _shipping_carrier_label(row.get("carrier") or "-", short=True)
         number = _shipment_number(row)
         source = _shipment_source_label(row.get("source"))
         status = row.get("status") or "-"
@@ -1388,66 +1808,45 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
     label_id = label_row.get("id")
     order_id = (label_row.get("order_id") or "").strip()
     tracking_number = (label_row.get("parcel_number") or label_row.get("track_id") or "").strip()
-    carrier = (label_row.get("carrier") or "gls").strip().upper()
-    if carrier == "TEST":
-        raise RuntimeError("Test-Labels duerfen nicht an Shopify uebertragen werden.")
+    carrier_code = (label_row.get("carrier") or "gls").strip()
+    carrier = _shopify_tracking_company(carrier_code)
+    tracking_url = _effective_tracking_url_for_shopify(
+        carrier_code,
+        tracking_number,
+        (label_row.get("tracking_url") or "").strip(),
+    )
+    if carrier_code.strip().lower() in {"test", "free"}:
+        raise RuntimeError("Test- und Adresslabels duerfen nicht an Shopify uebertragen werden.")
     if not order_id:
         raise RuntimeError("order_id fehlt.")
     if not tracking_number:
         raise RuntimeError("track_id fehlt.")
 
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT id, status
-        FROM shopify_fulfillment_jobs
-        WHERE label_id = %s
-          AND status IN ('pending', 'processing')
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
+    return _find_or_create_shopify_fulfillment_job(
+        db,
+        label_id=label_id,
+        order_id=order_id,
+        tracking_number=tracking_number,
+        tracking_url=tracking_url,
+        carrier=carrier,
+        line_items_json=None,
+        notify_customer=notify_customer,
     )
-    existing = cur.fetchone()
-    if existing:
-        cur.close()
-        con.close()
-        return {"job_id": existing["id"], "status": existing["status"], "created": False}
-
-    cur.execute(
-        """
-        INSERT INTO shopify_fulfillment_jobs (
-            label_id,
-            order_id,
-            tracking_number,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
-        RETURNING id, status
-        """,
-        (label_id, order_id, tracking_number, carrier, None, bool(notify_customer)),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return {"job_id": row["id"], "status": row["status"], "created": True}
 
 
 def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_customer=False):
     label_id = label_row.get("id")
     order_id = (label_row.get("order_id") or "").strip()
     tracking_number = (label_row.get("parcel_number") or label_row.get("track_id") or "").strip()
-    carrier = (label_row.get("carrier") or "gls").strip().upper()
-    if carrier == "TEST":
-        raise RuntimeError("Test-Labels duerfen nicht an Shopify uebertragen werden.")
+    carrier_code = (label_row.get("carrier") or "gls").strip()
+    carrier = _shopify_tracking_company(carrier_code)
+    tracking_url = _effective_tracking_url_for_shopify(
+        carrier_code,
+        tracking_number,
+        (label_row.get("tracking_url") or "").strip(),
+    )
+    if carrier_code.strip().lower() in {"test", "free"}:
+        raise RuntimeError("Test- und Adresslabels duerfen nicht an Shopify uebertragen werden.")
     if not label_id:
         raise RuntimeError("label_id fehlt.")
     if not order_id:
@@ -1478,56 +1877,16 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
     if not line_items:
         raise RuntimeError("Keine gueltigen Positionen fuer Shopify-Fulfillment.")
 
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT id, status
-        FROM shopify_fulfillment_jobs
-        WHERE label_id = %s
-          AND status IN ('pending', 'processing')
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
+    return _find_or_create_shopify_fulfillment_job(
+        db,
+        label_id=label_id,
+        order_id=order_id,
+        tracking_number=tracking_number,
+        tracking_url=tracking_url,
+        carrier=carrier,
+        line_items_json=json.dumps(line_items, ensure_ascii=True),
+        notify_customer=notify_customer,
     )
-    existing = cur.fetchone()
-    if existing:
-        cur.close()
-        con.close()
-        return {"job_id": existing["id"], "status": existing["status"], "created": False}
-
-    cur.execute(
-        """
-        INSERT INTO shopify_fulfillment_jobs (
-            label_id,
-            order_id,
-            tracking_number,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
-        RETURNING id, status
-        """,
-        (
-            label_id,
-            order_id,
-            tracking_number,
-            carrier,
-            json.dumps(line_items, ensure_ascii=True),
-            bool(notify_customer),
-        ),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return {"job_id": row["id"], "status": row["status"], "created": True}
 
 
 def _gls_extract_from_pdf(pdf_path):
@@ -1577,14 +1936,198 @@ def load_gls_credentials():
 def load_post_credentials():
     creds = {
         "api_url": (SETTINGS.get("post_api_url") or "").strip(),
+        "api_key": (SETTINGS.get("post_api_key") or "").strip(),
+        "api_secret": (SETTINGS.get("post_api_secret") or "").strip(),
         "user": (SETTINGS.get("post_user") or "").strip(),
         "password": (SETTINGS.get("post_password") or "").strip(),
         "partner_id": (SETTINGS.get("post_partner_id") or "").strip(),
     }
-    missing = [key for key, value in creds.items() if not value]
+    missing = []
+    if not creds["api_url"]:
+        missing.append("api_url")
+    if not creds["partner_id"]:
+        missing.append("partner_id")
+    has_oauth = bool(creds["api_key"] and creds["api_secret"])
+    has_legacy = bool(creds["user"] and creds["password"])
+    if not has_oauth and not has_legacy:
+        missing.append("api_key/api_secret oder user/password")
     if missing:
         raise RuntimeError(f"POST INTERNETMARKE Daten fehlen: {', '.join(missing)}")
     return creds
+
+
+def _country_to_alpha3(country_value):
+    raw = (country_value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) == 3 and raw.isalpha():
+        return raw.upper()
+    if len(raw) == 2 and raw.isalpha():
+        return COUNTRY_ALPHA3.get(raw.upper(), "")
+    code2 = _gls_country_code(raw)
+    if code2:
+        return COUNTRY_ALPHA3.get(code2, "")
+    return ""
+
+
+def _post_sender_address(client):
+    profile = client.get_profile()
+    firstname = (profile.get("firstname") or "").strip()
+    lastname = (profile.get("lastname") or "").strip()
+    company = (profile.get("company") or "").strip()
+    street = " ".join(part for part in [(profile.get("street") or "").strip(), (profile.get("houseNo") or "").strip()] if part).strip()
+    sender_name = " ".join(part for part in [firstname, lastname] if part).strip() or company
+    address = {
+        "name": sender_name[:50],
+        "addressLine1": street[:50],
+        "postalCode": (profile.get("zip") or "").strip()[:5],
+        "city": (profile.get("city") or "").strip()[:40],
+        "country": (profile.get("country") or "DEU").strip().upper()[:3],
+    }
+    if company:
+        address["additionalName"] = company[:40]
+    return address
+
+
+def _post_receiver_address(order):
+    country = _country_to_alpha3(order.get("shipping_country"))
+    if not country:
+        raise ValueError("Empfaenger Land ungueltig oder fehlt (ISO2/ISO3 erwartet).")
+    address = {
+        "name": (order.get("shipping_name") or "").strip()[:50],
+        "addressLine1": (order.get("shipping_address1") or "").strip()[:50],
+        "postalCode": (order.get("shipping_zip") or "").strip()[:10],
+        "city": (order.get("shipping_city") or "").strip()[:40],
+        "country": country,
+    }
+    company = (order.get("shipping_company") or "").strip()
+    if company:
+        address["additionalName"] = company[:40]
+    address_line2 = (order.get("shipping_address2") or "").strip()
+    if address_line2:
+        address["addressLine2"] = address_line2[:60]
+    return address
+
+
+def _normalize_post_option_codes(option_codes):
+    result = []
+    for code in option_codes or []:
+        normalized = str(code or "").strip().lower()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return sorted(result)
+
+
+def _post_selection_summary(selection):
+    if not selection:
+        return "-"
+    label = (selection.get("selection_label") or selection.get("name") or "").strip()
+    price = str(selection.get("price_eur") or "").strip()
+    if label and price:
+        return f"{label} - {price} EUR"
+    return label or "-"
+
+
+def _post_selection_dialog(stdscr, scope="domestic"):
+    current = dict(_POST_SELECTION_CACHE.get(scope) or {})
+    selection = post_product_dialog(stdscr, current_selection=current, scope=scope)
+    if selection:
+        _POST_SELECTION_CACHE[scope] = dict(selection)
+    return selection
+
+
+def _get_post_page_formats(client, max_age_seconds=1800):
+    now = time.time()
+    if _POST_PAGE_FORMAT_CACHE["formats"] and now - _POST_PAGE_FORMAT_CACHE["loaded_at"] < max_age_seconds:
+        return _POST_PAGE_FORMAT_CACHE["formats"]
+    formats = client.get_page_formats()
+    _POST_PAGE_FORMAT_CACHE["formats"] = formats
+    _POST_PAGE_FORMAT_CACHE["loaded_at"] = now
+    return formats
+
+
+def _resolve_post_page_format_id(client, desired_format):
+    formats = _get_post_page_formats(client)
+    desired = _normalize_shipping_label_format(desired_format)
+    compact = desired.lower().replace(" ", "")
+    if compact.isdigit():
+        return int(compact)
+    for item in formats:
+        if str(item.get("id")) == compact:
+            return int(item["id"])
+
+    candidates = []
+    for item in formats:
+        name = (item.get("name") or "").strip()
+        layout = item.get("pageLayout") or {}
+        size = layout.get("size") or {}
+        width = size.get("x")
+        height = size.get("y")
+        dims = {int(round(width or 0)), int(round(height or 0))}
+        item_type = (item.get("pageType") or "").strip().upper()
+        address_possible = bool(item.get("isAddressPossible"))
+        score = 0
+        if compact in {"100x62", "62x100"}:
+            if dims == {62, 100}:
+                score += 100
+            if "BROTHER" in name.upper():
+                score += 50
+            if item_type == "LABELPRINTER":
+                score += 10
+            if address_possible:
+                score += 5
+        elif compact == "A4":
+            if "A4" in name.upper():
+                score += 100
+            if item_type == "REGULARPAGE":
+                score += 10
+            if address_possible:
+                score += 5
+        elif compact == "A5":
+            if "A5" in name.upper():
+                score += 100
+            if item_type == "LABELPRINTER":
+                score += 10
+            if address_possible:
+                score += 5
+        else:
+            if compact and compact in name.lower().replace(" ", ""):
+                score += 100
+        if score > 0:
+            candidates.append((score, int(item["id"])))
+    if candidates:
+        candidates.sort(key=lambda entry: (-entry[0], entry[1]))
+        return candidates[0][1]
+    raise RuntimeError(f"POST Seitenformat nicht gefunden: {desired_format}")
+
+
+def _resolve_post_product_selection(selection):
+    if not isinstance(selection, dict):
+        raise ValueError("POST Produkt fehlt.")
+    product_code = str(selection.get("product_code") or "").strip()
+    if product_code:
+        product = find_post_product(product_code)
+        if not product:
+            raise ValueError(f"POST Produktcode unbekannt: {product_code}")
+        return product
+
+    scope = str(selection.get("scope") or "domestic").strip()
+    base_key = str(selection.get("base_key") or "").strip()
+    option_codes = _normalize_post_option_codes(selection.get("option_codes") or [])
+    if not base_key:
+        raise ValueError("POST Grundprodukt fehlt.")
+
+    for group in list_post_base_products(scope=scope):
+        if group.get("base_key") != base_key:
+            continue
+        for bucket in ("untracked_variants", "tracked_variants"):
+            for variant in group.get(bucket, []):
+                if _normalize_post_option_codes(variant.get("addons") or []) == option_codes:
+                    product = find_post_product(variant["product_code"])
+                    if product:
+                        return product
+        break
+    raise ValueError("POST Produktkombination ist nicht verfuegbar.")
 
 
 def _gls_country_code(country_value):
@@ -1809,6 +2352,106 @@ def manual_label_print_mode_dialog(stdscr, current_mode):
     )
 
 
+def gls_pickup_product_dialog(stdscr, current_value):
+    return choice_dialog(
+        stdscr,
+        "GLS Produkt",
+        [
+            {"value": "PARCEL", "label": "PARCEL"},
+            {"value": "EXPRESS", "label": "EXPRESS"},
+        ],
+        (current_value or "PARCEL").strip().upper(),
+        cancel_returns_none=True,
+    )
+
+
+def gls_pickup_haz_goods_dialog(stdscr, current_value):
+    return choice_dialog(
+        stdscr,
+        "Gefahrgut",
+        [
+            {"value": "nein", "label": "Nein"},
+            {"value": "ja", "label": "Ja"},
+        ],
+        "ja" if current_value else "nein",
+        cancel_returns_none=True,
+    )
+
+
+# GLS-Abholung ist aktuell auskommentiert.
+# Der API-Pfad ist vorbereitet, aber fachlich noch nicht ausreichend gegen das GLS-Portal verifiziert
+# und deshalb vorerst experimentell/ungestestet.
+def create_gls_sporadic_collection_dialog(stdscr):
+    tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+    state = {
+        "pickup_date": tomorrow,
+        "parcel_count": "1",
+        "product": "PARCEL",
+        "expected_total_weight": "",
+        "contains_haz_goods": False,
+        "additional_information": "",
+    }
+    active = 0
+
+    while True:
+        fields = [
+            {"name": "pickup_date", "label": "Abholdatum", "value": state["pickup_date"]},
+            {"name": "parcel_count", "label": "Paketanzahl", "value": state["parcel_count"]},
+            {"name": "product", "label": "Produkt (F3)", "value": state["product"]},
+            {"name": "expected_total_weight", "label": "Gesamtgewicht kg", "value": state["expected_total_weight"]},
+            {"name": "contains_haz_goods", "label": "Gefahrgut (F4)", "value": "Ja" if state["contains_haz_goods"] else "Nein"},
+            {"name": "additional_information", "label": "Hinweis", "value": state["additional_information"]},
+        ]
+        result = form_dialog(
+            stdscr,
+            "GLS Abholung buchen",
+            fields,
+            initial_active=active,
+            footer_text="Enter weiter/buchen  F3 Produkt  F4 Gefahrgut  F9 Zurueck",
+            extra_actions=[
+                {"name": "product", "keys": {curses.KEY_F3}},
+                {"name": "haz", "keys": {curses.KEY_F4}},
+            ],
+        )
+        if result is None:
+            return None
+        if "__action__" in result:
+            state.update(result.get("__values__", {}))
+            active = result.get("__active__", active)
+            if result["__action__"] == "product":
+                chosen = gls_pickup_product_dialog(stdscr, state["product"])
+                if chosen:
+                    state["product"] = chosen
+            elif result["__action__"] == "haz":
+                chosen = gls_pickup_haz_goods_dialog(stdscr, state["contains_haz_goods"])
+                if chosen is not None:
+                    state["contains_haz_goods"] = chosen == "ja"
+            continue
+
+        state.update(result)
+        active = 0
+        try:
+            booking = gls_order_sporadic_collection(
+                preferred_pickup_date=state["pickup_date"],
+                number_of_parcels=state["parcel_count"],
+                product=state["product"],
+                expected_total_weight=state["expected_total_weight"],
+                contains_haz_goods=state["contains_haz_goods"],
+                additional_information=state["additional_information"],
+            )
+        except Exception as exc:
+            message_box(stdscr, "GLS Abholung", str(exc)[:220])
+            continue
+
+        estimated = booking.get("estimated_date") or state["pickup_date"]
+        message_box(
+            stdscr,
+            "GLS Abholung",
+            f"Abholung angefragt fuer {state['pickup_date']}. Bestaetigt: {estimated}",
+        )
+        return booking
+
+
 def _gls_api_json_request(url, credentials, payload=None):
     auth_raw = f"{credentials['user']}:{credentials['password']}"
     auth = base64.b64encode(auth_raw.encode("utf-8")).decode("ascii")
@@ -1838,6 +2481,86 @@ def _gls_api_json_request(url, credentials, payload=None):
         except json.JSONDecodeError:
             parsed = None
     return status_code, parsed, raw
+
+
+def _gls_sporadic_collection_url(credentials):
+    api_url = (credentials.get("api_url") or "").strip()
+    if not api_url:
+        raise RuntimeError("GLS API URL fehlt.")
+    base = api_url.rsplit("/", 1)[0] if "/" in api_url else api_url
+    return base.rstrip("/") + "/sporadiccollection"
+
+
+def gls_order_sporadic_collection(
+    preferred_pickup_date,
+    number_of_parcels,
+    product="PARCEL",
+    expected_total_weight=None,
+    contains_haz_goods=False,
+    additional_information="",
+):
+    creds = load_gls_credentials()
+    pickup_date = (preferred_pickup_date or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", pickup_date):
+        raise ValueError("Abholdatum muss im Format JJJJ-MM-TT sein.")
+    try:
+        parcel_count = int(number_of_parcels)
+    except (TypeError, ValueError):
+        raise ValueError("Paketanzahl ist ungueltig.")
+    if parcel_count <= 0:
+        raise ValueError("Paketanzahl muss groesser als 0 sein.")
+
+    product_value = (product or "PARCEL").strip().upper()
+    if product_value not in {"PARCEL", "EXPRESS"}:
+        raise ValueError("Produkt muss PARCEL oder EXPRESS sein.")
+
+    payload = {
+        "ContactID": creds["contact_id"],
+        "PreferredPickUpDate": pickup_date,
+        "NumberOfParcels": parcel_count,
+        "Product": product_value,
+    }
+    if expected_total_weight not in (None, ""):
+        try:
+            weight_value = float(expected_total_weight)
+        except (TypeError, ValueError):
+            raise ValueError("Gesamtgewicht ist ungueltig.")
+        if weight_value <= 0:
+            raise ValueError("Gesamtgewicht muss groesser als 0 sein.")
+        payload["ExpectedTotalWeight"] = round(weight_value, 3)
+    if contains_haz_goods:
+        payload["ContainsHazGoods"] = True
+    info_text = (additional_information or "").strip()
+    if info_text:
+        payload["AdditionalInformation"] = info_text[:200]
+
+    url = _gls_sporadic_collection_url(creds)
+    status_code, data, raw = _gls_api_json_request(url, creds, payload)
+    if status_code >= 400:
+        error_detail = _gls_error_summary(data, raw)
+        LOGGER.error(
+            "GLS SporadicCollection Fehler status=%s date=%s parcels=%s product=%s detail=%s",
+            status_code,
+            pickup_date,
+            parcel_count,
+            product_value,
+            error_detail or "-",
+        )
+        if error_detail:
+            raise RuntimeError(f"GLS Abholung Fehler HTTP {status_code}: {error_detail[:180]}")
+        raise RuntimeError(f"GLS Abholung Fehler HTTP {status_code}")
+
+    estimated_date = ""
+    if isinstance(data, dict):
+        estimated_date = (data.get("EstimatedPickUpDate") or "").strip()
+    return {
+        "url": url,
+        "requested_date": pickup_date,
+        "estimated_date": estimated_date or pickup_date,
+        "number_of_parcels": parcel_count,
+        "product": product_value,
+        "response": data,
+    }
 
 
 def _extract_first_pdf_blob(data):
@@ -1942,8 +2665,7 @@ def _build_test_label_pdf(order_name, shipment_reference, track_id):
 
 
 def _save_shipping_label_pdf(carrier, order_name, track_id, pdf_bytes, suffix=""):
-    configured_dir = os.path.expanduser((SETTINGS.get("shipping_label_output_dir") or "").strip())
-    output_dir = Path(configured_dir) if configured_dir else GLS_LABEL_DIR
+    output_dir = Path(get_shipping_label_output_dir())
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_order = _sanitize_order_reference(order_name)
     safe_track = "".join(ch for ch in (track_id or "unknown") if ch.isalnum() or ch in "-_") or "unknown"
@@ -1957,46 +2679,133 @@ def _save_shipping_label_pdf(carrier, order_name, track_id, pdf_bytes, suffix=""
     return str(output_path)
 
 
+def _merge_pdf_files(pdf_paths, output_path):
+    valid_paths = [str(Path(path)) for path in pdf_paths if path and os.path.isfile(path)]
+    if not valid_paths:
+        raise RuntimeError("Keine PDF-Dateien zum Zusammenfassen gefunden.")
+    if len(valid_paths) == 1:
+        shutil.copyfile(valid_paths[0], output_path)
+        return output_path
+
+    try:
+        from pypdf import PdfWriter, PdfReader  # type: ignore
+
+        writer = PdfWriter()
+        for path in valid_paths:
+            reader = PdfReader(path)
+            for page in reader.pages:
+                writer.add_page(page)
+        with open(output_path, "wb") as handle:
+            writer.write(handle)
+        return output_path
+    except Exception:
+        pass
+
+    try:
+        from PyPDF2 import PdfWriter, PdfReader  # type: ignore
+
+        writer = PdfWriter()
+        for path in valid_paths:
+            reader = PdfReader(path)
+            for page in reader.pages:
+                writer.add_page(page)
+        with open(output_path, "wb") as handle:
+            writer.write(handle)
+        return output_path
+    except Exception:
+        pass
+
+    if shutil.which("pdfunite"):
+        subprocess.run(
+            ["pdfunite", *valid_paths, output_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        return output_path
+
+    raise RuntimeError("PDF-Zusammenfuehrung nicht verfuegbar (pypdf/PyPDF2/pdfunite fehlt).")
+
+
 def _normalize_shipping_label_format(value):
-    raw = (value or "").strip().upper().replace(" ", "")
-    if raw in {"A4", "A5", "A6"}:
-        return raw
-    if raw in {"100X62", "62X100"}:
+    raw = (value or "").strip()
+    if not raw:
+        return "A6"
+    compact = raw.upper().replace(" ", "")
+    if compact in {"A4", "A5", "A6"}:
+        return compact
+    if compact in {"100X62", "62X100"}:
         return "100x62"
-    return "A6"
+    return raw
 
 
 def _shipping_printer_for_carrier(carrier):
     c = (carrier or "").strip().lower()
-    specific = (SETTINGS.get(f"shipping_label_printer_{c}") or "").strip() if c else ""
+    printer_field = _shipping_carrier_setting_field(c, "printer")
+    specific = (SETTINGS.get(printer_field) or "").strip() if printer_field else ""
     fallback = (SETTINGS.get("shipping_label_printer") or "").strip()
     return specific or fallback
 
 
 def _shipping_format_for_carrier(carrier):
     c = (carrier or "").strip().lower()
-    defaults = {"gls": "A6", "dhl": "A5", "post": "100x62"}
-    specific = SETTINGS.get(f"shipping_label_format_{c}") if c else None
+    defaults = {code: data.get("default_format", "A6") for code, data in SHIPPING_CARRIER_DEFINITIONS.items()}
+    format_field = _shipping_carrier_setting_field(c, "format")
+    specific = SETTINGS.get(format_field) if format_field else None
     fallback = SETTINGS.get("shipping_label_format", defaults.get(c, "A6"))
     return _normalize_shipping_label_format(specific or fallback or defaults.get(c, "A6"))
 
 
+def _delivery_note_format():
+    return _normalize_shipping_label_format(SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4")))
+
+
+def _cups_media_value_for_format(label_format):
+    normalized = _normalize_shipping_label_format(label_format)
+    if normalized == "A6":
+        return "A6"
+    if normalized == "A5":
+        return "A5"
+    if normalized == "A4":
+        return "A4"
+    if normalized == "100x62":
+        return "Custom.100x62mm"
+    return (label_format or "").strip() or None
+
+
+def _cups_label_print_options(label_format):
+    media = _cups_media_value_for_format(label_format)
+    options = []
+    if media:
+        options.extend(["-o", f"media={media}"])
+        options.extend(["-o", f"PageSize={media}"])
+    options.extend(
+        [
+            "-o",
+            "print-scaling=none",
+            "-o",
+            "fit-to-page=false",
+            "-o",
+            "scaling=100",
+            "-o",
+            "page-border=none",
+            "-o",
+            "number-up=1",
+        ]
+    )
+    return options
+
+
 def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
-    carrier_key = (carrier or active_shipping_carrier() or "gls").strip().lower()
+    carrier_key = effective_shipping_carrier(carrier)
     printer = _shipping_printer_for_carrier(carrier_key)
     if not printer:
         message_box(stdscr, "Fehler", f"Bitte Shift+F11: {carrier_key.upper()} Label Drucker setzen.")
         return False
     label_format = _shipping_format_for_carrier(carrier_key)
     cmd = ["lp", "-d", printer, "-t", title]
-    if label_format == "A6":
-        cmd.extend(["-o", "media=A6"])
-    elif label_format == "A5":
-        cmd.extend(["-o", "media=A5"])
-    elif label_format == "A4":
-        cmd.extend(["-o", "media=A4"])
-    elif label_format == "100x62":
-        cmd.extend(["-o", "media=Custom.100x62mm"])
+    cmd.extend(_cups_label_print_options(label_format))
     cmd.append(pdf_path)
     try:
         subprocess.run(
@@ -2018,7 +2827,7 @@ def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
     return True
 
 
-def _validate_order_for_gls(order):
+def _validate_shipping_address(order, require_country=False):
     checks = [
         ("shipping_name", "Empfaenger Name fehlt"),
         ("shipping_address1", "Empfaenger Strasse fehlt"),
@@ -2028,8 +2837,12 @@ def _validate_order_for_gls(order):
     for key, message in checks:
         if not (order.get(key) or "").strip():
             raise ValueError(message)
-    if not _gls_country_code(order.get("shipping_country")):
+    if require_country and not _gls_country_code(order.get("shipping_country")):
         raise ValueError("Empfaenger Land ungueltig oder fehlt (ISO2 erwartet, z.B. DE).")
+
+
+def _validate_order_for_gls(order):
+    _validate_shipping_address(order, require_country=True)
 
 
 def gls_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
@@ -2114,7 +2927,7 @@ def gls_create_label(order, weight_kg=1.0, shipment_reference=None, service_code
             raise RuntimeError("GLS Labelantwort ohne PDF-Daten.")
 
     label_path = _save_shipping_label_pdf("gls", order["order_name"], track_id, pdf_blob)
-    label_id = insert_gls_label_history(
+    label_id = insert_shipping_label_history(
         order=order,
         shipment_reference=shipment_reference,
         track_id=track_id,
@@ -2138,24 +2951,147 @@ def post_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     _creds = load_post_credentials()
     client = InternetmarkeClient(
         api_url=_creds["api_url"],
+        partner_id=_creds["partner_id"],
+        api_key=_creds["api_key"],
+        api_secret=_creds["api_secret"],
         user=_creds["user"],
         password=_creds["password"],
-        partner_id=_creds["partner_id"],
     )
     client.validate()
-    _weight_value = float(weight_kg)
+    try:
+        _weight_value = float(weight_kg)
+    except (TypeError, ValueError):
+        raise ValueError("Gewicht ist ungueltig.")
+    if _weight_value <= 0:
+        raise ValueError("Gewicht muss groesser als 0 sein.")
+    _weight_value = round(_weight_value, 3)
     _reference = _sanitize_order_reference(shipment_reference or order["order_name"])
-    raise RuntimeError("POST INTERNETMARKE ist vorbereitet, API-Call folgt im naechsten Schritt.")
+    product = _resolve_post_product_selection(service_codes)
+    page_format_id = _resolve_post_page_format_id(client, _shipping_format_for_carrier("post"))
+    sender = _post_sender_address(client)
+    receiver = _post_receiver_address(order)
+    total_cents = int(product.get("price_cents") or 0)
+    if total_cents <= 0:
+        raise RuntimeError("POST Produktpreis fehlt oder ist ungueltig.")
+
+    position = {
+        "productCode": int(product["product_code"]),
+        "voucherLayout": "ADDRESS_ZONE",
+        "positionType": "AppShoppingCartPDFPosition",
+        "position": {"page": 1, "labelX": 1, "labelY": 1},
+        "address": {
+            "sender": sender,
+            "receiver": receiver,
+        },
+    }
+    try:
+        response, pdf_blob = client.checkout_pdf_binary(
+            shop_order_id=_reference[:18],
+            total_cents=total_cents,
+            page_format_id=page_format_id,
+            positions=[position],
+            create_manifest=False,
+            create_shipping_list="0",
+            dpi="DPI300",
+            direct_checkout=True,
+        )
+    except Exception:
+        LOGGER.exception(
+            "POST Label-Checkout fehlgeschlagen reference=%s product_code=%s product_name=%s page_format_id=%s country=%s",
+            _reference,
+            product.get("product_code"),
+            product.get("name"),
+            page_format_id,
+            order.get("shipping_country"),
+        )
+        raise
+    shopping_cart = response.get("shoppingCart") if isinstance(response.get("shoppingCart"), dict) else {}
+    voucher_list = shopping_cart.get("voucherList") if isinstance(shopping_cart.get("voucherList"), list) else []
+    first_voucher = voucher_list[0] if voucher_list else {}
+    track_id = (first_voucher.get("trackId") or "").strip() or (first_voucher.get("voucherId") or "").strip()
+    parcel_number = (first_voucher.get("trackId") or "").strip() or None
+    tracking_url = _tracking_url_for_carrier("post", track_id or parcel_number or _reference)
+    label_path = _save_shipping_label_pdf("post", order["order_name"], track_id or _reference, pdf_blob)
+    label_id = insert_shipping_label_history(
+        order=order,
+        shipment_reference=_reference,
+        track_id=track_id or _reference,
+        parcel_number=parcel_number,
+        label_path=label_path,
+        status="CREATED",
+        weight_kg=_weight_value,
+        carrier="post",
+        tracking_url=tracking_url,
+    )
+    return {
+        "label_id": label_id,
+        "track_id": track_id or _reference,
+        "parcel_number": parcel_number,
+        "label_path": label_path,
+        "shipment_reference": _reference,
+        "post_product_code": product["product_code"],
+        "post_product_name": product["name"],
+        "tracking_url": tracking_url,
+    }
+
+
+def free_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
+    _validate_shipping_address(order, require_country=False)
+    try:
+        weight_value = round(float(weight_kg), 3)
+    except (TypeError, ValueError):
+        weight_value = 0.0
+    shipment_reference = _sanitize_order_reference(shipment_reference or order["order_name"])
+    internal_id = f"FREE{datetime.datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    template_path = get_free_label_template_path()
+    if template_path and not template_path.exists():
+        raise FileNotFoundError(f"Adresslabel Vorlage fehlt: {template_path.name}")
+
+    with tempfile.NamedTemporaryFile(prefix="free-label-", suffix=".pdf", delete=False) as handle:
+        temp_path = handle.name
+    try:
+        build_address_label_pdf(
+            template_path,
+            temp_path,
+            sender=get_free_label_sender(),
+            receiver=_free_label_receiver(order),
+            page_size=_shipping_format_for_carrier("free"),
+        )
+        pdf_blob = Path(temp_path).read_bytes()
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+    label_path = _save_shipping_label_pdf("free", order["order_name"], internal_id, pdf_blob)
+    label_id = insert_shipping_label_history(
+        order=order,
+        shipment_reference=shipment_reference,
+        track_id=internal_id,
+        parcel_number=None,
+        label_path=label_path,
+        status="CREATED",
+        weight_kg=weight_value,
+        carrier="free",
+    )
+    return {
+        "label_id": label_id,
+        "track_id": internal_id,
+        "parcel_number": None,
+        "label_path": label_path,
+        "shipment_reference": shipment_reference,
+    }
 
 
 def test_create_label(order, weight_kg=1.0, shipment_reference=None, service_codes=None):
-    _validate_order_for_gls(order)
+    _validate_shipping_address(order, require_country=False)
     shipment_reference = _sanitize_order_reference(shipment_reference or order["order_name"])
     track_id = f"TEST{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     parcel_number = f"999{datetime.datetime.now().strftime('%H%M%S')}"
     pdf_blob = _build_test_label_pdf(order.get("order_name") or "TEST", shipment_reference, track_id)
     label_path = _save_shipping_label_pdf("test", order["order_name"], track_id, pdf_blob)
-    label_id = insert_gls_label_history(
+    label_id = insert_shipping_label_history(
         order=order,
         shipment_reference=shipment_reference,
         track_id=track_id,
@@ -2174,16 +3110,40 @@ def test_create_label(order, weight_kg=1.0, shipment_reference=None, service_cod
     }
 
 
+def _gls_label_identifiers(label_row):
+    identifiers = []
+    for value in (label_row.get("parcel_number"), label_row.get("track_id")):
+        normalized = (value or "").strip()
+        if normalized and normalized not in identifiers:
+            identifiers.append(normalized)
+    return identifiers
+
+
 def gls_reprint_label(label_row):
     creds = load_gls_credentials()
-    track_id = (label_row.get("track_id") or "").strip()
-    if not track_id:
-        raise ValueError("TrackID fehlt")
-    url = f"{creds['api_url'].rstrip('/')}/reprint/{track_id}"
-    status_code, data, raw = _gls_api_json_request(url, creds)
+    identifiers = _gls_label_identifiers(label_row)
+    if not identifiers:
+        raise ValueError("TrackID/ParcelNumber fehlt")
+    status_code = None
+    data = None
+    raw = b""
+    chosen_identifier = identifiers[0]
+    for identifier in identifiers:
+        url = f"{creds['api_url'].rstrip('/')}/reprint/{identifier}"
+        status_code, data, raw = _gls_api_json_request(url, creds)
+        chosen_identifier = identifier
+        if status_code < 400 or status_code != 404:
+            break
+    if status_code is None:
+        raise RuntimeError("GLS Reprint fehlgeschlagen.")
     if status_code >= 400:
         error_detail = _gls_error_summary(data, raw)
-        LOGGER.error("GLS Reprint Fehler status=%s track_id=%s detail=%s", status_code, track_id, error_detail or "-")
+        LOGGER.error(
+            "GLS Reprint Fehler status=%s identifiers=%s detail=%s",
+            status_code,
+            ",".join(identifiers),
+            error_detail or "-",
+        )
         if error_detail:
             raise RuntimeError(f"GLS Reprint Fehler HTTP {status_code}: {error_detail[:180]}")
         raise RuntimeError(f"GLS Reprint Fehler HTTP {status_code}")
@@ -2194,22 +3154,37 @@ def gls_reprint_label(label_row):
     if not pdf_blob:
         raise RuntimeError("GLS Reprint ohne PDF-Daten.")
 
-    label_path = _save_shipping_label_pdf("gls", label_row["order_name"], track_id, pdf_blob, suffix="reprint")
-    update_gls_label_reprint(label_row["id"], label_path)
+    label_path = _save_shipping_label_pdf("gls", label_row["order_name"], chosen_identifier, pdf_blob, suffix="reprint")
+    update_shipping_label_reprint(label_row["id"], label_path)
     return label_path
 
 
 def gls_cancel_label(label_row):
     creds = load_gls_credentials()
-    track_id = (label_row.get("track_id") or "").strip()
-    if not track_id:
-        raise ValueError("TrackID fehlt")
-    url = f"{creds['api_url'].rstrip('/')}/cancel/{track_id}"
-    status_code, data, raw = _gls_api_json_request(url, creds)
+    identifiers = _gls_label_identifiers(label_row)
+    if not identifiers:
+        raise ValueError("TrackID/ParcelNumber fehlt")
+    status_code = None
+    data = None
+    raw = b""
+    chosen_identifier = identifiers[0]
+    for identifier in identifiers:
+        url = f"{creds['api_url'].rstrip('/')}/cancel/{identifier}"
+        status_code, data, raw = _gls_api_json_request(url, creds)
+        chosen_identifier = identifier
+        if status_code < 400 or status_code != 404:
+            break
+    if status_code is None:
+        raise RuntimeError("GLS Storno fehlgeschlagen.")
     if status_code >= 400:
         error_detail = _gls_error_summary(data, raw)
-        update_gls_label_status(label_row["id"], "CANCEL_FAILED", f"HTTP {status_code} {error_detail[:120]}".strip())
-        LOGGER.error("GLS Storno Fehler status=%s track_id=%s detail=%s", status_code, track_id, error_detail or "-")
+        update_shipping_label_status(label_row["id"], "CANCEL_FAILED", f"HTTP {status_code} {error_detail[:120]}".strip())
+        LOGGER.error(
+            "GLS Storno Fehler status=%s identifiers=%s detail=%s",
+            status_code,
+            ",".join(identifiers),
+            error_detail or "-",
+        )
         if error_detail:
             raise RuntimeError(f"GLS Storno Fehler HTTP {status_code}: {error_detail[:180]}")
         raise RuntimeError(f"GLS Storno Fehler HTTP {status_code}")
@@ -2218,12 +3193,24 @@ def gls_cancel_label(label_row):
     if isinstance(data, dict):
         result = (data.get("result") or "").strip().upper()
     if result == "CANCELLED":
-        update_gls_label_status(label_row["id"], "CANCELLED")
+        update_shipping_label_status(label_row["id"], "CANCELLED")
     elif result == "CANCELLATION_PENDING":
-        update_gls_label_status(label_row["id"], "CANCELLATION_PENDING")
+        update_shipping_label_status(label_row["id"], "CANCELLATION_PENDING")
     else:
-        update_gls_label_status(label_row["id"], "CANCEL_REQUESTED")
+        update_shipping_label_status(label_row["id"], "CANCEL_REQUESTED")
     return result or "CANCEL_REQUESTED"
+
+
+SHIPPING_CARRIER_RUNTIME_SPECS = {
+    "gls": {
+        "create_label": "gls_create_label",
+        "reprint_label": "gls_reprint_label",
+        "cancel_label": "gls_cancel_label",
+    },
+    "post": {"create_label": "post_create_label"},
+    "free": {"create_label": "free_create_label"},
+    "test": {"create_label": "test_create_label"},
+}
 
 
 def _normalize_shipping_services(raw_value):
@@ -2240,8 +3227,6 @@ def _normalize_shipping_services(raw_value):
         if code in allowed and code not in normalized:
             normalized.append(code)
 
-    if "service_flexdelivery" not in normalized:
-        normalized.insert(0, "service_flexdelivery")
     return normalized
 
 
@@ -2251,7 +3236,7 @@ def _shipping_services_summary(service_codes):
     return ", ".join(labels)
 
 
-def shipping_services_dialog(stdscr, current_services):
+def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False):
     selected_codes = set(_normalize_shipping_services(current_services))
     selected = 0
     top_index = 0
@@ -2289,7 +3274,7 @@ def shipping_services_dialog(stdscr, current_services):
             else:
                 win.addstr(y_pos, 1, line.ljust(width - 2))
 
-        footer = "Space/Enter umschalten  F2 Speichern  F9 Zurueck"
+        footer = "Space umschalten  Enter Uebernehmen  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 1, 1, _fit(footer, width - 2))
         win.attrset(curses.color_pair(1))
@@ -2297,8 +3282,10 @@ def shipping_services_dialog(stdscr, current_services):
 
         key = win.get_wch()
         if key in (27, curses.KEY_F9):
+            if cancel_returns_none:
+                return None
             return _normalize_shipping_services(current_services)
-        if key == curses.KEY_F2:
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return _normalize_shipping_services(list(selected_codes))
         if key == curses.KEY_DOWN:
             selected = move_selection(SHIPPING_SERVICE_OPTIONS, selected, 1)
@@ -2306,7 +3293,7 @@ def shipping_services_dialog(stdscr, current_services):
         if key == curses.KEY_UP:
             selected = move_selection(SHIPPING_SERVICE_OPTIONS, selected, -1)
             continue
-        if key in (" ", 10, 13, "\n", "\r", curses.KEY_ENTER):
+        if key == " ":
             option = SHIPPING_SERVICE_OPTIONS[selected]
             if option.get("locked"):
                 continue
@@ -2317,40 +3304,60 @@ def shipping_services_dialog(stdscr, current_services):
                 selected_codes.add(code)
 
 
-def active_shipping_carrier():
-    carrier = (SETTINGS.get("shipping_carrier") or "gls").strip().lower()
-    if carrier not in {"gls", "dhl", "post"}:
-        return "gls"
-    return carrier
+def _select_shipping_carrier_options(stdscr, carrier, scope="domestic"):
+    mode = _shipping_carrier_option_mode(carrier)
+    if mode == "post_products":
+        return _post_selection_dialog(stdscr, scope=scope)
+    if mode == "gls_services":
+        return shipping_services_dialog(
+            stdscr,
+            SETTINGS.get("shipping_services", []),
+            cancel_returns_none=True,
+        )
+    return []
+
+
+def remember_shipping_carrier(carrier):
+    global _SHIPPING_CARRIER_CACHE
+    normalized = (carrier or "").strip().lower()
+    if normalized in SHIPPING_CARRIER_DEFINITIONS:
+        _SHIPPING_CARRIER_CACHE = normalized
+
+
+def last_shipping_carrier():
+    cached = (_SHIPPING_CARRIER_CACHE or "").strip().lower()
+    active = _active_shipping_carriers()
+    if cached in active:
+        return cached
+    return active[0] if active else "gls"
 
 
 def effective_shipping_carrier(requested_carrier=None):
-    carrier = (requested_carrier or active_shipping_carrier() or "gls").strip().lower()
-    if carrier in IMPLEMENTED_SHIPPING_CARRIERS:
+    active = _active_shipping_carriers()
+    carrier = (requested_carrier or last_shipping_carrier() or (active[0] if active else "gls")).strip().lower()
+    if carrier in SHIPPING_CARRIER_DEFINITIONS and (carrier in active or carrier == "test"):
         return carrier
-    return "gls"
+    return active[0] if active else "gls"
+
+
+def _shipping_carrier_runtime(carrier):
+    spec = SHIPPING_CARRIER_RUNTIME_SPECS.get((carrier or "").strip().lower())
+    if not spec:
+        return None
+    return ShippingCarrierRuntime(
+        create_label=globals().get(spec.get("create_label")),
+        reprint_label=globals().get(spec.get("reprint_label")),
+        cancel_label=globals().get(spec.get("cancel_label")),
+    )
 
 
 def create_shipping_label(order, weight_kg=None, shipment_reference=None, service_codes=None, carrier=None):
-    selected_carrier = (carrier or active_shipping_carrier()).strip().lower()
+    selected_carrier = effective_shipping_carrier(carrier)
     if weight_kg is None:
         weight_kg, _total_grams = calculate_order_shipping_weight(order)
-    if selected_carrier == "gls":
-        return gls_create_label(
-            order,
-            weight_kg=weight_kg,
-            shipment_reference=shipment_reference,
-            service_codes=service_codes,
-        )
-    if selected_carrier == "post":
-        return post_create_label(
-            order,
-            weight_kg=weight_kg,
-            shipment_reference=shipment_reference,
-            service_codes=service_codes,
-        )
-    if selected_carrier == "test":
-        return test_create_label(
+    runtime = _shipping_carrier_runtime(selected_carrier)
+    if runtime and runtime.create_label:
+        return runtime.create_label(
             order,
             weight_kg=weight_kg,
             shipment_reference=shipment_reference,
@@ -2359,17 +3366,29 @@ def create_shipping_label(order, weight_kg=None, shipment_reference=None, servic
     raise RuntimeError(f"Dienstleister {selected_carrier} ist noch nicht implementiert.")
 
 
+def _created_label_display_value(carrier, created):
+    normalized = (carrier or "").strip().lower()
+    if normalized == "free":
+        return "Adresslabel"
+    return (created.get("parcel_number") or created.get("track_id") or created.get("shipment_reference") or "-").strip() or "-"
+
+
 def reprint_shipping_label(label_row):
+    existing_path = (label_row.get("label_path") or "").strip()
+    if existing_path and os.path.isfile(existing_path):
+        return existing_path
     carrier = (label_row.get("carrier") or "gls").strip().lower()
-    if carrier == "gls":
-        return gls_reprint_label(label_row)
+    runtime = _shipping_carrier_runtime(carrier)
+    if runtime and runtime.reprint_label:
+        return runtime.reprint_label(label_row)
     raise RuntimeError(f"Reprint fuer {carrier} ist noch nicht implementiert.")
 
 
 def cancel_shipping_label(label_row):
     carrier = (label_row.get("carrier") or "gls").strip().lower()
-    if carrier == "gls":
-        return gls_cancel_label(label_row)
+    runtime = _shipping_carrier_runtime(carrier)
+    if runtime and runtime.cancel_label:
+        return runtime.cancel_label(label_row)
     raise RuntimeError(f"Storno fuer {carrier} ist noch nicht implementiert.")
 
 
@@ -2711,6 +3730,7 @@ def item_info_dialog(stdscr, item):
     description_lines = clean_shopify_description(item.get("shopify_description")).splitlines()
     description_top = 0
 
+    footer = " PgUp/PgDn oder Pfeile scrollen  F9/Esc schliessen "
     while True:
         draw_shadow(stdscr, y, x, height, width)
         win = curses.newwin(height, width, y, x)
@@ -2743,13 +3763,18 @@ def item_info_dialog(stdscr, item):
             desc_win.addstr(1 + index, 2, line[: desc_width - 4])
 
         win.attrset(curses.color_pair(3))
-        footer = " PgUp/PgDn oder Pfeile scrollen  F9/Esc schliessen "
-        win.addstr(height - 1, 1, " " * (width - 2))
-        win.addstr(height - 1, 1, footer[: width - 2])
+        try:
+            win.addstr(height - 1, 1, " " * max(0, width - 2))
+            win.addstr(height - 1, 1, footer[: max(0, width - 2)])
+        except curses.error:
+            pass
         win.refresh()
 
-        key = win.get_wch()
-        if key in (27, curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        if key in (27, "\x1b", curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
             return
         if key == curses.KEY_NPAGE:
             description_top = min(max(0, len(wrapped_description) - visible_desc_rows), description_top + visible_desc_rows)
@@ -2844,6 +3869,43 @@ def draw_shadow(stdscr, y, x, h, w):
     shadow.bkgd(" ", curses.color_pair(3))
     shadow.erase()
     shadow.refresh()
+
+
+def _scrolling_footer_slice(text, width):
+    width = max(0, int(width))
+    if width <= 0:
+        return ""
+    text = str(text or "")
+    if len(text) <= width:
+        return text.ljust(width)
+    gap = "   "
+    cycle = text + gap
+    scroll_speed = 1.0
+    start_pause = 6.0
+    end_pause = 2.5
+    scroll_frames = len(cycle)
+    scroll_duration = scroll_frames / scroll_speed
+    cycle_duration = start_pause + scroll_duration + end_pause
+    phase = time.monotonic() % cycle_duration
+    if phase < start_pause:
+        offset = 0
+    elif phase >= start_pause + scroll_duration:
+        offset = scroll_frames - 1
+    else:
+        offset = min(scroll_frames - 1, int((phase - start_pause) * scroll_speed))
+    window = cycle[offset:] + cycle[:offset] + cycle
+    return window[:width]
+
+
+def draw_footer_line(win, y, x, width, text):
+    width = max(0, int(width))
+    if width <= 0:
+        return
+    try:
+        win.addstr(y, x, " " * width)
+        win.addstr(y, x, _scrolling_footer_slice(text, width))
+    except curses.error:
+        return
 
 
 def draw_panel(win, title, lines, selected, top_index, active):
@@ -2955,15 +4017,23 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     if external_mode == "only":
         focus = focus[:-1] + t("view_external")
 
-    stdscr.addstr(h-2, 0, " "*(w-1))
+    try:
+        stdscr.addstr(h-2, 0, " " * max(0, w - 1))
+        if filter_text:
+            stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[: max(0, w - 1)])
+        else:
+            stdscr.addstr(h-2, 0, focus[: max(0, w - 1)])
+    except curses.error:
+        pass
+    sync_label = format_shopify_sync_status_label()
+    sync_x = max(0, w - len(sync_label) - 1)
+    if sync_x > 4:
+        try:
+            stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)])
+        except curses.error:
+            pass
 
-    if filter_text:
-        stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[:w-1])
-    else:
-        stdscr.addstr(h-2, 0, focus[:w-1])
-
-    stdscr.addstr(h-1, 0, " "*(w-1))
-    stdscr.addstr(h-1, 0, status[:w-1])
+    draw_footer_line(stdscr, h - 1, 0, w - 1, status)
 
     stdscr.refresh()
 
@@ -3056,7 +4126,7 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
     active = max(0, min(initial_active, len(fields) - 1))
     cursor_positions = [len(value) for value in values]
     scroll_offsets = [0 for _ in values]
-    footer = footer_text or "Enter weiter  ↑↓ wechseln  F2 Speichern  F9 Abbrechen"
+    footer = footer_text or "Enter weiter/speichern  ↑↓ wechseln  F9 Abbrechen"
     extra_actions = extra_actions or []
     field_validators = field_validators or {}
 
@@ -3086,16 +4156,16 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
             row = 2 + i
             label = field["label"]
             val = values[i]
-
-            if i == active:
-                win.attron(curses.color_pair(2))
-
+            is_active = i == active
+            if is_active:
+                win.attrset(curses.color_pair(2))
+            else:
+                win.attrset(curses.color_pair(1))
             win.addstr(row, 2, f"{label}: ")
-            
+
             xpos = len(label) + 4
 
-            if i == active:
-                win.attron(curses.color_pair(2))
+            if is_active:
                 field_width = max(1, width - xpos - 2)
                 normalize_view(i, field_width)
                 visible = val[scroll_offsets[i]: scroll_offsets[i] + field_width]
@@ -3103,11 +4173,9 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
                 visible = val[-(width - xpos - 2):]
 
             win.addstr(row, xpos, visible.ljust(width - xpos - 2))
+            win.attrset(curses.color_pair(1))
 
-
-
-
-        win.addstr(height - 2, 2, footer[:width - 4])
+        draw_footer_line(win, height - 2, 2, width - 4, footer)
         
         cursor_y = 2 + active
 
@@ -3124,7 +4192,13 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
         win.refresh()
 
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
 
         if key in (27, curses.KEY_F9):
             return None
@@ -3137,10 +4211,13 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
                     "__active__": active,
                 }
 
-        if key == curses.KEY_F2:
-            return {fields[i]["name"]: values[i] for i in range(len(fields))}
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            if active >= len(fields) - 1:
+                return {fields[i]["name"]: values[i] for i in range(len(fields))}
+            active = (active + 1) % len(fields)
+            continue
 
-        if key in (curses.KEY_DOWN, '\n'):
+        if key == curses.KEY_DOWN:
             active = (active + 1) % len(fields)
             continue
 
@@ -3286,6 +4363,37 @@ def _lpstat_env():
     return env
 
 
+def _parse_cups_media_options(output):
+    values = []
+    seen = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            continue
+        key, remainder = line.split(":", 1)
+        key = key.strip().split("/", 1)[0]
+        if key not in {"PageSize", "PageRegion", "media"}:
+            continue
+        for token in remainder.strip().split():
+            raw_value = token.lstrip("*").strip()
+            if not raw_value:
+                continue
+            if "/" in raw_value:
+                value, label = raw_value.split("/", 1)
+            else:
+                value, label = raw_value, raw_value
+            value = value.strip()
+            label = label.strip() or value
+            if not value:
+                continue
+            if value not in seen:
+                seen.add(value)
+                values.append({"value": value, "label": label})
+    return values
+
+
 def get_cups_printers():
     try:
         PRINT_LOGGER.debug("Lade Drucker mit lpstat -p")
@@ -3325,6 +4433,39 @@ def get_cups_printers():
         default_printer = None
 
     return printers, default_printer, None
+
+
+def get_cups_printer_media_options(printer_name):
+    printer = (printer_name or "").strip()
+    if not printer:
+        return [], "Bitte zuerst einen Drucker waehlen."
+    try:
+        result = subprocess.run(
+            ["lpoptions", "-p", printer, "-l"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            env=_lpstat_env(),
+        )
+    except FileNotFoundError:
+        return [], "lpoptions/CUPS ist auf diesem System nicht verfuegbar."
+    except subprocess.CalledProcessError as exc:
+        error_text = (exc.stderr or str(exc)).strip()
+        return [], error_text or "Druckerformate konnten nicht geladen werden."
+    options = _parse_cups_media_options(result.stdout)
+    return options, None
+
+
+def cups_media_dialog(stdscr, printer_name, current_value, title):
+    options, error = get_cups_printer_media_options(printer_name)
+    if error:
+        message_box(stdscr, "Formate", error[:56])
+        return current_value
+    if not options:
+        message_box(stdscr, "Formate", "Keine CUPS-Formate fuer Drucker gefunden.")
+        return current_value
+    return choice_dialog(stdscr, title, options, current_value)
 
 
 def cups_printer_dialog(stdscr, current_printer):
@@ -3473,7 +4614,7 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
 
         for row_index, option in enumerate(options[top_index:top_index + visible_rows]):
             real_index = top_index + row_index
-            line = f"{option['label']} ({option['value']})"
+            line = str(option.get("label") or option.get("value") or "")
             y_pos = 2 + row_index
             if real_index == selected:
                 win.attrset(curses.color_pair(2))
@@ -3502,8 +4643,263 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
             return options[selected]["value"]
 
 
+def toggle_choice_dialog(stdscr, title, options, selected_values, footer_text=None):
+    selected_set = {str(value) for value in (selected_values or [])}
+    selected = 0
+    top_index = 0
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(86, w - 4)
+        height = min(max(10, len(options) + 5), h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+
+        visible_rows = max(1, height - 4)
+        if selected < top_index:
+            top_index = selected
+        if selected >= top_index + visible_rows:
+            top_index = selected - visible_rows + 1
+
+        for row_index, option in enumerate(options[top_index:top_index + visible_rows]):
+            real_index = top_index + row_index
+            marker = "[x]" if str(option["value"]) in selected_set else "[ ]"
+            line = f"{marker} {option['label']}"
+            y_pos = 2 + row_index
+            if real_index == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(y_pos, 1, _fit(line, width - 2).ljust(width - 2))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(y_pos, 1, _fit(line, width - 2).ljust(width - 2))
+
+        footer = footer_text or "Space umschalten  Enter Uebernehmen  F9 Zurueck"
+        win.addstr(height - 2, 2, _fit(footer, width - 4))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return None
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            return [option["value"] for option in options if str(option["value"]) in selected_set]
+        if key == curses.KEY_DOWN:
+            selected = move_selection(options, selected, 1)
+            continue
+        if key == curses.KEY_UP:
+            selected = move_selection(options, selected, -1)
+            continue
+        if key == " ":
+            value = str(options[selected]["value"])
+            if value in selected_set:
+                selected_set.remove(value)
+            else:
+                selected_set.add(value)
+
+
+def _post_base_product_options(scope="domestic"):
+    options = []
+    for group in list_post_base_products(scope=scope):
+        label = group.get("base_label") or group.get("base_key") or "-"
+        prices = [item.get("price_cents") for item in group.get("untracked_variants", []) + group.get("tracked_variants", []) if item.get("price_cents") is not None]
+        if prices:
+            min_price = min(prices) / 100.0
+            label = f"{label} ab {min_price:.2f} EUR"
+        options.append({"value": group["base_key"], "label": label})
+    return options
+
+
+def _post_group_for_base_key(base_key, scope="domestic"):
+    for group in list_post_base_products(scope=scope):
+        if group.get("base_key") == base_key:
+            return group
+    return None
+
+
+def post_product_dialog(stdscr, current_selection=None, scope="domestic"):
+    current_selection = current_selection or {}
+    base_key = str(current_selection.get("base_key") or "").strip()
+    options = _post_base_product_options(scope=scope)
+    if not options:
+        message_box(stdscr, "POST", "Keine POST-Produkte verfuegbar.")
+        return None
+    if not base_key:
+        base_key = options[0]["value"]
+
+    while True:
+        chosen_base = choice_dialog(
+            stdscr,
+            "POST Grundprodukt",
+            options,
+            base_key,
+            cancel_returns_none=True,
+        )
+        if chosen_base is None:
+            return None
+        group = _post_group_for_base_key(chosen_base, scope=scope)
+        if not group:
+            message_box(stdscr, "POST", "POST Grundprodukt nicht gefunden.")
+            return None
+
+        selected_option_codes = _normalize_post_option_codes(current_selection.get("option_codes") or [])
+        available_option_codes = group.get("option_codes") or []
+        selected_option_codes = [code for code in selected_option_codes if code in available_option_codes]
+        if available_option_codes:
+            option_items = []
+            option_label_map = {}
+            for variant in group.get("untracked_variants", []) + group.get("tracked_variants", []):
+                for code, label in zip(variant.get("addons") or [], variant.get("addon_labels") or []):
+                    option_label_map.setdefault(code, label)
+            for code in available_option_codes:
+                option_label = option_label_map.get(code, code)
+                matching_prices = [
+                    (variant.get("price_cents") or 0) / 100.0
+                    for variant in group.get("untracked_variants", []) + group.get("tracked_variants", [])
+                    if code in (variant.get("addons") or [])
+                ]
+                if matching_prices:
+                    option_label = f"{option_label} ab {min(matching_prices):.2f} EUR"
+                option_items.append({"value": code, "label": option_label})
+            toggled = toggle_choice_dialog(
+                stdscr,
+                f"POST Optionen: {group.get('base_label')}",
+                option_items,
+                selected_option_codes,
+                footer_text="Space umschalten  Enter Weiter  F9 Zurueck",
+            )
+            if toggled is None:
+                base_key = chosen_base
+                continue
+            selected_option_codes = _normalize_post_option_codes(toggled)
+        else:
+            selected_option_codes = []
+
+        try:
+            product = _resolve_post_product_selection(
+                {
+                    "scope": scope,
+                    "base_key": chosen_base,
+                    "option_codes": selected_option_codes,
+                }
+            )
+        except Exception as exc:
+            message_box(stdscr, "POST", str(exc)[:56])
+            base_key = chosen_base
+            continue
+
+        return {
+            "scope": scope,
+            "base_key": chosen_base,
+            "option_codes": selected_option_codes,
+            "product_code": product["product_code"],
+            "selection_label": product["selection_label"],
+            "name": product["name"],
+            "price_eur": product["price_eur"],
+        }
+
+
+def _shipping_printer_tab_fields():
+    fields = [
+        ("picklist_printer", "field_picklist_printer"),
+        ("delivery_note_printer", "field_delivery_printer"),
+        ("delivery_note_format", "field_delivery_format"),
+    ]
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        printer_label_key = definition.get("printer_field_label_key")
+        if printer_field and printer_label_key:
+            fields.append((printer_field, printer_label_key))
+    fields.append(("shipping_label_printer", "field_shipping_printer_fallback"))
+    return fields
+
+
+def _shipping_settings_tab_fields():
+    fields = [
+        ("shipping_label_output_dir", "field_shipping_label_output_dir"),
+        ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
+        ("shipping_active_carriers_display", "field_shipping_active_carriers"),
+    ]
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        fields.append((f"_heading_{code}", definition.get("label") or code.upper()))
+        format_field = definition.get("format_field")
+        format_label_key = definition.get("format_field_label_key")
+        if format_field and format_label_key:
+            fields.append((format_field, format_label_key))
+        template_field = definition.get("template_field")
+        template_label_key = definition.get("template_field_label_key")
+        if template_field and template_label_key:
+            fields.append((template_field, template_label_key))
+        tracking_mode_field = definition.get("tracking_mode_field")
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_mode_field:
+            fields.append((tracking_mode_field, f"field_{tracking_mode_field}"))
+        if tracking_url_field:
+            fields.append((tracking_url_field, f"field_{tracking_url_field}"))
+        fields.extend(definition.get("extra_settings_fields") or [])
+    return fields
+
+
+def _shipping_settings_initial_values():
+    values = {
+        "shipping_active_carriers": _normalize_active_shipping_carriers(
+            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+        ),
+        "shipping_active_carriers_display": _shipping_active_carriers_summary(
+            SETTINGS.get("shipping_active_carriers", DEFAULT_ACTIVE_SHIPPING_CARRIERS)
+        ),
+        "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
+        "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
+        "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
+        "shipping_services": _normalize_shipping_services(SETTINGS.get("shipping_services", [])),
+        "shipping_services_display": _shipping_services_summary(SETTINGS.get("shipping_services", [])),
+        "shipping_packaging_weight_grams": str(
+            SETTINGS.get("shipping_packaging_weight_grams", DEFAULT_SETTINGS.get("shipping_packaging_weight_grams", 400))
+        ),
+    }
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        if printer_field:
+            values[printer_field] = SETTINGS.get(printer_field, "")
+        format_field = definition.get("format_field")
+        if format_field:
+            values[format_field] = _normalize_shipping_label_format(
+                SETTINGS.get(format_field, definition.get("default_format", "A6"))
+            )
+        tracking_mode_field = definition.get("tracking_mode_field")
+        if tracking_mode_field:
+            values[tracking_mode_field] = (
+                SETTINGS.get(tracking_mode_field)
+                or DEFAULT_SETTINGS.get(tracking_mode_field, "company")
+            ).strip().lower()
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_url_field:
+            values[tracking_url_field] = SETTINGS.get(tracking_url_field, "")
+        template_field = definition.get("template_field")
+        if template_field:
+            values[template_field] = SETTINGS.get(template_field, "")
+        for field_name, _label_key in definition.get("extra_settings_fields") or []:
+            if field_name == "shipping_services_display":
+                continue
+            values[field_name] = SETTINGS.get(field_name, "")
+    return values
+
+
 def settings_dialog(stdscr):
     global SETTINGS
+
+    shipping_printer_fields = _shipping_printer_field_map()
+    shipping_format_fields = _shipping_format_field_map()
+    shipping_template_fields = _shipping_template_field_map()
+    shipping_tracking_mode_fields = _shipping_tracking_mode_field_map()
 
     values = {
         "db_host": SETTINGS["db_host"],
@@ -3523,35 +4919,9 @@ def settings_dialog(stdscr):
         "location_regex_platz": SETTINGS.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
         "picklist_printer": SETTINGS["picklist_printer"],
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
-        "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
-        "shipping_label_printer_gls": SETTINGS.get("shipping_label_printer_gls", ""),
-        "shipping_label_printer_dhl": SETTINGS.get("shipping_label_printer_dhl", ""),
-        "shipping_label_printer_post": SETTINGS.get("shipping_label_printer_post", ""),
-        "shipping_carrier": (SETTINGS.get("shipping_carrier") or "gls").strip().lower(),
-        "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
-        "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
-        "shipping_label_format_gls": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_gls", SETTINGS.get("shipping_label_format", "A6"))
+        "delivery_note_format": _normalize_shipping_label_format(
+            SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))
         ),
-        "shipping_label_format_dhl": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_dhl", "A5")
-        ),
-        "shipping_label_format_post": _normalize_shipping_label_format(
-            SETTINGS.get("shipping_label_format_post", "100x62")
-        ),
-        "shipping_services": _normalize_shipping_services(SETTINGS.get("shipping_services", [])),
-        "shipping_services_display": _shipping_services_summary(SETTINGS.get("shipping_services", [])),
-        "shipping_packaging_weight_grams": str(
-            SETTINGS.get("shipping_packaging_weight_grams", DEFAULT_SETTINGS.get("shipping_packaging_weight_grams", 400))
-        ),
-        "gls_api_url": SETTINGS.get("gls_api_url", ""),
-        "gls_user": SETTINGS.get("gls_user", ""),
-        "gls_password": SETTINGS.get("gls_password", ""),
-        "gls_contact_id": SETTINGS.get("gls_contact_id", ""),
-        "post_api_url": SETTINGS.get("post_api_url", ""),
-        "post_user": SETTINGS.get("post_user", ""),
-        "post_password": SETTINGS.get("post_password", ""),
-        "post_partner_id": SETTINGS.get("post_partner_id", ""),
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
         "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
         "delivery_note_logo_source": SETTINGS.get("delivery_note_logo_source", ""),
@@ -3560,6 +4930,7 @@ def settings_dialog(stdscr):
         "delivery_note_sender_city": SETTINGS["delivery_note_sender_city"],
         "delivery_note_sender_email": SETTINGS["delivery_note_sender_email"],
     }
+    values.update(_shipping_settings_initial_values())
     tabs = [
         {
             "title": "Allgemein",
@@ -3588,34 +4959,11 @@ def settings_dialog(stdscr):
         },
         {
             "title": "Drucker",
-            "fields": [
-                ("picklist_printer", "field_picklist_printer"),
-                ("delivery_note_printer", "field_delivery_printer"),
-                ("shipping_label_printer_gls", "field_shipping_printer_gls"),
-                ("shipping_label_printer_dhl", "field_shipping_printer_dhl"),
-                ("shipping_label_printer_post", "field_shipping_printer_post"),
-                ("shipping_label_printer", "field_shipping_printer_fallback"),
-            ],
+            "fields": _shipping_printer_tab_fields(),
         },
         {
             "title": "Versand",
-            "fields": [
-                ("shipping_carrier", "field_shipping_carrier"),
-                ("shipping_label_output_dir", "field_shipping_label_output_dir"),
-                ("shipping_label_format_gls", "field_shipping_format_gls"),
-                ("shipping_label_format_dhl", "field_shipping_format_dhl"),
-                ("shipping_label_format_post", "field_shipping_format_post"),
-                ("shipping_services_display", "field_shipping_services"),
-                ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
-                ("gls_api_url", "field_gls_api_url"),
-                ("gls_user", "field_gls_user"),
-                ("gls_password", "field_gls_password"),
-                ("gls_contact_id", "field_gls_contact_id"),
-                ("post_api_url", "field_post_api_url"),
-                ("post_user", "field_post_user"),
-                ("post_password", "field_post_password"),
-                ("post_partner_id", "field_post_partner_id"),
-            ],
+            "fields": _shipping_settings_tab_fields(),
         },
         {
             "title": "Lieferschein",
@@ -3632,8 +4980,14 @@ def settings_dialog(stdscr):
     ]
     active_tab = 0
     active_field_by_tab = [0 for _ in tabs]
-    cursor_positions = {name: len(str(values.get(name, ""))) for tab in tabs for name, _ in tab["fields"]}
-    scroll_offsets = {name: 0 for tab in tabs for name, _ in tab["fields"]}
+    editable_field_names = {
+        name
+        for tab in tabs
+        for name, _ in tab["fields"]
+        if not str(name).startswith("_heading_")
+    }
+    cursor_positions = {name: len(str(values.get(name, ""))) for name in editable_field_names}
+    scroll_offsets = {name: 0 for name in editable_field_names}
 
     def normalize_view(field_name, field_width):
         field_width = max(1, field_width)
@@ -3652,13 +5006,22 @@ def settings_dialog(stdscr):
     while True:
         tab = tabs[active_tab]
         tab_fields = tab["fields"]
-        if active_field_by_tab[active_tab] >= len(tab_fields):
-            active_field_by_tab[active_tab] = max(0, len(tab_fields) - 1)
-        if active_field_by_tab[active_tab] < 0:
-            active_field_by_tab[active_tab] = 0
-
-        active_index = active_field_by_tab[active_tab] if tab_fields else 0
-        active_name = tab_fields[active_index][0] if tab_fields else ""
+        editable_indices = [idx for idx, (name, _label_key) in enumerate(tab_fields) if not str(name).startswith("_heading_")]
+        if not editable_indices:
+            active_index = 0
+            active_name = ""
+        else:
+            current_pos = active_field_by_tab[active_tab]
+            if current_pos >= len(editable_indices):
+                current_pos = len(editable_indices) - 1
+            if current_pos < 0:
+                current_pos = 0
+            active_field_by_tab[active_tab] = current_pos
+            active_index = editable_indices[current_pos]
+            active_name = tab_fields[active_index][0]
+        if not tab_fields:
+            active_index = 0
+            active_name = ""
 
         h, w = stdscr.getmaxyx()
         max_label = max((len(t(label_key)) for entry in tabs for _, label_key in entry["fields"]), default=12)
@@ -3674,6 +5037,11 @@ def settings_dialog(stdscr):
         win.erase()
         win.box()
         win.addstr(0, 2, f" {t('settings')} ")
+        sync_state = get_service_runtime_state()
+        sync_version = ((sync_state or {}).get("version") or "-").strip() or "-"
+        sync_label = f" Sync {sync_version} "
+        sync_x = max(2, width - len(sync_label) - 2)
+        win.addstr(0, sync_x, sync_label[: max(0, width - sync_x - 1)])
 
         tab_x = 2
         for i, entry in enumerate(tabs):
@@ -3694,26 +5062,31 @@ def settings_dialog(stdscr):
 
         for idx, (name, label_key) in enumerate(tab_fields):
             row = 3 + idx
-            label = t(label_key)
-            value = str(values.get(name, ""))
-            win.addstr(row, 2, f"{label}:")
-            normalize_view(name, field_width)
-            start = scroll_offsets[name]
-            visible = value[start:start + field_width]
-            if idx == active_index:
+            if str(name).startswith("_heading_"):
+                label = str(label_key)
                 win.attrset(curses.color_pair(2))
-                win.addstr(row, field_x, visible.ljust(field_width))
+                win.addstr(row, 2, _fit(f"[{label}]", width - 4))
                 win.attrset(curses.color_pair(1))
             else:
-                win.addstr(row, field_x, visible.ljust(field_width))
+                label = t(label_key)
+                value = str(values.get(name, ""))
+                win.addstr(row, 2, f"{label}:")
+                normalize_view(name, field_width)
+                start = scroll_offsets[name]
+                visible = value[start:start + field_width]
+                if idx == active_index:
+                    win.attrset(curses.color_pair(2))
+                    win.addstr(row, field_x, visible.ljust(field_width))
+                    win.attrset(curses.color_pair(1))
+                else:
+                    win.addstr(row, field_x, visible.ljust(field_width))
 
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "F5 <- Tab  F6 Tab ->  F3 Drucker  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  F6 Auswahl  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
-        win.addstr(height - 2, 1, " " * (width - 2))
-        win.addstr(height - 2, 1, _fit(footer, width - 2))
+        draw_footer_line(win, height - 2, 1, width - 2, footer)
         win.attrset(curses.color_pair(1))
 
         if active_name:
@@ -3722,28 +5095,36 @@ def settings_dialog(stdscr):
             win.move(3 + active_index, cursor_x)
         win.refresh()
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
         if key in (27, curses.KEY_F9):
             return
         if key == curses.KEY_F2:
             break
-        if key == curses.KEY_F5:
-            active_tab = (active_tab - 1) % len(tabs)
-            continue
-        if key == curses.KEY_F6:
+        if key == "\t":
             active_tab = (active_tab + 1) % len(tabs)
             continue
+        if key == curses.KEY_BTAB:
+            active_tab = (active_tab - 1) % len(tabs)
+            continue
         if key == curses.KEY_DOWN:
-            active_field_by_tab[active_tab] = (active_index + 1) % max(1, len(tab_fields))
+            if editable_indices:
+                active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
             continue
         if key == curses.KEY_UP:
-            active_field_by_tab[active_tab] = (active_index - 1) % max(1, len(tab_fields))
+            if editable_indices:
+                active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] - 1) % len(editable_indices)
             continue
 
         if not active_name:
             continue
 
-        if active_name == "shipping_services_display":
+        if active_name in {"shipping_services_display", "shipping_active_carriers_display"}:
             if key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END, curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b', curses.KEY_DC):
                 continue
 
@@ -3777,13 +5158,60 @@ def settings_dialog(stdscr):
             "picklist_printer",
             "delivery_note_printer",
             "shipping_label_printer",
-            "shipping_label_printer_gls",
-            "shipping_label_printer_dhl",
-            "shipping_label_printer_post",
+            *shipping_printer_fields.keys(),
         }:
             values[active_name] = cups_printer_dialog(stdscr, values[active_name])
             cursor_positions[active_name] = len(str(values[active_name]))
             continue
+
+        if key == curses.KEY_F4 and active_name in {"delivery_note_format", *shipping_format_fields.keys()}:
+            printer_name = ""
+            title = "Druckformat"
+            if active_name == "delivery_note_format":
+                printer_name = values.get("delivery_note_printer", "")
+                title = "Lieferschein Format"
+            elif active_name in shipping_format_fields:
+                carrier_code = shipping_format_fields[active_name]
+                printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
+                printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
+                title = f"{_shipping_carrier_label(carrier_code)} Format"
+            values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
+            cursor_positions[active_name] = len(str(values[active_name]))
+            continue
+
+        if key == curses.KEY_F6:
+            if active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
+                values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
+                cursor_positions[active_name] = len(str(values[active_name]))
+                continue
+            if active_name == "color_theme_file":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name in {"label_font_regular", "label_font_condensed"}:
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name == "delivery_note_template_path":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name in shipping_template_fields:
+                carrier_code = shipping_template_fields[active_name]
+                values[active_name] = file_dialog(
+                    stdscr,
+                    values.get(active_name, ""),
+                    f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
+                    extensions={".html", ".htm"},
+                )
+                cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
+            if active_name == "delivery_note_logo_source":
+                current_value = (values.get(active_name) or "").strip()
+                if not is_http_url(current_value):
+                    values[active_name] = file_dialog(stdscr, current_value, "Logo waehlen", extensions={".png", ".jpg", ".jpeg", ".svg", ".pdf"})
+                    cursor_positions[active_name] = len(str(values.get(active_name, "")))
+                continue
 
         if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             if active_name == "language":
@@ -3794,45 +5222,77 @@ def settings_dialog(stdscr):
                 "picklist_printer",
                 "delivery_note_printer",
                 "shipping_label_printer",
-                "shipping_label_printer_gls",
-                "shipping_label_printer_dhl",
-                "shipping_label_printer_post",
+                *shipping_printer_fields.keys(),
             }:
                 values[active_name] = cups_printer_dialog(stdscr, values[active_name])
-            elif active_name == "shipping_carrier":
-                values["shipping_carrier"] = choice_dialog(
+            elif active_name in shipping_format_fields:
+                printer_name = ""
+                title = "Labelformat"
+                carrier_code = shipping_format_fields[active_name]
+                printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
+                printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
+                title = f"{_shipping_carrier_label(carrier_code)} Format"
+                values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
+            elif active_name == "delivery_note_format":
+                values[active_name] = cups_media_dialog(
                     stdscr,
-                    "Versand Dienstleister",
-                    [
-                        {"value": "gls", "label": "GLS"},
-                        {"value": "dhl", "label": "DHL"},
-                        {"value": "post", "label": "POST (INTERNETMARKE)"},
-                        {"value": "test", "label": "TEST"},
-                    ],
-                    values["shipping_carrier"],
+                    values.get("delivery_note_printer", ""),
+                    values[active_name],
+                    "Lieferschein Format",
                 )
-            elif active_name in {"shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_post"}:
+            elif active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
+                values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
+            elif active_name == "color_theme_file":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
+            elif active_name in {"label_font_regular", "label_font_condensed"}:
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
+            elif active_name == "delivery_note_template_path":
+                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
+            elif active_name in shipping_template_fields:
+                carrier_code = shipping_template_fields[active_name]
+                values[active_name] = file_dialog(
+                    stdscr,
+                    values.get(active_name, ""),
+                    f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
+                    extensions={".html", ".htm"},
+                )
+            elif active_name in shipping_tracking_mode_fields:
                 values[active_name] = choice_dialog(
                     stdscr,
-                    "Labelformat",
+                    "Shopify Tracking",
                     [
-                        {"value": "A6", "label": "A6"},
-                        {"value": "A5", "label": "A5"},
-                        {"value": "A4", "label": "A4"},
-                        {"value": "100x62", "label": "100x62 mm"},
+                        {"value": "company", "label": "Carrier + Nummer"},
+                        {"value": "company_and_url", "label": "Carrier + Nummer + URL"},
                     ],
                     values[active_name],
                 )
             elif active_name == "shipping_services_display":
                 values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
                 values["shipping_services_display"] = _shipping_services_summary(values["shipping_services"])
+            elif active_name == "shipping_active_carriers_display":
+                chosen = toggle_choice_dialog(
+                    stdscr,
+                    "Aktive Versanddienste",
+                    _shipping_carrier_options(include_test=True),
+                    values.get("shipping_active_carriers", []),
+                )
+                if chosen is not None:
+                    values["shipping_active_carriers"] = _normalize_active_shipping_carriers(
+                        chosen,
+                        fallback_to_defaults=False,
+                    )
+                    values["shipping_active_carriers_display"] = _shipping_active_carriers_summary(
+                        values["shipping_active_carriers"],
+                        fallback_to_defaults=False,
+                    )
             else:
-                active_field_by_tab[active_tab] = (active_index + 1) % max(1, len(tab_fields))
+                if editable_indices:
+                    active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
             cursor_positions[active_name] = len(str(values.get(active_name, "")))
             continue
 
         if isinstance(key, str) and key.isprintable():
-            if active_name == "shipping_services_display":
+            if active_name in {"shipping_services_display", "shipping_active_carriers_display"}:
                 continue
             value = str(values.get(active_name, ""))
             pos = cursor_positions[active_name]
@@ -3857,26 +5317,16 @@ def settings_dialog(stdscr):
         "location_regex_platz": values["location_regex_platz"].strip(),
         "picklist_printer": values["picklist_printer"].strip(),
         "delivery_note_printer": values["delivery_note_printer"].strip(),
+        "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
+        "shipping_active_carriers": _normalize_active_shipping_carriers(
+            values.get("shipping_active_carriers", []),
+            fallback_to_defaults=False,
+        ),
         "shipping_label_printer": values["shipping_label_printer"].strip(),
-        "shipping_label_printer_gls": values["shipping_label_printer_gls"].strip(),
-        "shipping_label_printer_dhl": values["shipping_label_printer_dhl"].strip(),
-        "shipping_label_printer_post": values["shipping_label_printer_post"].strip(),
-        "shipping_carrier": values["shipping_carrier"].strip().lower(),
         "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
-        "shipping_label_format_gls": _normalize_shipping_label_format(values["shipping_label_format_gls"].strip()),
-        "shipping_label_format_dhl": _normalize_shipping_label_format(values["shipping_label_format_dhl"].strip()),
-        "shipping_label_format_post": _normalize_shipping_label_format(values["shipping_label_format_post"].strip()),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
-        "gls_api_url": values["gls_api_url"].strip(),
-        "gls_user": values["gls_user"].strip(),
-        "gls_password": values["gls_password"],
-        "gls_contact_id": values["gls_contact_id"].strip(),
-        "post_api_url": values["post_api_url"].strip(),
-        "post_user": values["post_user"].strip(),
-        "post_password": values["post_password"],
-        "post_partner_id": values["post_partner_id"].strip(),
         "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
         "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
         "delivery_note_logo_source": values["delivery_note_logo_source"].strip(),
@@ -3885,6 +5335,30 @@ def settings_dialog(stdscr):
         "delivery_note_sender_city": values["delivery_note_sender_city"].strip(),
         "delivery_note_sender_email": values["delivery_note_sender_email"].strip(),
     }
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        if printer_field:
+            updated[printer_field] = values.get(printer_field, "").strip()
+        format_field = definition.get("format_field")
+        if format_field:
+            updated[format_field] = _normalize_shipping_label_format(values.get(format_field, "").strip())
+        tracking_mode_field = definition.get("tracking_mode_field")
+        if tracking_mode_field:
+            updated[tracking_mode_field] = values.get(tracking_mode_field, "").strip().lower()
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_url_field:
+            updated[tracking_url_field] = values.get(tracking_url_field, "").strip()
+        template_field = definition.get("template_field")
+        if template_field:
+            updated[template_field] = os.path.expanduser(values.get(template_field, "").strip())
+        for field_name, _label_key in definition.get("extra_settings_fields") or []:
+            if field_name == "shipping_services_display":
+                continue
+            if field_name.endswith("_password"):
+                updated[field_name] = values.get(field_name, "")
+            else:
+                updated[field_name] = values.get(field_name, "").strip()
 
     missing = [
         label for key, label in [
@@ -3948,28 +5422,29 @@ def settings_dialog(stdscr):
                 message_box(stdscr, t("error"), "LS Logo Datei existiert nicht.")
                 return
             updated["delivery_note_logo_source"] = logo_path
-    if updated["shipping_carrier"] not in {"gls", "dhl", "post", "test"}:
-        message_box(stdscr, t("error"), "Versand Dienstleister nur 'gls', 'dhl', 'post' oder 'test'.")
-        return
     if updated["shipping_label_output_dir"] and not os.path.isdir(updated["shipping_label_output_dir"]):
         message_box(stdscr, t("error"), "Versandlabel Ordner existiert nicht.")
         return
-    allowed_formats = {"A6", "A5", "A4", "100x62"}
-    if updated["shipping_label_format"] not in allowed_formats:
-        message_box(stdscr, t("error"), "Labelformat nur A6, A5, A4 oder 100x62.")
+    if not updated["delivery_note_format"]:
+        updated["delivery_note_format"] = "A4"
+    if not updated["shipping_label_format"]:
+        message_box(stdscr, t("error"), "Labelformat darf nicht leer sein.")
         return
-    for key in ("shipping_label_format_gls", "shipping_label_format_dhl", "shipping_label_format_post"):
-        if updated[key] not in allowed_formats:
-            message_box(stdscr, t("error"), f"{key} ungueltig.")
-            return
-    if not updated.get("shipping_label_format_gls"):
-        updated["shipping_label_format_gls"] = "A6"
-    if not updated.get("shipping_label_format_dhl"):
-        updated["shipping_label_format_dhl"] = "A5"
-    if not updated.get("shipping_label_format_post"):
-        updated["shipping_label_format_post"] = "100x62"
+    if not updated["shipping_active_carriers"]:
+        message_box(stdscr, t("error"), "Mindestens ein Versanddienst muss aktiv sein.")
+        return
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        format_field = definition.get("format_field")
+        if format_field and not updated.get(format_field):
+            updated[format_field] = definition.get("default_format", "A6")
     if not updated.get("shipping_label_format"):
         updated["shipping_label_format"] = "A6"
+    for code in _configurable_shipping_carrier_codes():
+        template_field = _shipping_carrier_setting_field(code, "template")
+        if template_field and updated.get(template_field) and not os.path.isfile(updated[template_field]):
+            message_box(stdscr, t("error"), f"{_shipping_carrier_label(code)} Vorlage existiert nicht."[:56])
+            return
     try:
         packaging_weight = int(updated["shipping_packaging_weight_grams"])
     except ValueError:
@@ -3979,23 +5454,6 @@ def settings_dialog(stdscr):
         message_box(stdscr, t("error"), "Verpackung Gewicht darf nicht negativ sein.")
         return
     updated["shipping_packaging_weight_grams"] = packaging_weight
-    if updated["shipping_carrier"] == "gls":
-        has_gls_settings = all(
-            updated[key]
-            for key in ("gls_api_url", "gls_user", "gls_password", "gls_contact_id")
-        )
-        has_gls_pdf = any(GLS_DIR.glob("*.pdf"))
-        if not has_gls_settings and not has_gls_pdf:
-            message_box(stdscr, t("error"), "GLS Daten fehlen (Settings oder PDF).")
-            return
-    if updated["shipping_carrier"] == "post":
-        has_post_settings = all(
-            updated[key]
-            for key in ("post_api_url", "post_user", "post_password", "post_partner_id")
-        )
-        if not has_post_settings:
-            message_box(stdscr, t("error"), "POST INTERNETMARKE Daten fehlen.")
-            return
 
     try:
         test_db_connection(updated)
@@ -4483,11 +5941,248 @@ def build_delivery_note_filename(order):
     return f"lieferschein_{safe_name}_{timestamp}.pdf"
 
 
+def _documents_base_dir():
+    home = Path.home()
+    for name in ("Dokumente", "Documents"):
+        candidate = home / name
+        if candidate.exists():
+            return candidate
+    return home / "Dokumente"
+
+
+def _lager_documents_dir():
+    return _documents_base_dir() / "Lagerverwaltung"
+
+
+def _default_shipping_label_output_dir():
+    return str(_lager_documents_dir() / "Versandlabel")
+
+
+def _default_delivery_note_output_dir():
+    return str(_lager_documents_dir() / "Lieferscheine")
+
+
+def get_shipping_label_output_dir():
+    configured = (SETTINGS.get("shipping_label_output_dir") or "").strip()
+    if configured:
+        output_dir = Path(os.path.expanduser(configured))
+    else:
+        output_dir = Path(_default_shipping_label_output_dir())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir)
+
+
 def get_pdf_output_dir():
     configured = SETTINGS["pdf_output_dir"].strip()
-    if not configured:
-        return os.getcwd()
-    return configured
+    if configured:
+        output_dir = Path(os.path.expanduser(configured))
+    else:
+        output_dir = Path(_default_delivery_note_output_dir())
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir)
+
+
+def directory_dialog(stdscr, current_path="", title="Ordner waehlen"):
+    base = (current_path or "").strip()
+    if base:
+        current = Path(os.path.expanduser(base)).resolve()
+    else:
+        current = _lager_documents_dir()
+    if not current.exists():
+        current = current.parent if current.parent.exists() else Path.home()
+    selected = 0
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(max(72, len(str(current)) + 6), w - 4)
+        height = min(22, h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+        win.addstr(1, 2, _fit(str(current), width - 4))
+
+        entries = [
+            {"kind": "select", "label": "[Diesen Ordner waehlen]", "path": current},
+            {"kind": "mkdir", "label": "[Neuen Ordner anlegen]", "path": current},
+        ]
+        if current.parent != current:
+            entries.append({"kind": "up", "label": "[..]", "path": current.parent})
+        try:
+            subdirs = sorted(
+                [entry for entry in current.iterdir() if entry.is_dir()],
+                key=lambda item: item.name.lower(),
+            )
+        except OSError:
+            subdirs = []
+        for entry in subdirs:
+            entries.append({"kind": "dir", "label": entry.name + "/", "path": entry})
+
+        if selected >= len(entries):
+            selected = max(0, len(entries) - 1)
+
+        visible_rows = height - 4
+        scroll = 0
+        if selected >= visible_rows:
+            scroll = selected - visible_rows + 1
+
+        for row in range(visible_rows):
+            idx = scroll + row
+            screen_y = 2 + row
+            if idx >= len(entries):
+                win.addstr(screen_y, 1, " " * (width - 2))
+                continue
+            label = _fit(entries[idx]["label"], width - 4)
+            if idx == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+
+        footer = "Enter waehlen  F9 Zurueck"
+        win.attrset(curses.color_pair(3))
+        win.addstr(height - 1, 1, " " * (width - 2))
+        win.addstr(height - 1, 1, _fit(footer, width - 2))
+        win.attrset(curses.color_pair(1))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return current_path
+        if key == curses.KEY_UP:
+            selected = (selected - 1) % max(1, len(entries))
+            continue
+        if key == curses.KEY_DOWN:
+            selected = (selected + 1) % max(1, len(entries))
+            continue
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            chosen = entries[selected]
+            if chosen["kind"] == "select":
+                return str(chosen["path"])
+            if chosen["kind"] == "mkdir":
+                form = form_dialog(
+                    stdscr,
+                    "Ordner anlegen",
+                    [{"name": "dirname", "label": "Ordnername", "value": ""}],
+                    footer_text="Enter bestaetigen  F9 Zurueck",
+                )
+                if form and form.get("dirname", "").strip():
+                    name = form["dirname"].strip()
+                    new_dir = chosen["path"] / name
+                    try:
+                        new_dir.mkdir(parents=True, exist_ok=False)
+                    except FileExistsError:
+                        message_box(stdscr, "Ordner", "Ordner existiert bereits.")
+                    except OSError as exc:
+                        message_box(stdscr, "Ordner", f"{str(exc)[:44]}")
+                    else:
+                        current = new_dir
+                        selected = 0
+                continue
+            current = chosen["path"]
+            selected = 0
+
+
+def file_dialog(stdscr, current_path="", title="Datei waehlen", extensions=None):
+    base = (current_path or "").strip()
+    if base:
+        current = Path(os.path.expanduser(base)).resolve()
+        selected_name = current.name if current.exists() else ""
+        current_dir = current.parent if current.parent.exists() else Path.home()
+    else:
+        current_dir = _lager_documents_dir()
+        selected_name = ""
+    if not current_dir.exists():
+        current_dir = current_dir.parent if current_dir.parent.exists() else Path.home()
+    allowed = {ext.lower() for ext in (extensions or [])}
+    selected = 0
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        width = min(max(76, len(str(current_dir)) + 6), w - 4)
+        height = min(24, h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+        win.addstr(1, 2, _fit(str(current_dir), width - 4))
+
+        entries = []
+        if current_dir.parent != current_dir:
+            entries.append({"kind": "up", "label": "[..]", "path": current_dir.parent})
+        try:
+            children = sorted(current_dir.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+        except OSError:
+            children = []
+        for entry in children:
+            if entry.is_dir():
+                entries.append({"kind": "dir", "label": entry.name + "/", "path": entry})
+                continue
+            if allowed and entry.suffix.lower() not in allowed:
+                continue
+            entries.append({"kind": "file", "label": entry.name, "path": entry})
+
+        if selected_name:
+            for idx, entry in enumerate(entries):
+                if entry["kind"] == "file" and entry["path"].name == selected_name:
+                    selected = idx
+                    selected_name = ""
+                    break
+        if selected >= len(entries):
+            selected = max(0, len(entries) - 1)
+
+        visible_rows = height - 4
+        scroll = 0
+        if selected >= visible_rows:
+            scroll = selected - visible_rows + 1
+
+        for row in range(visible_rows):
+            idx = scroll + row
+            screen_y = 2 + row
+            if idx >= len(entries):
+                win.addstr(screen_y, 1, " " * (width - 2))
+                continue
+            label = _fit(entries[idx]["label"], width - 4)
+            if idx == selected:
+                win.attrset(curses.color_pair(2))
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+                win.attrset(curses.color_pair(1))
+            else:
+                win.addstr(screen_y, 2, label.ljust(width - 4))
+
+        footer = "Enter waehlen  F9 Zurueck"
+        win.attrset(curses.color_pair(3))
+        win.addstr(height - 1, 1, " " * (width - 2))
+        win.addstr(height - 1, 1, _fit(footer, width - 2))
+        win.attrset(curses.color_pair(1))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return current_path
+        if key == curses.KEY_UP:
+            selected = (selected - 1) % max(1, len(entries))
+            continue
+        if key == curses.KEY_DOWN:
+            selected = (selected + 1) % max(1, len(entries))
+            continue
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            if not entries:
+                continue
+            chosen = entries[selected]
+            if chosen["kind"] == "file":
+                return str(chosen["path"])
+            current_dir = chosen["path"]
+            selected = 0
 
 
 def get_delivery_note_sender():
@@ -4496,6 +6191,38 @@ def get_delivery_note_sender():
         "street": SETTINGS["delivery_note_sender_street"].strip(),
         "city": SETTINGS["delivery_note_sender_city"].strip(),
         "email": SETTINGS["delivery_note_sender_email"].strip(),
+    }
+
+
+def get_free_label_sender():
+    sender = get_delivery_note_sender()
+    return {
+        "name": sender["name"],
+        "street": sender["street"],
+        "zip_city": sender["city"],
+    }
+
+
+def get_free_label_template_path():
+    configured = (SETTINGS.get("free_label_template_path") or "").strip()
+    if not configured:
+        return None
+    return Path(os.path.expanduser(configured))
+
+
+def _free_label_receiver(order):
+    zip_city = " ".join(
+        part for part in [(order.get("shipping_zip") or "").strip(), (order.get("shipping_city") or "").strip()] if part
+    ).strip()
+    country_code = (order.get("shipping_country") or "").strip().upper()
+    country_label = COUNTRY_NAME_DE.get(country_code, country_code)
+    return {
+        "name": (order.get("shipping_name") or "").strip(),
+        "additional_name": (order.get("shipping_company") or "").strip(),
+        "street": (order.get("shipping_address1") or "").strip(),
+        "address_line_2": (order.get("shipping_address2") or "").strip(),
+        "zip_city": zip_city,
+        "country": country_label if country_label and country_label != "DE" else "",
     }
 
 
@@ -4627,6 +6354,57 @@ def export_delivery_note_pdf(stdscr, order, order_items):
             output_path,
         )
         message_box(stdscr, "Lieferschein PDF", output_path[-56:])
+
+
+def delivery_note_output_mode_dialog(stdscr):
+    return choice_dialog(
+        stdscr,
+        "Lieferschein Ausgabe",
+        [
+            {"value": "print", "label": "Drucken"},
+            {"value": "print_pdf", "label": "Drucken + PDF"},
+            {"value": "pdf", "label": "Nur PDF"},
+        ],
+        "print",
+        cancel_returns_none=True,
+    )
+
+
+def handle_delivery_note_output(stdscr, order, order_items):
+    mode = delivery_note_output_mode_dialog(stdscr)
+    if not mode:
+        return
+    if mode == "print":
+        print_delivery_note(stdscr, order, order_items)
+        return
+    if mode == "pdf":
+        export_delivery_note_pdf(stdscr, order, order_items)
+        return
+
+    try:
+        output_path, rows = create_delivery_note_pdf(order, order_items)
+        _print_delivery_note_pdf_path(order, output_path)
+    except FileNotFoundError as exc:
+        PRINT_LOGGER.exception("Lieferschein Druck+PDF nicht moeglich order=%s", order["order_name"])
+        message_box(stdscr, "Druckfehler", str(exc)[:56])
+    except ValueError as exc:
+        PRINT_LOGGER.warning("Lieferschein Druck+PDF abgebrochen order=%s reason=%s", order["order_name"], exc)
+        message_box(stdscr, "Druckfehler", str(exc)[:56])
+    except subprocess.CalledProcessError as exc:
+        PRINT_LOGGER.exception("Lieferschein Druck+PDF fehlgeschlagen order=%s", order["order_name"])
+        error_text = (exc.stderr or str(exc)).strip()
+        message_box(stdscr, "Druckfehler", f"{(error_text[:20] or 'Druckfehler')} {PRINT_LOG_PATH.name}"[:56])
+    except Exception:
+        PRINT_LOGGER.exception("Lieferschein Druck+PDF fehlgeschlagen order=%s", order["order_name"])
+        message_box(stdscr, "Druckfehler", f"Lieferschein fehlgeschlagen {PRINT_LOG_PATH.name}"[:56])
+    else:
+        PRINT_LOGGER.info(
+            "Lieferschein gedruckt+gespeichert order=%s items=%s path=%s",
+            order["order_name"],
+            len(rows),
+            output_path,
+        )
+        message_box(stdscr, "Lieferschein", output_path[-56:])
 
 
 def print_delivery_note(stdscr, order, order_items):
@@ -4938,7 +6716,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
     if not selected_orders:
         return current_map
 
-    options = sorted(IMPLEMENTED_SHIPPING_CARRIERS)
+    options = _active_shipping_carriers()
     selected = 0
     top_index = 0
     assignments = dict(current_map)
@@ -4966,7 +6744,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         for row_idx, order in enumerate(selected_orders[top_index:top_index + visible_rows]):
             real_idx = top_index + row_idx
             order_id = order["order_id"]
-            carrier = effective_shipping_carrier(assignments.get(order_id, active_shipping_carrier()))
+            carrier = effective_shipping_carrier(assignments.get(order_id))
             line = _fit(f"{_fit(order['order_name'], 12)}  {carrier.upper()}  {format_address(order)}", width - 3)
             y_pos = 2 + row_idx
             if real_idx == selected:
@@ -4976,7 +6754,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
             else:
                 win.addstr(y_pos, 1, line.ljust(width - 2))
 
-        footer = "↑↓ Auftrag  ←/→ oder Space Carrier wechseln  F2 Uebernehmen  F9 Zurueck"
+        footer = "↑↓ Auftrag  ←/→ oder Space Carrier wechseln  Enter Uebernehmen  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 1, 1, _fit(footer, width - 2))
         win.attrset(curses.color_pair(1))
@@ -4985,7 +6763,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         key = win.get_wch()
         if key in (27, curses.KEY_F9):
             return current_map
-        if key == curses.KEY_F2:
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return assignments
         if key == curses.KEY_DOWN:
             selected = move_selection(selected_orders, selected, 1)
@@ -4995,7 +6773,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
             continue
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, " ", 10, 13, "\n", "\r", curses.KEY_ENTER):
             order_id = selected_orders[selected]["order_id"]
-            current = effective_shipping_carrier(assignments.get(order_id, active_shipping_carrier()))
+            current = effective_shipping_carrier(assignments.get(order_id))
             current_index = options.index(current) if current in options else 0
             if key == curses.KEY_LEFT:
                 new_index = (current_index - 1) % len(options)
@@ -5005,17 +6783,17 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
 
 
 def _execution_carrier_dialog(stdscr, current_carrier=None):
-    fallback = effective_shipping_carrier(current_carrier or active_shipping_carrier() or "gls")
-    return choice_dialog(
+    fallback = effective_shipping_carrier(current_carrier or last_shipping_carrier() or "gls")
+    chosen = choice_dialog(
         stdscr,
         "Versand Dienstleister",
-        [
-            {"value": "gls", "label": "GLS"},
-            {"value": "test", "label": "TEST"},
-        ],
+        _shipping_carrier_options(include_test=False),
         fallback,
         cancel_returns_none=True,
     )
+    if chosen:
+        remember_shipping_carrier(chosen)
+    return chosen
 
 
 def select_partial_items_dialog(stdscr, order, order_items):
@@ -5076,7 +6854,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
             else:
                 win.addstr(y_pos, 1, line.ljust(width - 2))
 
-        footer = "↑↓ Position  ←/→ Menge  Space Voll/0  F2 Weiter  F9 Zurück"
+        footer = "↑↓ Position  ←/→ Menge  Space Voll/0  Enter Weiter  F9 Zurück"
         win.attrset(curses.color_pair(3))
         win.addstr(height - 1, 1, _fit(footer, width - 2))
         win.attrset(curses.color_pair(1))
@@ -5108,7 +6886,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
             if row["remaining_quantity"] > 0:
                 row["selected_quantity"] = 0 if int(row["selected_quantity"]) > 0 else row["remaining_quantity"]
             continue
-        if key == curses.KEY_F2:
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             picked = [row for row in editable if int(row.get("selected_quantity") or 0) > 0]
             if not picked:
                 message_box(stdscr, "Teilausfuehrung", "Bitte mindestens eine Menge > 0 waehlen.")
@@ -5119,30 +6897,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
 
 
 def get_latest_label_for_order(order_id):
-    if not order_id:
-        return None
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        SELECT
-            id,
-            carrier,
-            track_id,
-            parcel_number,
-            status,
-            created_at
-        FROM gls_labels
-        WHERE order_id = %s
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (order_id,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    con.close()
-    return row
+    return _get_latest_shipping_label_for_order(db, order_id)
 
 
 def run_partial_execution_for_order(stdscr, order, order_items):
@@ -5150,8 +6905,11 @@ def run_partial_execution_for_order(stdscr, order, order_items):
     if not selected_items:
         return
 
-    carrier = _execution_carrier_dialog(stdscr, effective_shipping_carrier(active_shipping_carrier()))
+    carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
     if not carrier:
+        return
+    carrier_options = _select_shipping_carrier_options(stdscr, carrier, scope="domestic")
+    if carrier_options is None:
         return
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
@@ -5169,30 +6927,32 @@ def run_partial_execution_for_order(stdscr, order, order_items):
             order,
             weight_kg=selected_weight_kg,
             shipment_reference=f"{order.get('order_name') or ''}-PART",
-            service_codes=None,
+            service_codes=carrier_options,
             carrier=carrier,
         )
         if print_mode in {"both", "label"} and created.get("label_path"):
             printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier.upper()} {created['shipment_reference']}", carrier=carrier)
             if printed and created.get("label_id") is not None:
-                update_gls_label_status(created["label_id"], "PRINTED")
+                update_shipping_label_status(created["label_id"], "PRINTED")
 
         note_path, _rows = create_delivery_note_pdf(order, selected_for_note)
         if print_mode in {"both", "note"}:
             _print_delivery_note_pdf_path(order, note_path)
 
-        if created.get("label_id") is not None:
-            fresh_rows = list_gls_labels(order["order_id"])
+        if created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
+            fresh_rows = list_shipping_labels(order["order_id"])
             current_label = next((row for row in fresh_rows if row["id"] == created["label_id"]), None)
             if current_label:
                 queue_result = enqueue_shopify_fulfillment_job_for_items(current_label, selected_items, notify_customer=False)
                 if queue_result.get("created"):
-                    update_gls_label_status(created["label_id"], "SHOPIFY_QUEUED")
+                    update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
         message_box(
             stdscr,
             "Teilausfuehrung",
-            f"OK: Label {created['track_id']} {selected_weight_grams}g erstellt",
+            f"OK: {_created_label_display_value(carrier, created)} {selected_weight_grams}g erstellt",
         )
+    except DatabaseUnavailableError:
+        raise
     except Exception as exc:
         PRINT_LOGGER.exception("Teilausfuehrung fehlgeschlagen order=%s", order.get("order_name"))
         message_box(stdscr, "Teilausfuehrung", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
@@ -5202,8 +6962,27 @@ def _print_delivery_note_pdf_path(order, pdf_path):
     printer = SETTINGS["delivery_note_printer"].strip()
     if not printer:
         raise RuntimeError("Lieferschein Drucker nicht gesetzt.")
+    cmd = ["lp", "-d", printer, "-t", f"Lieferschein {order['order_name']}"]
+    cmd.extend(_cups_label_print_options(_delivery_note_format()))
+    cmd.append(pdf_path)
     subprocess.run(
-        ["lp", "-d", printer, "-t", f"Lieferschein {order['order_name']}", pdf_path],
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+
+
+def _print_merged_delivery_note_pdf(pdf_path, title="Lieferschein Sammeldruck"):
+    printer = SETTINGS["delivery_note_printer"].strip()
+    if not printer:
+        raise RuntimeError("Lieferschein Drucker nicht gesetzt.")
+    cmd = ["lp", "-d", printer, "-t", title]
+    cmd.extend(_cups_label_print_options(_delivery_note_format()))
+    cmd.append(pdf_path)
+    subprocess.run(
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -5225,25 +7004,34 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
         message_box(stdscr, "Bulk", "Bitte zuerst Auftraege markieren (Space).")
         return
 
+    carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
+    if not carrier:
+        return
+    carrier_options = _select_shipping_carrier_options(stdscr, carrier, scope="domestic")
+    if carrier_options is None:
+        return
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
         return
-    shopify_mode = _bulk_shopify_queue_mode_dialog(stdscr)
-    if shopify_mode is None:
-        return
+    shopify_mode = "manual"
+    if _shipping_carrier_allows_shopify(carrier):
+        shopify_mode = _bulk_shopify_queue_mode_dialog(stdscr)
+        if shopify_mode is None:
+            return
 
-    carrier_map = {row["order_id"]: effective_shipping_carrier(active_shipping_carrier()) for row in selected_orders}
-    if confirm_box(stdscr, "Bulk", "Dienstleister je Auftrag festlegen?", default_yes=False):
-        carrier_map = bulk_carrier_per_order_dialog(stdscr, selected_orders, carrier_map)
+    carrier_map = {row["order_id"]: carrier for row in selected_orders}
 
     success_count = 0
     failure_count = 0
     queued_count = 0
     queue_failed_count = 0
     last_failure_summary = ""
+    label_paths_to_print = []
+    note_paths_to_print = []
+    printed_label_ids = []
 
     for order in selected_orders:
-        carrier = effective_shipping_carrier(carrier_map.get(order["order_id"], active_shipping_carrier()))
+        carrier = effective_shipping_carrier(carrier_map.get(order["order_id"]))
         try:
             order_items = order_items_cache.get(order["order_id"])
             if order_items is None:
@@ -5251,18 +7039,23 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                 order_items_cache[order["order_id"]] = order_items
 
             order_weight_kg, _order_weight_grams = calculate_order_shipping_weight(order, order_items)
-            created = create_shipping_label(order, weight_kg=order_weight_kg, carrier=carrier)
+            created = create_shipping_label(
+                order,
+                weight_kg=order_weight_kg,
+                carrier=carrier,
+                service_codes=carrier_options,
+            )
             if print_mode in {"both", "label"} and created.get("label_path"):
-                printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier.upper()} {created['shipment_reference']}", carrier=carrier)
-                if printed and created.get("label_id") is not None:
-                    update_gls_label_status(created["label_id"], "PRINTED")
+                label_paths_to_print.append(created["label_path"])
+                if created.get("label_id") is not None:
+                    printed_label_ids.append(created["label_id"])
 
             note_path, _rows = create_delivery_note_pdf(order, order_items)
             if print_mode in {"both", "note"}:
-                _print_delivery_note_pdf_path(order, note_path)
+                note_paths_to_print.append(note_path)
 
-            if shopify_mode == "queue" and created.get("label_id") is not None:
-                labels_for_order = list_gls_labels(order["order_id"])
+            if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
+                labels_for_order = list_shipping_labels(order["order_id"])
                 created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
                 if created_row:
                     try:
@@ -5273,9 +7066,11 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     else:
                         if queue_result.get("created"):
                             queued_count += 1
-                            update_gls_label_status(created["label_id"], "SHOPIFY_QUEUED")
+                            update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
 
             success_count += 1
+        except DatabaseUnavailableError:
+            raise
         except Exception as exc:
             failure_count += 1
             short_error = str(exc).strip() or exc.__class__.__name__
@@ -5304,18 +7099,43 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
         )
         return
 
+    try:
+        with tempfile.TemporaryDirectory(prefix="lager-bulk-print-") as temp_dir:
+            if label_paths_to_print:
+                merged_label_pdf = os.path.join(temp_dir, f"shipping_labels_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+                _merge_pdf_files(label_paths_to_print, merged_label_pdf)
+                printed = _print_pdf_via_lp(stdscr, merged_label_pdf, f"{carrier.upper()} Sammeldruck", carrier=carrier)
+                if printed:
+                    for label_id in printed_label_ids:
+                        update_shipping_label_status(label_id, "PRINTED")
+            if note_paths_to_print:
+                merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+                _merge_pdf_files(note_paths_to_print, merged_note_pdf)
+                _print_merged_delivery_note_pdf(merged_note_pdf)
+    except Exception as exc:
+        LOGGER.exception("Bulk-Sammeldruck fehlgeschlagen carrier=%s print_mode=%s", carrier, print_mode)
+        PRINT_LOGGER.exception("Bulk-Sammeldruck fehlgeschlagen carrier=%s", carrier)
+        selected_order_ids.clear()
+        message_box(stdscr, "Bulk", f"Druckfehler: {str(exc)[:22]} {PRINT_LOG_PATH.name}"[:56])
+        return
+
     selected_order_ids.clear()
     message_box(stdscr, "Bulk", f"Fertig OK:{success_count} Err:{failure_count} Q:{queued_count}/{queue_failed_count}"[:56])
 
 
 def create_shipping_label_for_order(stdscr, order):
-    resolved_carrier = effective_shipping_carrier(active_shipping_carrier())
-    carrier = resolved_carrier.upper()
-    if not confirm_box(stdscr, "Versandlabel", f"Label fuer {order['order_name']} erstellen?", default_yes=False):
+    resolved_carrier = _execution_carrier_dialog(stdscr, last_shipping_carrier())
+    if not resolved_carrier:
+        return
+    carrier = _shipping_carrier_label(resolved_carrier)
+    carrier_options = _select_shipping_carrier_options(stdscr, resolved_carrier, scope="domestic")
+    if carrier_options is None:
         return
     order_weight_kg, total_grams = calculate_order_shipping_weight(order)
     try:
-        created = create_shipping_label(order, weight_kg=order_weight_kg, carrier=resolved_carrier)
+        created = create_shipping_label(order, weight_kg=order_weight_kg, service_codes=carrier_options, carrier=resolved_carrier)
+    except DatabaseUnavailableError:
+        raise
     except ValueError as exc:
         message_box(stdscr, "Versandlabel", str(exc)[:56])
         return
@@ -5324,18 +7144,21 @@ def create_shipping_label_for_order(stdscr, order):
         message_box(stdscr, "Versandlabel", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
         return
 
-    printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier.lower())
+    printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=resolved_carrier)
     if printed:
         if created["label_id"] is not None:
-            update_gls_label_status(created["label_id"], "PRINTED")
-        message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} {total_grams}g gedruckt"[:56])
+            update_shipping_label_status(created["label_id"], "PRINTED")
+        message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(resolved_carrier, created)} {total_grams}g gedruckt"[:56])
     else:
         if created["label_id"] is not None:
-            update_gls_label_status(created["label_id"], "CREATED")
-        message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} {total_grams}g nur PDF"[:56])
+            update_shipping_label_status(created["label_id"], "CREATED")
+        message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(resolved_carrier, created)} {total_grams}g nur PDF"[:56])
 
 
 def create_manual_shipping_label(stdscr):
+    carrier_key = _execution_carrier_dialog(stdscr, last_shipping_carrier())
+    if not carrier_key:
+        return
     state = {
         "name": "",
         "street": "",
@@ -5347,9 +7170,11 @@ def create_manual_shipping_label(stdscr):
     active = 0
     country_code = "DE"
     selected_services = _normalize_shipping_services(SETTINGS.get("shipping_services", []))
+    post_selection = dict(_POST_SELECTION_CACHE.get("domestic") or {})
     print_mode = "print"
 
     while True:
+        option_mode = _shipping_carrier_option_mode(carrier_key)
         fields = [
             {"name": "name", "label": "Empfaenger Name", "value": state["name"]},
             {"name": "street", "label": "Strasse", "value": state["street"]},
@@ -5358,19 +7183,26 @@ def create_manual_shipping_label(stdscr):
             {"name": "reference", "label": "Referenz", "value": state["reference"]},
             {"name": "weight_grams", "label": "Gewicht (g)", "value": state["weight_grams"]},
             {"name": "country_display", "label": "Land (F3)", "value": _manual_label_country_display(country_code)},
-            {"name": "services_display", "label": "Services (F4)", "value": _shipping_services_summary(selected_services)},
-            {"name": "print_mode", "label": "Ausgabe (F5)", "value": "PDF + Drucken" if print_mode == "print" else "Nur PDF"},
         ]
+        if option_mode == "post_products":
+            fields.append({"name": "post_product", "label": "POST Produkt (F4)", "value": _post_selection_summary(post_selection)})
+        elif option_mode == "gls_services":
+            fields.append({"name": "services_display", "label": "Services (F4)", "value": _shipping_services_summary(selected_services)})
+        fields.append({"name": "print_mode", "label": "Ausgabe (F5)", "value": "PDF + Drucken" if print_mode == "print" else "Nur PDF"})
+        footer_text = "Enter weiter/erstellen  F3 Land  F5 Ausgabe  F6 Kunde  F9 Zurueck"
+        if option_mode in {"gls_services", "post_products"}:
+            footer_text = "Enter weiter/erstellen  F3 Land  F4 Auswahl  F5 Ausgabe  F6 Kunde  F9 Zurueck"
         result = form_dialog(
             stdscr,
             "Versandlabel ohne Bestellung",
             fields,
             initial_active=active,
-            footer_text="F3 Land  F4 Services  F5 Ausgabe  F2 Erstellen  F9 Zurueck",
+            footer_text=footer_text,
             extra_actions=[
                 {"name": "country", "keys": {curses.KEY_F3}},
                 {"name": "services", "keys": {curses.KEY_F4}},
                 {"name": "print_mode", "keys": {curses.KEY_F5}},
+                {"name": "customer", "keys": {curses.KEY_F6}},
             ],
         )
         if result is None:
@@ -5382,12 +7214,21 @@ def create_manual_shipping_label(stdscr):
             if result["__action__"] == "country":
                 country_code = manual_country_dialog(stdscr, country_code)
             elif result["__action__"] == "services":
-                selected_services = shipping_services_dialog(stdscr, selected_services)
+                if option_mode == "post_products":
+                    chosen_post = _post_selection_dialog(stdscr, scope="domestic")
+                    if chosen_post:
+                        post_selection = chosen_post
+                elif option_mode == "gls_services":
+                    selected_services = shipping_services_dialog(stdscr, selected_services)
             elif result["__action__"] == "print_mode":
                 next_mode = manual_label_print_mode_dialog(stdscr, print_mode)
                 if next_mode is None:
                     return
                 print_mode = next_mode
+            elif result["__action__"] == "customer":
+                chosen_customer = shopify_customer_dialog(stdscr)
+                if chosen_customer:
+                    state, country_code = _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code)
             continue
         state.update(result)
         break
@@ -5411,6 +7252,10 @@ def create_manual_shipping_label(stdscr):
     if weight_grams <= 0:
         message_box(stdscr, "Versandlabel", "Gewicht muss groesser als 0 g sein.")
         return
+    option_mode = _shipping_carrier_option_mode(carrier_key)
+    if option_mode == "post_products" and not post_selection:
+        message_box(stdscr, "Versandlabel", "Bitte POST Produkt waehlen.")
+        return
 
     reference = state.get("reference", "").strip()
     if not reference:
@@ -5425,30 +7270,37 @@ def create_manual_shipping_label(stdscr):
         "shipping_city": state["city"].strip(),
         "shipping_country": country_code,
     }
-    carrier = active_shipping_carrier().upper()
+    carrier = _shipping_carrier_label(carrier_key)
 
     try:
         created = create_shipping_label(
             order_stub,
             weight_kg=round(weight_grams / 1000.0, 3),
             shipment_reference=reference,
-            service_codes=selected_services,
+            service_codes=(
+                post_selection if option_mode == "post_products"
+                else selected_services if option_mode == "gls_services"
+                else None
+            ),
+            carrier=carrier_key,
         )
+    except DatabaseUnavailableError:
+        raise
     except Exception as exc:
         PRINT_LOGGER.exception("Manuelles Versandlabel fehlgeschlagen reference=%s", reference)
         message_box(stdscr, "Versandlabel", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
         return
 
     if print_mode == "print":
-        printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier.lower())
+        printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=carrier_key)
         if printed and created.get("label_id") is not None:
-            update_gls_label_status(created["label_id"], "PRINTED")
+            update_shipping_label_status(created["label_id"], "PRINTED")
         if printed:
-            message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} gedruckt"[:56])
+            message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} gedruckt"[:56])
         else:
-            message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} nur PDF"[:56])
+            message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} nur PDF"[:56])
     else:
-        message_box(stdscr, "Versandlabel", f"{carrier}: {created['track_id']} nur PDF"[:56])
+        message_box(stdscr, "Versandlabel", f"{carrier}: {_created_label_display_value(carrier_key, created)} nur PDF"[:56])
 
 
 def _format_gls_history_line(row, width):
@@ -5458,7 +7310,7 @@ def _format_gls_history_line(row, width):
     else:
         ts = "-"
     order_name = (row.get("order_name") or "-").replace("#", "")
-    carrier = (row.get("carrier") or "gls").upper()
+    carrier = _shipping_carrier_label(row.get("carrier") or "gls", short=True)
     track_id = _shipment_number(row)
     status = row.get("status") or "-"
     text = f"{ts} {_fit(carrier, 4)} {_fit(order_name, 11)} {_fit(track_id, 10)} {status}"
@@ -5475,7 +7327,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
     while True:
         if reload_rows:
             filter_order_id = None if show_all else (selected_order["order_id"] if selected_order else None)
-            rows = list_gls_labels(filter_order_id)
+            rows = list_shipping_labels(filter_order_id)
             reload_rows = False
             if selected >= len(rows):
                 selected = max(0, len(rows) - 1)
@@ -5515,7 +7367,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         if chosen:
             job = get_latest_shopify_job_for_label(chosen["id"])
             detail_lines.append(_fit(f"Bestellung: {chosen.get('order_name') or '-'}", right_width - 2))
-            detail_lines.append(_fit(f"Dienst: {(chosen.get('carrier') or 'gls').upper()}", right_width - 2))
+            detail_lines.append(_fit(f"Dienst: {_shipping_carrier_label(chosen.get('carrier') or 'gls')}", right_width - 2))
             detail_lines.append(_fit(f"TrackID: {chosen.get('track_id') or '-'}", right_width - 2))
             detail_lines.append(_fit(f"Sendungsnr.: {_shipment_number(chosen)}", right_width - 2))
             detail_lines.append(_fit(f"Status: {chosen.get('status') or '-'}", right_width - 2))
@@ -5572,19 +7424,25 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
                 carrier=(chosen.get("carrier") or "gls").lower(),
             ):
-                update_gls_label_status(chosen["id"], "REPRINTED")
+                update_shipping_label_status(chosen["id"], "REPRINTED")
                 message_box(stdscr, "History", "Label erneut gedruckt.")
                 reload_rows = True
         elif key == curses.KEY_F7 and chosen:
             try:
-                new_path = reprint_shipping_label(chosen)
+                reprint_path = reprint_shipping_label(chosen)
             except Exception as exc:
                 PRINT_LOGGER.exception("Versand Reprint fehlgeschlagen carrier=%s track=%s", chosen.get("carrier"), chosen.get("track_id"))
-                update_gls_label_status(chosen["id"], "REPRINT_FAILED", str(exc)[:120])
                 message_box(stdscr, "Reprint", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
             else:
-                message_box(stdscr, "Reprint", new_path[-56:])
-                reload_rows = True
+                if _print_pdf_via_lp(
+                    stdscr,
+                    reprint_path,
+                    f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
+                    carrier=(chosen.get("carrier") or "gls").lower(),
+                ):
+                    update_shipping_label_status(chosen["id"], "REPRINTED")
+                    message_box(stdscr, "Reprint", "Label erneut gedruckt.")
+                    reload_rows = True
         elif key == curses.KEY_F6 and chosen:
             if not confirm_box(stdscr, "Storno", f"Sendung {chosen['track_id']} stornieren?"):
                 continue
@@ -5600,8 +7458,8 @@ def shipping_history_dialog(stdscr, selected_order=None):
             if str(chosen.get("order_id") or "").startswith("manual-"):
                 message_box(stdscr, "Shopify Queue", "Manuelle Labels haben keine Shopify-Bestellung.")
                 continue
-            if (chosen.get("carrier") or "").strip().lower() == "test":
-                message_box(stdscr, "Shopify Queue", "Test-Labels duerfen nicht an Shopify gesendet werden.")
+            if (chosen.get("carrier") or "").strip().lower() in {"test", "free"}:
+                message_box(stdscr, "Shopify Queue", "Test- und Adresslabels duerfen nicht an Shopify gesendet werden.")
                 continue
             if (chosen.get("source") or "").strip().lower() == "shopify":
                 message_box(stdscr, "Shopify Queue", "Diese Sendung ist bereits aus Shopify eingelesen.")
@@ -5612,11 +7470,11 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 queue_result = enqueue_shopify_fulfillment_job(chosen, notify_customer=False)
             except Exception as exc:
                 PRINT_LOGGER.exception("Shopify Queue fehlgeschlagen track=%s", chosen.get("track_id"))
-                update_gls_label_status(chosen["id"], "SHOPIFY_QUEUE_FAILED", str(exc)[:160])
+                update_shipping_label_status(chosen["id"], "SHOPIFY_QUEUE_FAILED", str(exc)[:160])
                 message_box(stdscr, "Shopify Queue", f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
             else:
                 if queue_result.get("created"):
-                    update_gls_label_status(chosen["id"], "SHOPIFY_QUEUED")
+                    update_shipping_label_status(chosen["id"], "SHOPIFY_QUEUED")
                     message_box(stdscr, "Shopify Queue", f"Job {queue_result['job_id']} eingereiht.")
                 else:
                     message_box(stdscr, "Shopify Queue", f"Job {queue_result['job_id']} laeuft bereits.")
@@ -5624,29 +7482,51 @@ def shipping_history_dialog(stdscr, selected_order=None):
 
 
 def orders_dialog(stdscr):
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     order_filter = None
     only_pending = False
     fulfillment_filter = "all"
     payment_filter = "all"
     selected = 0
     top_index = 0
+    orders_snapshot = []
+    last_orders_snapshot_refresh_at = None
     orders = []
     order_items_cache = {}
+    order_shipments_cache = {}
     selected_order_ids = set()
-    reload_orders = True
+    reload_orders_snapshot = True
+    rebuild_orders_view = True
     current_order_id = None
+    current_order_changed_at = 0.0
 
     while True:
-        if reload_orders:
-            orders = get_orders(
-                order_filter,
-                only_pending=only_pending,
-                fulfillment_filter=fulfillment_filter,
-                payment_filter=payment_filter,
-            )
-            order_items_cache = {}
-            selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
-            reload_orders = False
+        try:
+            if reload_orders_snapshot:
+                orders_snapshot = _load_orders_snapshot()
+                order_items_cache = {}
+                order_shipments_cache = {}
+                reload_orders_snapshot = False
+                rebuild_orders_view = True
+                last_orders_snapshot_refresh_at = time.monotonic()
+            if rebuild_orders_view:
+                orders = _filter_orders_snapshot(
+                    orders_snapshot,
+                    order_filter=order_filter,
+                    only_pending=only_pending,
+                    fulfillment_filter=fulfillment_filter,
+                    payment_filter=payment_filter,
+                )
+                selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
+                rebuild_orders_view = False
+        except (DatabaseUnavailableError, DatabaseBusyError) as exc:
+            if not database_connection_dialog(stdscr, str(exc)):
+                return
+            reload_orders_snapshot = True
+            continue
 
         if selected >= len(orders):
             selected = len(orders) - 1
@@ -5658,11 +7538,22 @@ def orders_dialog(stdscr):
 
         if selected_order_id != current_order_id:
             current_order_id = selected_order_id
+            current_order_changed_at = time.monotonic()
 
-        if selected_order_id and selected_order_id not in order_items_cache:
-            order_items_cache[selected_order_id] = get_order_items(selected_order_id)
+        try:
+            detail_ready = selected_order_id and (time.monotonic() - current_order_changed_at) >= ORDER_DETAILS_LOAD_DELAY_SECONDS
+            if detail_ready and selected_order_id not in order_items_cache:
+                order_items_cache[selected_order_id] = get_order_items(selected_order_id)
+            if detail_ready and selected_order_id not in order_shipments_cache:
+                order_shipments_cache[selected_order_id] = list_shipping_labels(selected_order_id)
+        except (DatabaseUnavailableError, DatabaseBusyError) as exc:
+            if not database_connection_dialog(stdscr, str(exc)):
+                return
+            reload_orders_snapshot = True
+            continue
 
         order_items = order_items_cache.get(selected_order_id, [])
+        order_shipments = order_shipments_cache.get(selected_order_id, [])
 
         h, w = stdscr.getmaxyx()
         width = min(max(88, int(w * 0.84)), w - 6)
@@ -5672,6 +7563,7 @@ def orders_dialog(stdscr):
 
         win = curses.newwin(height, width, y, x)
         win.keypad(True)
+        win.timeout(200)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
         win.box()
@@ -5706,7 +7598,6 @@ def orders_dialog(stdscr):
         if selected_order:
             selected_weight_kg, selected_weight_grams = calculate_order_shipping_weight(selected_order, order_items)
             country = _localized_country_display(selected_order.get("shipping_country"))
-            order_shipments = list_gls_labels(selected_order["order_id"])
             created_at = selected_order.get("created_at")
             if isinstance(created_at, datetime.datetime):
                 ordered_at_text = created_at.strftime("%d.%m.%Y %H:%M")
@@ -5725,7 +7616,10 @@ def orders_dialog(stdscr):
             detail_lines.append(_fit(f"Zahlung: {payment_status}", right_width - 2))
             detail_lines.append(_fit(f"Interne Pos.-Menge: {internal_qty}", right_width - 2))
             detail_lines.append(_fit(f"Versandgewicht: {selected_weight_grams} g ({selected_weight_kg:.3f} kg)", right_width - 2))
-            detail_lines.extend(_shipment_summary_lines(order_shipments, right_width - 13))
+            if selected_order_id and selected_order_id not in order_shipments_cache:
+                detail_lines.append(_fit("Sendungen werden geladen...", right_width - 2))
+            else:
+                detail_lines.extend(_shipment_summary_lines(order_shipments, right_width - 13))
             detail_lines.append("")
             qty_width, sku_width, regal_width, fach_width, platz_width, title_width = format_order_item_header(right_width - 2)
             detail_lines.append(
@@ -5733,14 +7627,17 @@ def orders_dialog(stdscr):
             )
             detail_lines.append("-" * max(1, right_width - 2))
 
-            for row in order_items:
-                detail_lines.append(format_order_item_row(row, right_width - 2))
+            if selected_order_id and selected_order_id not in order_items_cache:
+                detail_lines.append(_fit("Positionen werden geladen...", right_width - 2))
+            else:
+                for row in order_items:
+                    detail_lines.append(format_order_item_row(row, right_width - 2))
         else:
             detail_lines.append("Keine Bestellung gefunden")
 
         draw_panel(details_win, "Positionen", detail_lines, 0, 0, False)
 
-        footer = " Space Mark  F1 Offen  F2 Status  F3 Springen  F4 Versand-History  F5 Pickliste  F6 PDF  F7 Lieferschein  Shift+F7 Teilausf.  F8 Versandlabel  Shift+F8 Manuell  F9 Zurueck  F10 Zahlung  F11 Bulk  F12 Alle "
+        footer = " Space Mark  A Alle  F1 Offen  F2 Status  F3 Zahlung  F4 Springen  F5 Versandlabel  Shift+F5 Manuell  F6 Teilausf.  F7 Bulk  F8 Versand-History  F9 Zurueck  F10 Pickliste  F11 Lieferschein "
         filter_tags = []
         if order_filter:
             filter_tags.append(f"Text:{order_filter}")
@@ -5753,23 +7650,22 @@ def orders_dialog(stdscr):
         if filter_tags:
             footer = f" Filter[{', '.join(filter_tags)}] " + footer
         win.attrset(curses.color_pair(3))
-        win.addstr(height - 1, 1, " " * (width - 2))
-        win.addstr(height - 1, 1, footer[:width - 2])
+        draw_footer_line(win, height - 1, 1, width - 2, footer)
         win.refresh()
 
-        key = win.get_wch()
+        try:
+            key = win.get_wch()
+        except curses.error:
+            if should_refresh_orders(last_orders_snapshot_refresh_at):
+                reload_orders_snapshot = True
+            continue
 
-        if key in (27, curses.KEY_F9, curses.KEY_F12):
-            if key in (27, curses.KEY_F9):
-                return
-            if key == curses.KEY_F12:
-                if not orders:
-                    continue
-                if len(selected_order_ids) == len(orders):
-                    selected_order_ids.clear()
-                else:
-                    selected_order_ids = {row["order_id"] for row in orders}
-                continue
+        if key in (27, curses.KEY_F9):
+            try:
+                curses.curs_set(1)
+            except curses.error:
+                pass
+            return
         if key == curses.KEY_DOWN:
             selected = move_selection(orders, selected, 1)
         elif key == curses.KEY_UP:
@@ -5782,61 +7678,174 @@ def orders_dialog(stdscr):
             only_pending = not only_pending
             selected = 0
             top_index = 0
-            reload_orders = True
+            rebuild_orders_view = True
         elif key == curses.KEY_F2:
             current_index = FULFILLMENT_FILTER_SEQUENCE.index(fulfillment_filter) if fulfillment_filter in FULFILLMENT_FILTER_SEQUENCE else 0
             fulfillment_filter = FULFILLMENT_FILTER_SEQUENCE[(current_index + 1) % len(FULFILLMENT_FILTER_SEQUENCE)]
             selected = 0
             top_index = 0
-            reload_orders = True
-        elif key == curses.KEY_F10:
+            rebuild_orders_view = True
+        elif key == curses.KEY_F3:
             current_index = PAYMENT_FILTER_SEQUENCE.index(payment_filter) if payment_filter in PAYMENT_FILTER_SEQUENCE else 0
             payment_filter = PAYMENT_FILTER_SEQUENCE[(current_index + 1) % len(PAYMENT_FILTER_SEQUENCE)]
             selected = 0
             top_index = 0
-            reload_orders = True
-        elif key == curses.KEY_F11:
-            run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
-            reload_orders = True
-        elif key == curses.KEY_F3:
+            rebuild_orders_view = True
+        elif key == curses.KEY_F4:
             value = order_jump_dialog(stdscr, order_filter or "")
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
             if value is not None:
                 order_filter = value or None
                 selected = 0
                 top_index = 0
-                reload_orders = True
+                rebuild_orders_view = True
                 if value:
-                    matched_orders = get_orders(
-                        order_filter,
+                    matched_orders = _filter_orders_snapshot(
+                        orders_snapshot,
+                        order_filter=order_filter,
                         only_pending=only_pending,
                         fulfillment_filter=fulfillment_filter,
                         payment_filter=payment_filter,
                     )
                     target_index = jump_to_order(matched_orders, value)
                     orders = matched_orders
-                    reload_orders = False
+                    rebuild_orders_view = False
                     if target_index is not None:
                         selected = target_index
         elif key == curses.KEY_F5 and selected_order:
-            print_picklist(stdscr, selected_order, order_items)
+            try:
+                create_shipping_label_for_order(stdscr, selected_order)
+                order_shipments_cache.pop(selected_order_id, None)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
+        elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
+            try:
+                create_manual_shipping_label(stdscr)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
         elif key == curses.KEY_F6 and selected_order:
-            export_delivery_note_pdf(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F7 and selected_order:
-            print_delivery_note(stdscr, selected_order, order_items)
+            try:
+                run_partial_execution_for_order(stdscr, selected_order, order_items)
+                order_shipments_cache.pop(selected_order_id, None)
+                order_items_cache.pop(selected_order_id, None)
+                reload_orders_snapshot = True
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
-            run_partial_execution_for_order(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F8 and selected_order:
-            create_shipping_label_for_order(stdscr, selected_order)
-        elif key in (curses.KEY_F20, "m", "M"):
-            create_manual_shipping_label(stdscr)
-        elif key == curses.KEY_F4:
-            shipping_history_dialog(stdscr, selected_order)
+            try:
+                run_partial_execution_for_order(stdscr, selected_order, order_items)
+                order_shipments_cache.pop(selected_order_id, None)
+                order_items_cache.pop(selected_order_id, None)
+                reload_orders_snapshot = True
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
+        elif key == curses.KEY_F7:
+            try:
+                run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
+                reload_orders_snapshot = True
+                order_items_cache = {}
+                order_shipments_cache = {}
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
+        elif key == curses.KEY_F8:
+            try:
+                shipping_history_dialog(stdscr, selected_order)
+                order_shipments_cache.pop(selected_order_id, None)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
+        elif key == curses.KEY_F11 and selected_order:
+            try:
+                handle_delivery_note_output(stdscr, selected_order, order_items)
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                reload_orders_snapshot = True
+        elif key == curses.KEY_F10 and selected_order:
+            print_picklist(stdscr, selected_order, order_items)
         elif key == " " and selected_order:
             order_id = selected_order["order_id"]
             if order_id in selected_order_ids:
                 selected_order_ids.remove(order_id)
             else:
                 selected_order_ids.add(order_id)
+        elif key in ("a", "A"):
+            if not orders:
+                continue
+            if len(selected_order_ids) == len(orders):
+                selected_order_ids.clear()
+            else:
+                selected_order_ids = {row["order_id"] for row in orders}
 
 
 def inventory_count_dialog(stdscr, line):
@@ -5917,11 +7926,16 @@ def inventory_dialog(stdscr):
         total, counted, differences = inventory_session_summary(get_inventory_lines(session["session_id"]))
         footer = f" F2 Neu  F3 Zaehlen  F4 CSV  F5 Drucken  F6 Diff  F7 Uebern.  F9 Zurueck | Pos {total} Gezaehlt {counted} Diff {differences} "
         win.attrset(curses.color_pair(3))
-        win.addstr(height - 1, 1, " " * (width - 2))
-        win.addstr(height - 1, 1, footer[:width - 2])
+        draw_footer_line(win, height - 1, 1, width - 2, footer)
         win.refresh()
 
-        key = win.get_wch()
+        win.timeout(200)
+        try:
+            key = win.get_wch()
+        except curses.error:
+            continue
+        finally:
+            win.timeout(-1)
 
         if key in (27, curses.KEY_F9):
             return False
@@ -5990,15 +8004,37 @@ def main(stdscr):
     filter_local = False
     sort_mode = "location"
     external_mode = "hide"
+    items_snapshot = []
+    last_items_snapshot_refresh_at = None
     items = []
     location_rows = []
-    reload_items = True
+    reload_items_snapshot = True
+    rebuild_items_view = True
 
     while True:
-        if reload_items:
-            items = get_items(filter_text, filter_no_location, filter_local, sort_mode, external_mode)
+        if reload_items_snapshot:
+            try:
+                items_snapshot = _load_items_snapshot()
+                last_items_snapshot_refresh_at = time.monotonic()
+                reload_items_snapshot = False
+                rebuild_items_view = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
+                continue
+
+        if rebuild_items_view:
+            items = _filter_items_snapshot(
+                items_snapshot,
+                filter_text=filter_text,
+                filter_no_location=filter_no_location,
+                filter_local=filter_local,
+                sort_mode=sort_mode,
+                external_mode=external_mode,
+            )
             location_rows = build_location_rows(items)
-            reload_items = False
+            rebuild_items_view = False
 
         if left_selected >= len(items):
             left_selected = len(items) - 1
@@ -6041,7 +8077,15 @@ def main(stdscr):
             external_mode,
         )
 
-        key = stdscr.get_wch()
+        stdscr.timeout(200)
+        try:
+            key = stdscr.get_wch()
+        except curses.error:
+            if should_refresh_orders(last_items_snapshot_refresh_at, interval_seconds=ITEMS_AUTO_REFRESH_SECONDS):
+                reload_items_snapshot = True
+            continue
+        finally:
+            stdscr.timeout(-1)
         selected_item = (
             get_selected_item(items, left_selected)
             if active_pane == "left"
@@ -6088,7 +8132,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F2:
             filter_local = not filter_local
@@ -6096,7 +8140,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F3:
             filter_no_location = not filter_no_location
@@ -6104,33 +8148,58 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F4 and selected_item:
             item_info_dialog(stdscr, selected_item)
 
         elif key == curses.KEY_F5:
-            add_item(stdscr)
-            reload_items = True
+            try:
+                add_item(stdscr)
+                reload_items_snapshot = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F6 and selected_item:
-            change_location(stdscr, selected_item)
-            reload_items = True
+            try:
+                change_location(stdscr, selected_item)
+                reload_items_snapshot = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F7 and selected_item:
-            change_qty(stdscr, selected_item)
-            reload_items = True
+            try:
+                change_qty(stdscr, selected_item)
+                reload_items_snapshot = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F8 and selected_item:
             print_label(stdscr, selected_item)
 
         elif key == curses.KEY_F1 + 12:
-            if inventory_dialog(stdscr):
-                reload_items = True
+            try:
+                if inventory_dialog(stdscr):
+                    reload_items_snapshot = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F5 + 12 and selected_item:
-            edit_item(stdscr, selected_item)
-            reload_items = True
+            try:
+                edit_item(stdscr, selected_item)
+                reload_items_snapshot = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F8 + 12 and selected_item:
             print_label_multiple(stdscr, selected_item)
@@ -6147,7 +8216,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F10:
             break
@@ -6156,7 +8225,11 @@ def main(stdscr):
             show_secondary_help = not show_secondary_help
 
         elif key == curses.KEY_F12:
-            orders_dialog(stdscr)
+            try:
+                orders_dialog(stdscr)
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
 
         elif key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
 
@@ -6170,7 +8243,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif isinstance(key, str):
             if key in ('\n', '\r'):
@@ -6185,7 +8258,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
 
 try:

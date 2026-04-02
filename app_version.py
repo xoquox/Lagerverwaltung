@@ -1,4 +1,4 @@
-"""Versionsdefinition fuer den separaten Shopify-Sync aus externer Datei."""
+"""Projektweite Versionsdefinition aus externer Versionsdatei."""
 
 import json
 from pathlib import Path
@@ -6,15 +6,15 @@ from pathlib import Path
 
 VERSION_FILE = Path(__file__).resolve().parent / "version.json"
 _DEFAULT_VERSION = {
-    "major": 0,
-    "minor": 1,
+    "major": 1,
+    "minor": 21,
     "patch": 0,
     "stage": "dev",
-    "build": 1,
+    "build": 2,
 }
 
 
-def load_sync_version_data():
+def load_version_data():
     try:
         with VERSION_FILE.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
@@ -26,8 +26,8 @@ def load_sync_version_data():
     return data
 
 
-def build_sync_version(data=None) -> str:
-    version_data = data or load_sync_version_data()
+def build_version(data=None) -> str:
+    version_data = data or load_version_data()
     major = int(version_data.get("major", 0) or 0)
     minor = int(version_data.get("minor", 0) or 0)
     patch = int(version_data.get("patch", 0) or 0)
@@ -42,5 +42,5 @@ def build_sync_version(data=None) -> str:
     return base
 
 
-SYNC_VERSION_DATA = load_sync_version_data()
-SYNC_VERSION = build_sync_version(SYNC_VERSION_DATA)
+VERSION_DATA = load_version_data()
+APP_VERSION = build_version(VERSION_DATA)

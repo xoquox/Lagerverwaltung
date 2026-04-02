@@ -4,6 +4,31 @@ Nur Releases auf `main`. Entwicklungszwischenstaende werden ueber Git-Branches u
 Release-Eintraege nennen die zugehoerige Shopify-Sync-Version und verweisen auf
 [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md).
 
+## [1.22.0] - in Vorbereitung
+
+Zugehoeriger Shopify-Sync-Release: `1.0.0`
+
+### Added
+- Versand mit Deutsche Post INTERNETMARKE einschliesslich Produktkatalog, Produktauswahl und Labelerzeugung.
+- Carrier `Adresslabel` fuer reine Adresslabels ohne Sendungsnummer und ohne Shopify-Fulfillment.
+- Lokales Bundle fuer private Dateien und portable Einstellungen mit Import auf neuen Arbeitsplaetzen.
+- Bedienungsanleitung und Versanddoku in deutscher und englischer Sprache.
+
+### Changed
+- Versandablaeufe fuer Einzel-Label, Bulk, Teilausfuehrung und manuelle Labels vereinheitlicht.
+- Carrier-Auswahl, Carrier-Settings und Versandhistory sind generisch fuer mehrere Versanddienstleister organisiert.
+- Bulk-Druck fasst Labels und Lieferscheine je Lauf zu einer gemeinsamen Datei zusammen.
+- Versand- und Lieferscheinordner koennen ueber die Einstellungen ausgewaehlt werden; Standardpfade liegen unter `~/Dokumente/Lagerverwaltung/`.
+- Hauptansicht und Auftragsansicht arbeiten mit lokalen Snapshots fuer schnellere Bedienung bei langsamer Datenbankverbindung.
+- README auf Projektueberblick reduziert und auf Handbuch, Versanddoku und Releases ausgerichtet.
+
+### Fixed
+- Sync-Version und Laufzeitstatus werden zentral gespeichert und in der TUI angezeigt.
+- Shopify-Fulfillment uebertraegt Carrier, Trackingnummer und bei Bedarf Tracking-URL carrierabhaengig.
+- Shopify-Kundendaten stehen fuer manuelle Versandlabels lokal zur Auswahl bereit.
+- Start und Laufzeit bei nicht erreichbarer Datenbank werden mit einem einheitlichen Dialog abgefangen.
+- Versandhistory verwendet durchgaengig die Tabelle `shipping_labels`.
+
 ## [1.20.028] - 2026-03-24
 
 ### Fixed
