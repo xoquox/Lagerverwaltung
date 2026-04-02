@@ -514,6 +514,82 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertIn("COALESCE(barcode, '') ILIKE %s", query)
         self.assertEqual(params[2], "%4012345678901%")
 
+    def test_filter_items_snapshot_filters_locally_and_sorts(self):
+        rows = [
+            {
+                "sku": "B",
+                "name": "Beta",
+                "barcode": "222",
+                "regal": "A",
+                "fach": "2",
+                "platz": "3",
+                "sync_status": "synced",
+                "external_fulfillment": False,
+            },
+            {
+                "sku": "A",
+                "name": "Alpha",
+                "barcode": "111",
+                "regal": "A",
+                "fach": "1",
+                "platz": "1",
+                "sync_status": "local",
+                "external_fulfillment": False,
+            },
+            {
+                "sku": "X",
+                "name": "Extern",
+                "barcode": "999",
+                "regal": "Z",
+                "fach": "9",
+                "platz": "9",
+                "sync_status": "local",
+                "external_fulfillment": True,
+            },
+        ]
+
+        filtered = self.lager_mc._filter_items_snapshot(
+            rows,
+            filter_text="1",
+            filter_local=True,
+            sort_mode="location",
+            external_mode="hide",
+        )
+
+        self.assertEqual([row["sku"] for row in filtered], ["A"])
+
+    def test_filter_orders_snapshot_filters_locally(self):
+        rows = [
+            {
+                "order_id": "1",
+                "order_name": "#1002",
+                "created_at": datetime.datetime(2026, 4, 2, 10, 0, 0),
+                "shipping_name": "Max Mustermann",
+                "shipping_city": "Berlin",
+                "fulfillment_status": "unfulfilled",
+                "payment_status": "paid",
+            },
+            {
+                "order_id": "2",
+                "order_name": "#1001",
+                "created_at": datetime.datetime(2026, 4, 1, 10, 0, 0),
+                "shipping_name": "Erika Muster",
+                "shipping_city": "Bamberg",
+                "fulfillment_status": "fulfilled",
+                "payment_status": "paid",
+            },
+        ]
+
+        filtered = self.lager_mc._filter_orders_snapshot(
+            rows,
+            order_filter="1002",
+            only_pending=False,
+            fulfillment_filter="open",
+            payment_filter="paid",
+        )
+
+        self.assertEqual([row["order_id"] for row in filtered], ["1"])
+
     def test_build_picklist_text_contains_shipping_address_and_position_count(self):
         order = {
             "order_name": "#1001",

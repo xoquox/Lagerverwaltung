@@ -204,7 +204,10 @@ COUNTRY_ALPHA3 = {
 
 FULFILLMENT_FILTER_SEQUENCE = ["all", "open", "unfulfilled", "partial", "fulfilled"]
 PAYMENT_FILTER_SEQUENCE = ["all", "paid", "pending", "authorized", "partially_paid", "refunded", "voided"]
+ITEMS_AUTO_REFRESH_SECONDS = 10.0
 ORDERS_AUTO_REFRESH_SECONDS = 10.0
+ORDER_DETAILS_LOAD_DELAY_SECONDS = 0.25
+SERVICE_RUNTIME_CACHE_SECONDS = 30.0
 
 
 COLS = [
@@ -974,7 +977,7 @@ def db():
         raise DatabaseUnavailableError(_summarize_db_error(exc)) from exc
 
 
-def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=10.0, force=False):
+def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=SERVICE_RUNTIME_CACHE_SECONDS, force=False):
     now = time.monotonic()
     cached = _SERVICE_RUNTIME_CACHE["rows"].get(service)
     if not force and cached is not None and now - _SERVICE_RUNTIME_CACHE["loaded_at"] < max_age_seconds:
@@ -1154,6 +1157,104 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
     return rows
 
 
+def _load_items_snapshot():
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT
+            sku,
+            name,
+            regal,
+            fach,
+            platz,
+            menge,
+            COALESCE(reserved, 0) AS reserved,
+            COALESCE(committed, 0) AS committed,
+            COALESCE(unavailable, COALESCE(reserved, 0)) AS unavailable,
+            COALESCE(
+                available,
+                GREATEST(
+                    menge
+                    - COALESCE(unavailable, COALESCE(reserved, 0))
+                    - COALESCE(committed, 0),
+                    0
+                )
+            ) AS available,
+            dirty,
+            shopify_variant_id,
+            barcode,
+            shopify_product_status,
+            shopify_description,
+            shopify_price,
+            shopify_compare_at_price,
+            shopify_unit_cost,
+            shopify_unit_cost_currency,
+            shopify_weight_grams,
+            sync_status,
+            COALESCE(external_fulfillment, FALSE) AS external_fulfillment
+        FROM items
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _match_item_filter(row, filter_text):
+    needle = str(filter_text or "").strip().casefold()
+    if not needle:
+        return True
+    fields = (
+        row.get("name") or "",
+        row.get("sku") or "",
+        row.get("barcode") or "",
+    )
+    return any(needle in str(value).casefold() for value in fields)
+
+
+def _sort_items_snapshot(rows, sort_mode):
+    data = list(rows or [])
+    if sort_mode == "name":
+        data.sort(key=lambda row: (str(row.get("name") or "").casefold(), str(row.get("sku") or "").casefold()))
+        return data
+    if sort_mode == "sku":
+        data.sort(key=lambda row: str(row.get("sku") or "").casefold())
+        return data
+    data.sort(
+        key=lambda row: (
+            _sort_location_value(row.get("regal")),
+            _sort_location_value(row.get("fach")),
+            _sort_location_value(row.get("platz")),
+            str(row.get("sku") or "").casefold(),
+        )
+    )
+    return data
+
+
+def _filter_items_snapshot(rows, filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
+    filtered = []
+    for row in rows or []:
+        if not _match_item_filter(row, filter_text):
+            continue
+        if filter_no_location:
+            regal = (row.get("regal") or "").strip()
+            fach = row.get("fach")
+            platz = row.get("platz")
+            if regal and fach not in (None, "") and platz not in (None, ""):
+                continue
+        if filter_local and (row.get("sync_status") or "") != "local":
+            continue
+        is_external = bool(row.get("external_fulfillment"))
+        if external_mode == "only" and not is_external:
+            continue
+        if external_mode == "hide" and is_external:
+            continue
+        filtered.append(row)
+    return _sort_items_snapshot(filtered, sort_mode)
+
+
 def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", payment_filter="all"):
     con = db()
     cur = con.cursor()
@@ -1237,6 +1338,90 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
     cur.close()
     con.close()
     return rows
+
+
+def _load_orders_snapshot():
+    con = db()
+    cur = con.cursor()
+    _execute_db_query(
+        cur,
+        """
+        SELECT
+            so.order_id,
+            so.order_name,
+            so.created_at,
+            so.shipping_name,
+            so.shipping_address1,
+            so.shipping_zip,
+            so.shipping_city,
+            so.shipping_country,
+            so.shipping_email,
+            so.shipping_phone,
+            so.fulfillment_status,
+            so.payment_status,
+            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty
+        FROM shopify_orders so
+        LEFT JOIN (
+            SELECT
+                oi.order_id,
+                SUM(
+                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                    THEN oi.quantity
+                    ELSE 0
+                    END
+                ) AS local_internal_qty
+            FROM shopify_order_items oi
+            LEFT JOIN items i ON i.sku = oi.sku
+            GROUP BY oi.order_id
+        ) AS order_stats ON order_stats.order_id = so.order_id
+        ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
+        """,
+        [],
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _matches_fulfillment_filter(status_value, fulfillment_filter, only_pending=False):
+    status_text = str(status_value or "").strip().lower()
+    if only_pending and status_text in {"fulfilled", "cancelled"}:
+        return False
+    if fulfillment_filter == "all":
+        return True
+    if fulfillment_filter == "open":
+        return status_text not in {"fulfilled", "cancelled"}
+    if fulfillment_filter == "unfulfilled":
+        return status_text == "" or "unfulfilled" in status_text
+    if fulfillment_filter == "partial":
+        return "partial" in status_text or "in_progress" in status_text
+    if fulfillment_filter == "fulfilled":
+        return status_text == "fulfilled"
+    return True
+
+
+def _filter_orders_snapshot(rows, order_filter=None, only_pending=False, fulfillment_filter="all", payment_filter="all"):
+    needle_raw = (order_filter or "").strip()
+    needle = needle_raw.replace("#", "").casefold()
+    filtered = []
+    for row in rows or []:
+        if needle:
+            order_name = str(row.get("order_name") or "").replace("#", "").casefold()
+            shipping_name = str(row.get("shipping_name") or "").casefold()
+            shipping_city = str(row.get("shipping_city") or "").casefold()
+            if needle not in order_name and needle_raw.casefold() not in shipping_name and needle_raw.casefold() not in shipping_city:
+                continue
+        if not _matches_fulfillment_filter(row.get("fulfillment_status"), fulfillment_filter, only_pending=only_pending):
+            continue
+        if payment_filter != "all":
+            payment_value = str(row.get("payment_status") or "").strip().lower()
+            if payment_value != payment_filter.lower():
+                continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: str(row.get("order_name") or ""), reverse=True)
+    filtered.sort(key=lambda row: row.get("created_at") or datetime.datetime.min, reverse=True)
+    return filtered
 
 
 def should_refresh_orders(last_refresh_at, now=None, interval_seconds=ORDERS_AUTO_REFRESH_SECONDS):
@@ -7307,30 +7492,40 @@ def orders_dialog(stdscr):
     payment_filter = "all"
     selected = 0
     top_index = 0
+    orders_snapshot = []
+    last_orders_snapshot_refresh_at = None
     orders = []
     order_items_cache = {}
+    order_shipments_cache = {}
     selected_order_ids = set()
-    reload_orders = True
+    reload_orders_snapshot = True
+    rebuild_orders_view = True
     current_order_id = None
-    last_orders_refresh_at = None
+    current_order_changed_at = 0.0
 
     while True:
         try:
-            if reload_orders or should_refresh_orders(last_orders_refresh_at):
-                orders = get_orders(
-                    order_filter,
+            if reload_orders_snapshot:
+                orders_snapshot = _load_orders_snapshot()
+                order_items_cache = {}
+                order_shipments_cache = {}
+                reload_orders_snapshot = False
+                rebuild_orders_view = True
+                last_orders_snapshot_refresh_at = time.monotonic()
+            if rebuild_orders_view:
+                orders = _filter_orders_snapshot(
+                    orders_snapshot,
+                    order_filter=order_filter,
                     only_pending=only_pending,
                     fulfillment_filter=fulfillment_filter,
                     payment_filter=payment_filter,
                 )
-                order_items_cache = {}
                 selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
-                reload_orders = False
-                last_orders_refresh_at = time.monotonic()
+                rebuild_orders_view = False
         except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
-            reload_orders = True
+            reload_orders_snapshot = True
             continue
 
         if selected >= len(orders):
@@ -7343,17 +7538,22 @@ def orders_dialog(stdscr):
 
         if selected_order_id != current_order_id:
             current_order_id = selected_order_id
+            current_order_changed_at = time.monotonic()
 
         try:
-            if selected_order_id and selected_order_id not in order_items_cache:
+            detail_ready = selected_order_id and (time.monotonic() - current_order_changed_at) >= ORDER_DETAILS_LOAD_DELAY_SECONDS
+            if detail_ready and selected_order_id not in order_items_cache:
                 order_items_cache[selected_order_id] = get_order_items(selected_order_id)
+            if detail_ready and selected_order_id not in order_shipments_cache:
+                order_shipments_cache[selected_order_id] = list_shipping_labels(selected_order_id)
         except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
-            reload_orders = True
+            reload_orders_snapshot = True
             continue
 
         order_items = order_items_cache.get(selected_order_id, [])
+        order_shipments = order_shipments_cache.get(selected_order_id, [])
 
         h, w = stdscr.getmaxyx()
         width = min(max(88, int(w * 0.84)), w - 6)
@@ -7398,13 +7598,6 @@ def orders_dialog(stdscr):
         if selected_order:
             selected_weight_kg, selected_weight_grams = calculate_order_shipping_weight(selected_order, order_items)
             country = _localized_country_display(selected_order.get("shipping_country"))
-            try:
-                order_shipments = list_shipping_labels(selected_order["order_id"])
-            except (DatabaseUnavailableError, DatabaseBusyError) as exc:
-                if not database_connection_dialog(stdscr, str(exc)):
-                    return
-                reload_orders = True
-                continue
             created_at = selected_order.get("created_at")
             if isinstance(created_at, datetime.datetime):
                 ordered_at_text = created_at.strftime("%d.%m.%Y %H:%M")
@@ -7423,7 +7616,10 @@ def orders_dialog(stdscr):
             detail_lines.append(_fit(f"Zahlung: {payment_status}", right_width - 2))
             detail_lines.append(_fit(f"Interne Pos.-Menge: {internal_qty}", right_width - 2))
             detail_lines.append(_fit(f"Versandgewicht: {selected_weight_grams} g ({selected_weight_kg:.3f} kg)", right_width - 2))
-            detail_lines.extend(_shipment_summary_lines(order_shipments, right_width - 13))
+            if selected_order_id and selected_order_id not in order_shipments_cache:
+                detail_lines.append(_fit("Sendungen werden geladen...", right_width - 2))
+            else:
+                detail_lines.extend(_shipment_summary_lines(order_shipments, right_width - 13))
             detail_lines.append("")
             qty_width, sku_width, regal_width, fach_width, platz_width, title_width = format_order_item_header(right_width - 2)
             detail_lines.append(
@@ -7431,8 +7627,11 @@ def orders_dialog(stdscr):
             )
             detail_lines.append("-" * max(1, right_width - 2))
 
-            for row in order_items:
-                detail_lines.append(format_order_item_row(row, right_width - 2))
+            if selected_order_id and selected_order_id not in order_items_cache:
+                detail_lines.append(_fit("Positionen werden geladen...", right_width - 2))
+            else:
+                for row in order_items:
+                    detail_lines.append(format_order_item_row(row, right_width - 2))
         else:
             detail_lines.append("Keine Bestellung gefunden")
 
@@ -7457,6 +7656,8 @@ def orders_dialog(stdscr):
         try:
             key = win.get_wch()
         except curses.error:
+            if should_refresh_orders(last_orders_snapshot_refresh_at):
+                reload_orders_snapshot = True
             continue
 
         if key in (27, curses.KEY_F9):
@@ -7477,19 +7678,19 @@ def orders_dialog(stdscr):
             only_pending = not only_pending
             selected = 0
             top_index = 0
-            reload_orders = True
+            rebuild_orders_view = True
         elif key == curses.KEY_F2:
             current_index = FULFILLMENT_FILTER_SEQUENCE.index(fulfillment_filter) if fulfillment_filter in FULFILLMENT_FILTER_SEQUENCE else 0
             fulfillment_filter = FULFILLMENT_FILTER_SEQUENCE[(current_index + 1) % len(FULFILLMENT_FILTER_SEQUENCE)]
             selected = 0
             top_index = 0
-            reload_orders = True
+            rebuild_orders_view = True
         elif key == curses.KEY_F3:
             current_index = PAYMENT_FILTER_SEQUENCE.index(payment_filter) if payment_filter in PAYMENT_FILTER_SEQUENCE else 0
             payment_filter = PAYMENT_FILTER_SEQUENCE[(current_index + 1) % len(PAYMENT_FILTER_SEQUENCE)]
             selected = 0
             top_index = 0
-            reload_orders = True
+            rebuild_orders_view = True
         elif key == curses.KEY_F4:
             value = order_jump_dialog(stdscr, order_filter or "")
             try:
@@ -7500,22 +7701,24 @@ def orders_dialog(stdscr):
                 order_filter = value or None
                 selected = 0
                 top_index = 0
-                reload_orders = True
+                rebuild_orders_view = True
                 if value:
-                    matched_orders = get_orders(
-                        order_filter,
+                    matched_orders = _filter_orders_snapshot(
+                        orders_snapshot,
+                        order_filter=order_filter,
                         only_pending=only_pending,
                         fulfillment_filter=fulfillment_filter,
                         payment_filter=payment_filter,
                     )
                     target_index = jump_to_order(matched_orders, value)
                     orders = matched_orders
-                    reload_orders = False
+                    rebuild_orders_view = False
                     if target_index is not None:
                         selected = target_index
         elif key == curses.KEY_F5 and selected_order:
             try:
                 create_shipping_label_for_order(stdscr, selected_order)
+                order_shipments_cache.pop(selected_order_id, None)
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -7527,7 +7730,7 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
             try:
                 create_manual_shipping_label(stdscr)
@@ -7542,10 +7745,13 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key == curses.KEY_F6 and selected_order:
             try:
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
+                order_shipments_cache.pop(selected_order_id, None)
+                order_items_cache.pop(selected_order_id, None)
+                reload_orders_snapshot = True
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -7557,10 +7763,13 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
             try:
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
+                order_shipments_cache.pop(selected_order_id, None)
+                order_items_cache.pop(selected_order_id, None)
+                reload_orders_snapshot = True
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -7572,11 +7781,13 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key == curses.KEY_F7:
             try:
                 run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
-                reload_orders = True
+                reload_orders_snapshot = True
+                order_items_cache = {}
+                order_shipments_cache = {}
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -7588,10 +7799,11 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key == curses.KEY_F8:
             try:
                 shipping_history_dialog(stdscr, selected_order)
+                order_shipments_cache.pop(selected_order_id, None)
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -7603,7 +7815,7 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key == curses.KEY_F11 and selected_order:
             try:
                 handle_delivery_note_output(stdscr, selected_order, order_items)
@@ -7618,7 +7830,7 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders = True
+                reload_orders_snapshot = True
         elif key == curses.KEY_F10 and selected_order:
             print_picklist(stdscr, selected_order, order_items)
         elif key == " " and selected_order:
@@ -7792,21 +8004,37 @@ def main(stdscr):
     filter_local = False
     sort_mode = "location"
     external_mode = "hide"
+    items_snapshot = []
+    last_items_snapshot_refresh_at = None
     items = []
     location_rows = []
-    reload_items = True
+    reload_items_snapshot = True
+    rebuild_items_view = True
 
     while True:
-        if reload_items:
+        if reload_items_snapshot:
             try:
-                items = get_items(filter_text, filter_no_location, filter_local, sort_mode, external_mode)
-                location_rows = build_location_rows(items)
-                reload_items = False
+                items_snapshot = _load_items_snapshot()
+                last_items_snapshot_refresh_at = time.monotonic()
+                reload_items_snapshot = False
+                rebuild_items_view = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
-                reload_items = True
+                reload_items_snapshot = True
                 continue
+
+        if rebuild_items_view:
+            items = _filter_items_snapshot(
+                items_snapshot,
+                filter_text=filter_text,
+                filter_no_location=filter_no_location,
+                filter_local=filter_local,
+                sort_mode=sort_mode,
+                external_mode=external_mode,
+            )
+            location_rows = build_location_rows(items)
+            rebuild_items_view = False
 
         if left_selected >= len(items):
             left_selected = len(items) - 1
@@ -7853,6 +8081,8 @@ def main(stdscr):
         try:
             key = stdscr.get_wch()
         except curses.error:
+            if should_refresh_orders(last_items_snapshot_refresh_at, interval_seconds=ITEMS_AUTO_REFRESH_SECONDS):
+                reload_items_snapshot = True
             continue
         finally:
             stdscr.timeout(-1)
@@ -7902,7 +8132,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F2:
             filter_local = not filter_local
@@ -7910,7 +8140,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F3:
             filter_no_location = not filter_no_location
@@ -7918,7 +8148,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F4 and selected_item:
             item_info_dialog(stdscr, selected_item)
@@ -7926,29 +8156,29 @@ def main(stdscr):
         elif key == curses.KEY_F5:
             try:
                 add_item(stdscr)
-                reload_items = True
+                reload_items_snapshot = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
-                reload_items = True
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F6 and selected_item:
             try:
                 change_location(stdscr, selected_item)
-                reload_items = True
+                reload_items_snapshot = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
-                reload_items = True
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F7 and selected_item:
             try:
                 change_qty(stdscr, selected_item)
-                reload_items = True
+                reload_items_snapshot = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
-                reload_items = True
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F8 and selected_item:
             print_label(stdscr, selected_item)
@@ -7956,20 +8186,20 @@ def main(stdscr):
         elif key == curses.KEY_F1 + 12:
             try:
                 if inventory_dialog(stdscr):
-                    reload_items = True
+                    reload_items_snapshot = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
-                reload_items = True
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F5 + 12 and selected_item:
             try:
                 edit_item(stdscr, selected_item)
-                reload_items = True
+                reload_items_snapshot = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
-                reload_items = True
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F8 + 12 and selected_item:
             print_label_multiple(stdscr, selected_item)
@@ -7986,7 +8216,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif key == curses.KEY_F10:
             break
@@ -8013,7 +8243,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
         elif isinstance(key, str):
             if key in ('\n', '\r'):
@@ -8028,7 +8258,7 @@ def main(stdscr):
             left_top_index = 0
             right_selected = 0
             right_top_index = 0
-            reload_items = True
+            rebuild_items_view = True
 
 
 try:
