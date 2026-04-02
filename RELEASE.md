@@ -39,7 +39,7 @@ Regeln:
 Aktueller Stand:
 
 - letzter Release auf `main`: TUI `1.22.0`, Shopify-Sync `1.0.0`
-- naechster Entwicklungsstand auf `develop`: TUI `1.22.0-dev.0`, Shopify-Sync `1.0.0-dev.0`
+- laufender Entwicklungsstand auf `develop`: TUI `1.22.0-dev.0`, Shopify-Sync `1.0.0-dev.0`
 
 ## Changelog
 
