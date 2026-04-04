@@ -590,6 +590,13 @@ class LagerMcLogicTests(unittest.TestCase):
 
         self.assertEqual([row["order_id"] for row in filtered], ["1"])
 
+    def test_prefetch_order_ids_returns_selected_and_neighbors(self):
+        rows = [{"order_id": f"OID-{index}"} for index in range(8)]
+
+        result = self.lager_mc._prefetch_order_ids(rows, 3, ahead=4, behind=1)
+
+        self.assertEqual(result, ["OID-2", "OID-3", "OID-4", "OID-5", "OID-6", "OID-7"])
+
     def test_build_picklist_text_contains_shipping_address_and_position_count(self):
         order = {
             "order_name": "#1001",
@@ -1074,18 +1081,53 @@ class LagerMcLogicTests(unittest.TestCase):
         message_mock.assert_called_once()
         self.assertIn("OK:", message_mock.call_args.args[2])
 
-    def test_search_shopify_customers_queries_local_table(self):
+    def test_get_shopify_customers_snapshot_queries_local_table_and_caches_rows(self):
         fake_rows = [[{"customer_id": "gid://shopify/Customer/1", "display_name": "Max Mustermann"}]]
         cursor = FakeCursor(fetchall_results=fake_rows)
         con = FakeConnection(cursor)
 
         with mock.patch.object(self.lager_mc, "db", return_value=con):
-            rows = self.lager_mc.search_shopify_customers("Max", limit=25)
+            self.lager_mc._SHOPIFY_CUSTOMER_CACHE = {"loaded_at": 0.0, "rows": []}
+            rows = self.lager_mc.get_shopify_customers_snapshot(force=True)
+            cached_rows = self.lager_mc.get_shopify_customers_snapshot()
 
         self.assertEqual(len(rows), 1)
         self.assertIn("FROM shopify_customers", cursor.executed[0][0])
-        self.assertEqual(cursor.executed[0][1][-1], 25)
+        self.assertEqual(cached_rows, rows)
         self.assertEqual(rows[0]["display_name"], "Max Mustermann")
+        self.assertEqual(len(cursor.executed), 1)
+
+    def test_search_shopify_customers_filters_snapshot_locally(self):
+        self.lager_mc._SHOPIFY_CUSTOMER_CACHE = {
+            "loaded_at": time.monotonic(),
+            "rows": [
+                {
+                    "customer_id": "gid://shopify/Customer/1",
+                    "display_name": "Max Mustermann",
+                    "email": "max@example.com",
+                    "default_name": "Max Mustermann",
+                    "default_address1": "Musterstr. 1",
+                    "default_zip": "12345",
+                    "default_city": "Berlin",
+                },
+                {
+                    "customer_id": "gid://shopify/Customer/2",
+                    "display_name": "Erika Musterfrau",
+                    "email": "erika@example.com",
+                    "default_name": "Erika Musterfrau",
+                    "default_address1": "Ring 5",
+                    "default_zip": "80331",
+                    "default_city": "Muenchen",
+                },
+            ],
+        }
+
+        with mock.patch.object(self.lager_mc, "_load_shopify_customers_snapshot") as load_mock:
+            rows = self.lager_mc.search_shopify_customers("80331", limit=25)
+
+        load_mock.assert_not_called()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["display_name"], "Erika Musterfrau")
 
     def test_list_shipping_labels_queries_shipping_labels_table(self):
         cursor = FakeCursor(fetchall_results=[[{"id": 1}]])
@@ -1097,6 +1139,17 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(rows, [{"id": 1}])
         self.assertIn("FROM shipping_labels", cursor.executed[0][0])
         self.assertEqual(cursor.executed[0][1], ("OID-1",))
+
+    def test_get_latest_shopify_jobs_for_labels_queries_once(self):
+        cursor = FakeCursor(fetchall_results=[[{"label_id": 4, "status": "done"}]])
+        connection = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=connection):
+            rows = self.lager_mc.get_latest_shopify_jobs_for_labels([4, 9])
+
+        self.assertEqual(rows[4]["status"], "done")
+        self.assertIn("FROM shopify_fulfillment_jobs", cursor.executed[0][0])
+        self.assertIn("DISTINCT ON (label_id)", cursor.executed[0][0])
 
     def test_apply_shopify_customer_to_manual_state_fills_address(self):
         state = {

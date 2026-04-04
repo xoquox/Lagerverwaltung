@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import textwrap
 import time
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
@@ -76,6 +77,7 @@ _SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
 _POST_PAGE_FORMAT_CACHE = {"loaded_at": 0.0, "formats": []}
 _POST_SELECTION_CACHE = {}
 _SHIPPING_CARRIER_CACHE = "gls"
+_SHOPIFY_CUSTOMER_CACHE = {"loaded_at": 0.0, "rows": []}
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label": "FlexDelivery - Zustelloptionen fuer den Empfaenger", "locked": False},
@@ -207,7 +209,8 @@ PAYMENT_FILTER_SEQUENCE = ["all", "paid", "pending", "authorized", "partially_pa
 ITEMS_AUTO_REFRESH_SECONDS = 10.0
 ORDERS_AUTO_REFRESH_SECONDS = 10.0
 ORDER_DETAILS_LOAD_DELAY_SECONDS = 0.25
-SERVICE_RUNTIME_CACHE_SECONDS = 30.0
+SERVICE_RUNTIME_CACHE_SECONDS = 120.0
+SHOPIFY_CUSTOMER_CACHE_SECONDS = 120.0
 
 
 COLS = [
@@ -882,6 +885,113 @@ class DatabaseBusyError(RuntimeError):
     pass
 
 
+class BackgroundValueLoader:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._pending = None
+        self._result = None
+        self._result_id = 0
+        self._consumed_id = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def request(self, key, fn, *args, **kwargs):
+        with self._condition:
+            self._pending = (key, fn, args, kwargs)
+            self._condition.notify()
+
+    def poll(self):
+        with self._condition:
+            if self._result_id == self._consumed_id:
+                return None
+            self._consumed_id = self._result_id
+            return self._result
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while self._pending is None:
+                    self._condition.wait()
+                key, fn, args, kwargs = self._pending
+                self._pending = None
+            try:
+                value = fn(*args, **kwargs)
+                error = None
+            except Exception as exc:
+                value = None
+                error = exc
+            with self._condition:
+                self._result = {
+                    "key": key,
+                    "value": value,
+                    "error": error,
+                    "loaded_at": time.monotonic(),
+                }
+                self._result_id += 1
+
+
+class BackgroundMapLoader:
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._queue = []
+        self._queued_keys = set()
+        self._results = []
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def request(self, key, fn, *args, **kwargs):
+        with self._condition:
+            if key in self._queued_keys:
+                return
+            self._queue.append((key, fn, args, kwargs))
+            self._queued_keys.add(key)
+            self._condition.notify()
+
+    def poll_all(self):
+        with self._condition:
+            if not self._results:
+                return []
+            results = list(self._results)
+            self._results.clear()
+            return results
+
+    def clear(self):
+        with self._condition:
+            self._queue.clear()
+            self._queued_keys.clear()
+            self._results.clear()
+
+    def _run(self):
+        while True:
+            with self._condition:
+                while not self._queue:
+                    self._condition.wait()
+                key, fn, args, kwargs = self._queue.pop(0)
+                self._queued_keys.discard(key)
+            try:
+                value = fn(*args, **kwargs)
+                error = None
+            except Exception as exc:
+                value = None
+                error = exc
+            with self._condition:
+                self._results.append(
+                    {
+                        "key": key,
+                        "value": value,
+                        "error": error,
+                        "loaded_at": time.monotonic(),
+                    }
+                )
+
+
+_SERVICE_RUNTIME_LOADER = BackgroundValueLoader()
+_ITEMS_SNAPSHOT_LOADER = BackgroundValueLoader()
+_ORDERS_SNAPSHOT_LOADER = BackgroundValueLoader()
+_ORDER_ITEMS_LOADER = BackgroundMapLoader()
+_ORDER_SHIPMENTS_LOADER = BackgroundMapLoader()
+
+
 def _summarize_db_error(exc):
     text = str(exc or "").strip()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -1017,6 +1127,48 @@ def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=SERV
             cur.close()
         if con is not None:
             con.close()
+
+
+def _load_shopify_customers_snapshot():
+    con = db()
+    cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """
+        SELECT
+            customer_id,
+            first_name,
+            last_name,
+            display_name,
+            email,
+            phone,
+            default_name,
+            default_address1,
+            default_zip,
+            default_city,
+            default_country,
+            default_phone
+        FROM shopify_customers
+        ORDER BY COALESCE(display_name, default_name, email, customer_id)
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def get_shopify_customers_snapshot(max_age_seconds=SHOPIFY_CUSTOMER_CACHE_SECONDS, force=False):
+    now = time.monotonic()
+    cached = _SHOPIFY_CUSTOMER_CACHE.get("rows") or []
+    if not force and cached and now - _SHOPIFY_CUSTOMER_CACHE.get("loaded_at", 0.0) < max_age_seconds:
+        return cached
+    try:
+        rows = _load_shopify_customers_snapshot()
+    except Exception:
+        return cached
+    _SHOPIFY_CUSTOMER_CACHE["rows"] = rows
+    _SHOPIFY_CUSTOMER_CACHE["loaded_at"] = now
+    return rows
 
 
 def _format_runtime_time_short(value):
@@ -1424,6 +1576,14 @@ def _filter_orders_snapshot(rows, order_filter=None, only_pending=False, fulfill
     return filtered
 
 
+def _prefetch_order_ids(rows, selected_index, ahead=5, behind=1):
+    if not rows:
+        return []
+    start = max(0, int(selected_index) - max(0, int(behind)))
+    end = min(len(rows), int(selected_index) + max(1, int(ahead)) + 1)
+    return [rows[index]["order_id"] for index in range(start, end) if rows[index].get("order_id")]
+
+
 def should_refresh_orders(last_refresh_at, now=None, interval_seconds=ORDERS_AUTO_REFRESH_SECONDS):
     if last_refresh_at is None:
         return True
@@ -1628,41 +1788,57 @@ def _shipment_source_label(value):
 
 
 def search_shopify_customers(search_text="", limit=100):
+    limit = max(1, int(limit))
+    needle = (search_text or "").strip().casefold()
+    rows = get_shopify_customers_snapshot()
+    if not needle:
+        return rows[:limit]
+
+    filtered = []
+    for row in rows:
+        haystacks = [
+            row.get("display_name"),
+            row.get("email"),
+            row.get("default_name"),
+            row.get("default_address1"),
+            row.get("default_city"),
+            row.get("default_zip"),
+        ]
+        if any(needle in str(value or "").casefold() for value in haystacks):
+            filtered.append(row)
+            if len(filtered) >= limit:
+                break
+    return filtered
+
+
+def get_latest_shopify_jobs_for_labels(label_ids):
+    normalized_ids = [int(value) for value in label_ids or [] if str(value).strip()]
+    if not normalized_ids:
+        return {}
     con = db()
     cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    needle = f"%{(search_text or '').strip()}%"
     cur.execute(
         """
-        SELECT
-            customer_id,
-            first_name,
-            last_name,
-            display_name,
-            email,
-            phone,
-            default_name,
-            default_address1,
-            default_zip,
-            default_city,
-            default_country,
-            default_phone
-        FROM shopify_customers
-        WHERE
-            %s = '%%'
-            OR COALESCE(display_name, '') ILIKE %s
-            OR COALESCE(email, '') ILIKE %s
-            OR COALESCE(default_name, '') ILIKE %s
-            OR COALESCE(default_address1, '') ILIKE %s
-            OR COALESCE(default_city, '') ILIKE %s
-        ORDER BY COALESCE(display_name, default_name, email, customer_id)
-        LIMIT %s
+        SELECT DISTINCT ON (label_id)
+            label_id,
+            id,
+            status,
+            attempts,
+            result_message,
+            shopify_fulfillment_id,
+            created_at,
+            updated_at,
+            processed_at
+        FROM shopify_fulfillment_jobs
+        WHERE label_id = ANY(%s)
+        ORDER BY label_id, created_at DESC, id DESC
         """,
-        (needle, needle, needle, needle, needle, needle, int(limit)),
+        (normalized_ids,),
     )
     rows = cur.fetchall()
     cur.close()
     con.close()
-    return rows
+    return {row["label_id"]: row for row in rows}
 
 
 def _shopify_customer_dialog_label(row, width):
@@ -1696,6 +1872,8 @@ def shopify_customer_dialog(stdscr, search_text=""):
     selected = 0
     top_index = 0
     cursor_pos = len(query)
+    rows = []
+    last_query = None
     base_h, base_w = stdscr.getmaxyx()
     width = min(max(84, int(base_w * 0.86)), base_w - 4)
     height = min(max(18, int(base_h * 0.7)), base_h - 2)
@@ -1703,7 +1881,9 @@ def shopify_customer_dialog(stdscr, search_text=""):
     x = max(2, (base_w - width) // 2)
 
     while True:
-        rows = search_shopify_customers(query, limit=150)
+        if query != last_query:
+            rows = search_shopify_customers(query, limit=150)
+            last_query = query
 
         draw_shadow(stdscr, y, x, height, width)
         win = curses.newwin(height, width, y, x)
@@ -3972,7 +4152,7 @@ def draw_items_panel(win, items, selected, top_index, active):
 
     win.refresh()
 
-def draw(stdscr, items, left_selected, left_top_index, location_rows, right_selected, right_top_index, active_pane, filter_text, show_secondary_help, external_mode):
+def draw(stdscr, items, left_selected, left_top_index, location_rows, right_selected, right_top_index, active_pane, filter_text, show_secondary_help, external_mode, sync_status_label=None):
     h, w = stdscr.getmaxyx()
 
     stdscr.attrset(curses.color_pair(1))
@@ -4025,7 +4205,7 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
             stdscr.addstr(h-2, 0, focus[: max(0, w - 1)])
     except curses.error:
         pass
-    sync_label = format_shopify_sync_status_label()
+    sync_label = sync_status_label or "Sync: -"
     sync_x = max(0, w - len(sync_label) - 1)
     if sync_x > 4:
         try:
@@ -4980,6 +5160,9 @@ def settings_dialog(stdscr):
     ]
     active_tab = 0
     active_field_by_tab = [0 for _ in tabs]
+    sync_state = get_service_runtime_state(max_age_seconds=999999)
+    sync_status_refresh_pending = False
+    last_sync_status_request_at = 0.0
     editable_field_names = {
         name
         for tab in tabs
@@ -5004,6 +5187,24 @@ def settings_dialog(stdscr):
         scroll_offsets[field_name] = max(0, min(scroll, max_scroll))
 
     while True:
+        loader_result = _SERVICE_RUNTIME_LOADER.poll()
+        if loader_result and loader_result.get("key") == "service_runtime_state":
+            sync_status_refresh_pending = False
+            if loader_result.get("error") is None:
+                sync_state = loader_result.get("value")
+                last_sync_status_request_at = loader_result.get("loaded_at") or time.monotonic()
+        if not sync_status_refresh_pending and (
+            sync_state is None or (time.monotonic() - last_sync_status_request_at) >= SERVICE_RUNTIME_CACHE_SECONDS
+        ):
+            _SERVICE_RUNTIME_LOADER.request(
+                "service_runtime_state",
+                get_service_runtime_state,
+                SHOPIFY_SYNC_SERVICE,
+                SERVICE_RUNTIME_CACHE_SECONDS,
+                True,
+            )
+            sync_status_refresh_pending = True
+
         tab = tabs[active_tab]
         tab_fields = tab["fields"]
         editable_indices = [idx for idx, (name, _label_key) in enumerate(tab_fields) if not str(name).startswith("_heading_")]
@@ -5037,7 +5238,6 @@ def settings_dialog(stdscr):
         win.erase()
         win.box()
         win.addstr(0, 2, f" {t('settings')} ")
-        sync_state = get_service_runtime_state()
         sync_version = ((sync_state or {}).get("version") or "-").strip() or "-"
         sync_label = f" Sync {sync_version} "
         sync_x = max(2, width - len(sync_label) - 2)
@@ -7323,11 +7523,13 @@ def shipping_history_dialog(stdscr, selected_order=None):
     show_all = False
     reload_rows = True
     rows = []
+    job_rows = {}
 
     while True:
         if reload_rows:
             filter_order_id = None if show_all else (selected_order["order_id"] if selected_order else None)
             rows = list_shipping_labels(filter_order_id)
+            job_rows = get_latest_shopify_jobs_for_labels([row.get("id") for row in rows])
             reload_rows = False
             if selected >= len(rows):
                 selected = max(0, len(rows) - 1)
@@ -7365,7 +7567,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         detail_lines = []
         chosen = rows[selected] if rows else None
         if chosen:
-            job = get_latest_shopify_job_for_label(chosen["id"])
+            job = job_rows.get(chosen["id"])
             detail_lines.append(_fit(f"Bestellung: {chosen.get('order_name') or '-'}", right_width - 2))
             detail_lines.append(_fit(f"Dienst: {_shipping_carrier_label(chosen.get('carrier') or 'gls')}", right_width - 2))
             detail_lines.append(_fit(f"TrackID: {chosen.get('track_id') or '-'}", right_width - 2))
@@ -7424,7 +7626,6 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
                 carrier=(chosen.get("carrier") or "gls").lower(),
             ):
-                update_shipping_label_status(chosen["id"], "REPRINTED")
                 message_box(stdscr, "History", "Label erneut gedruckt.")
                 reload_rows = True
         elif key == curses.KEY_F7 and chosen:
@@ -7440,7 +7641,6 @@ def shipping_history_dialog(stdscr, selected_order=None):
                     f"{(chosen.get('carrier') or 'gls').upper()} {chosen['shipment_reference']}",
                     carrier=(chosen.get("carrier") or "gls").lower(),
                 ):
-                    update_shipping_label_status(chosen["id"], "REPRINTED")
                     message_box(stdscr, "Reprint", "Label erneut gedruckt.")
                     reload_rows = True
         elif key == curses.KEY_F6 and chosen:
@@ -7499,19 +7699,41 @@ def orders_dialog(stdscr):
     order_shipments_cache = {}
     selected_order_ids = set()
     reload_orders_snapshot = True
+    orders_snapshot_reload_pending = False
     rebuild_orders_view = True
-    current_order_id = None
-    current_order_changed_at = 0.0
+    prefetch_order_ids = []
 
     while True:
-        try:
-            if reload_orders_snapshot:
-                orders_snapshot = _load_orders_snapshot()
+        for result in _ORDER_ITEMS_LOADER.poll_all():
+            if result.get("error") is None and result.get("value") is not None:
+                order_items_cache[result["key"]] = result["value"]
+        for result in _ORDER_SHIPMENTS_LOADER.poll_all():
+            if result.get("error") is None and result.get("value") is not None:
+                order_shipments_cache[result["key"]] = result["value"]
+        loader_result = _ORDERS_SNAPSHOT_LOADER.poll()
+        if loader_result and loader_result.get("key") == "orders_snapshot":
+            orders_snapshot_reload_pending = False
+            if loader_result.get("error") is None and loader_result.get("value") is not None:
+                orders_snapshot = loader_result["value"]
                 order_items_cache = {}
                 order_shipments_cache = {}
-                reload_orders_snapshot = False
+                _ORDER_ITEMS_LOADER.clear()
+                _ORDER_SHIPMENTS_LOADER.clear()
                 rebuild_orders_view = True
-                last_orders_snapshot_refresh_at = time.monotonic()
+                last_orders_snapshot_refresh_at = loader_result["loaded_at"]
+
+        try:
+            if reload_orders_snapshot:
+                if not orders_snapshot:
+                    orders_snapshot = _load_orders_snapshot()
+                    order_items_cache = {}
+                    order_shipments_cache = {}
+                    last_orders_snapshot_refresh_at = time.monotonic()
+                    rebuild_orders_view = True
+                elif not orders_snapshot_reload_pending:
+                    _ORDERS_SNAPSHOT_LOADER.request("orders_snapshot", _load_orders_snapshot)
+                    orders_snapshot_reload_pending = True
+                reload_orders_snapshot = False
             if rebuild_orders_view:
                 orders = _filter_orders_snapshot(
                     orders_snapshot,
@@ -7536,16 +7758,13 @@ def orders_dialog(stdscr):
         selected_order = orders[selected] if orders else None
         selected_order_id = selected_order["order_id"] if selected_order else None
 
-        if selected_order_id != current_order_id:
-            current_order_id = selected_order_id
-            current_order_changed_at = time.monotonic()
-
         try:
-            detail_ready = selected_order_id and (time.monotonic() - current_order_changed_at) >= ORDER_DETAILS_LOAD_DELAY_SECONDS
-            if detail_ready and selected_order_id not in order_items_cache:
-                order_items_cache[selected_order_id] = get_order_items(selected_order_id)
-            if detail_ready and selected_order_id not in order_shipments_cache:
-                order_shipments_cache[selected_order_id] = list_shipping_labels(selected_order_id)
+            prefetch_order_ids = _prefetch_order_ids(orders, selected, ahead=5, behind=1)
+            for order_id in prefetch_order_ids:
+                if order_id not in order_items_cache:
+                    _ORDER_ITEMS_LOADER.request(order_id, get_order_items, order_id)
+                if order_id not in order_shipments_cache:
+                    _ORDER_SHIPMENTS_LOADER.request(order_id, list_shipping_labels, order_id)
         except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
@@ -7880,11 +8099,16 @@ def inventory_dialog(stdscr):
     top_index = 0
     show_differences = False
     lines = []
+    all_lines = []
     reload_lines = True
 
     while True:
         if reload_lines:
-            lines = get_inventory_lines(session["session_id"], show_differences)
+            all_lines = get_inventory_lines(session["session_id"])
+            if show_differences:
+                lines = [row for row in all_lines if row["ist_menge"] is not None and row["ist_menge"] != row["soll_menge"]]
+            else:
+                lines = list(all_lines)
             reload_lines = False
 
         if selected >= len(lines):
@@ -7923,7 +8147,7 @@ def inventory_dialog(stdscr):
             True,
         )
 
-        total, counted, differences = inventory_session_summary(get_inventory_lines(session["session_id"]))
+        total, counted, differences = inventory_session_summary(all_lines)
         footer = f" F2 Neu  F3 Zaehlen  F4 CSV  F5 Drucken  F6 Diff  F7 Uebern.  F9 Zurueck | Pos {total} Gezaehlt {counted} Diff {differences} "
         win.attrset(curses.color_pair(3))
         draw_footer_line(win, height - 1, 1, width - 2, footer)
@@ -7959,17 +8183,16 @@ def inventory_dialog(stdscr):
                 set_inventory_count(session["session_id"], lines[selected]["line_no"], qty)
                 reload_lines = True
         elif key == curses.KEY_F4:
-            path = export_inventory_csv(session, get_inventory_lines(session["session_id"]))
+            path = export_inventory_csv(session, all_lines)
             message_box(stdscr, "CSV Export", path[-56:])
         elif key == curses.KEY_F5:
-            print_inventory_list(stdscr, session, get_inventory_lines(session["session_id"]))
+            print_inventory_list(stdscr, session, all_lines)
         elif key == curses.KEY_F6:
             show_differences = not show_differences
             selected = 0
             top_index = 0
             reload_lines = True
         elif key == curses.KEY_F7:
-            all_lines = get_inventory_lines(session["session_id"])
             counted_now = sum(1 for row in all_lines if row["ist_menge"] is not None)
             if counted_now == 0:
                 message_box(stdscr, "Inventur", "Noch keine Ist-Mengen erfasst.")
@@ -8009,15 +8232,48 @@ def main(stdscr):
     items = []
     location_rows = []
     reload_items_snapshot = True
+    items_snapshot_reload_pending = False
     rebuild_items_view = True
+    sync_state = get_service_runtime_state(max_age_seconds=999999)
+    sync_status_refresh_pending = False
+    last_sync_status_request_at = 0.0
 
     while True:
+        runtime_result = _SERVICE_RUNTIME_LOADER.poll()
+        if runtime_result and runtime_result.get("key") == "service_runtime_state":
+            sync_status_refresh_pending = False
+            if runtime_result.get("error") is None:
+                sync_state = runtime_result.get("value")
+                last_sync_status_request_at = runtime_result.get("loaded_at") or time.monotonic()
+        loader_result = _ITEMS_SNAPSHOT_LOADER.poll()
+        if loader_result and loader_result.get("key") == "items_snapshot":
+            items_snapshot_reload_pending = False
+            if loader_result.get("error") is None and loader_result.get("value") is not None:
+                items_snapshot = loader_result["value"]
+                last_items_snapshot_refresh_at = loader_result["loaded_at"]
+                rebuild_items_view = True
+        if not sync_status_refresh_pending and (
+            sync_state is None or (time.monotonic() - last_sync_status_request_at) >= SERVICE_RUNTIME_CACHE_SECONDS
+        ):
+            _SERVICE_RUNTIME_LOADER.request(
+                "service_runtime_state",
+                get_service_runtime_state,
+                SHOPIFY_SYNC_SERVICE,
+                SERVICE_RUNTIME_CACHE_SECONDS,
+                True,
+            )
+            sync_status_refresh_pending = True
+
         if reload_items_snapshot:
             try:
-                items_snapshot = _load_items_snapshot()
-                last_items_snapshot_refresh_at = time.monotonic()
+                if not items_snapshot:
+                    items_snapshot = _load_items_snapshot()
+                    last_items_snapshot_refresh_at = time.monotonic()
+                    rebuild_items_view = True
+                elif not items_snapshot_reload_pending:
+                    _ITEMS_SNAPSHOT_LOADER.request("items_snapshot", _load_items_snapshot)
+                    items_snapshot_reload_pending = True
                 reload_items_snapshot = False
-                rebuild_items_view = True
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
@@ -8075,6 +8331,7 @@ def main(stdscr):
             filter_text,
             show_secondary_help,
             external_mode,
+            format_shopify_sync_status_label(sync_state),
         )
 
         stdscr.timeout(200)
