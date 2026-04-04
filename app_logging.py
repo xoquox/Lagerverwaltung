@@ -9,7 +9,8 @@ from pathlib import Path
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 MAIN_LOG_PATH = LOG_DIR / "lagerverwaltung.log"
-PRINT_LOG_PATH = LOG_DIR / "druck.log"
+PRINT_LOG_PATH = LOG_DIR / "print.log"
+LEGACY_PRINT_LOG_PATH = LOG_DIR / "druck.log"
 _CONFIGURED_LOGGERS: set[str] = set()
 
 
@@ -31,13 +32,19 @@ def configure_logging(name: str = "main") -> Path:
     if logger_name in _CONFIGURED_LOGGERS:
         return _log_path_for(name)
 
-    handler = RotatingFileHandler(_log_path_for(name), maxBytes=1_000_000, backupCount=5, encoding="utf-8")
-    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
-    handler.setFormatter(formatter)
-
     logger = logging.getLogger(logger_name)
     logger.setLevel(_log_level())
-    logger.addHandler(handler)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+
+    primary_handler = RotatingFileHandler(_log_path_for(name), maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+    primary_handler.setFormatter(formatter)
+    logger.addHandler(primary_handler)
+
+    if name in {"label_print", "print"}:
+        legacy_handler = RotatingFileHandler(LEGACY_PRINT_LOG_PATH, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+        legacy_handler.setFormatter(formatter)
+        logger.addHandler(legacy_handler)
+
     logger.propagate = False
 
     _CONFIGURED_LOGGERS.add(logger_name)

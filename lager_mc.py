@@ -4,6 +4,7 @@ import csv
 import datetime
 import base64
 import binascii
+import address_label
 import html
 import json
 import os
@@ -51,7 +52,6 @@ from shipping.carriers import (
 )
 from shipping.history import (
     SHIPPING_LABEL_TABLE,
-    ensure_shipping_history_schema,
     find_or_create_shopify_fulfillment_job as _find_or_create_shopify_fulfillment_job,
     get_latest_shopify_job_for_label as _get_latest_shopify_job_for_label,
     get_latest_shipping_label_for_order as _get_latest_shipping_label_for_order,
@@ -60,6 +60,7 @@ from shipping.history import (
     update_shipping_label_reprint as _update_shipping_label_reprint,
     update_shipping_label_status as _update_shipping_label_status,
 )
+from shipping.schema import apply_app_schema, collect_schema_issues
 
 locale.setlocale(locale.LC_ALL, "")
 
@@ -711,170 +712,20 @@ def _resolve_pair_colors(fg_name, bg_name, fallback_fg, fallback_bg):
 def init_db():
     con = db()
     cur = con.cursor()
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS available integer")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS reserved integer DEFAULT 0")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS committed integer DEFAULT 0")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS unavailable integer DEFAULT 0")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS external_fulfillment boolean NOT NULL DEFAULT FALSE")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS barcode text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_status text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_description text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_price text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_compare_at_price text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost_currency text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_weight_grams integer")
-    cur.execute("UPDATE items SET reserved = COALESCE(reserved, 0)")
-    cur.execute("UPDATE items SET committed = COALESCE(committed, 0)")
-    cur.execute(
-        """
-        UPDATE items
-        SET unavailable = COALESCE(unavailable, COALESCE(reserved, 0))
-        """
-    )
-    cur.execute(
-        """
-        UPDATE items
-        SET available = GREATEST(
-            menge - COALESCE(unavailable, 0) - COALESCE(committed, 0),
-            0
-        )
-        WHERE available IS NULL
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_orders (
-            order_id text PRIMARY KEY,
-            order_name text NOT NULL,
-            created_at timestamptz,
-            shipping_name text,
-            shipping_address1 text,
-            shipping_zip text,
-            shipping_city text,
-            shipping_country text,
-            shipping_email text,
-            shipping_phone text,
-            fulfillment_status text,
-            payment_status text,
-            updated_at timestamptz NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_country text")
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_email text")
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_phone text")
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS payment_status text")
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_shopify_orders_name
-        ON shopify_orders(order_name)
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_order_items (
-            order_id text NOT NULL,
-            line_index integer NOT NULL,
-            order_line_item_id text,
-            sku text,
-            title text NOT NULL,
-            quantity integer NOT NULL,
-            fulfilled_quantity integer NOT NULL DEFAULT 0,
-            PRIMARY KEY (order_id, line_index)
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
-    cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
-    ensure_shipping_history_schema(cur)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS service_runtime_state (
-            service text PRIMARY KEY,
-            version text,
-            status text NOT NULL DEFAULT 'unknown',
-            last_seen_at timestamptz,
-            last_started_at timestamptz,
-            last_finished_at timestamptz,
-            last_pull_at timestamptz,
-            last_push_at timestamptz,
-            last_error text,
-            updated_at timestamptz NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_customers (
-            customer_id text PRIMARY KEY,
-            first_name text,
-            last_name text,
-            display_name text,
-            email text,
-            phone text,
-            default_name text,
-            default_address1 text,
-            default_zip text,
-            default_city text,
-            default_country text,
-            default_phone text,
-            updated_at timestamptz NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS first_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS last_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS display_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS email text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS phone text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_address1 text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_zip text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_city text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_country text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_phone text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_display_name ON shopify_customers(display_name)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_email ON shopify_customers(email)")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_started_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_finished_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_pull_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_push_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_error text")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inventory_sessions (
-            session_id serial PRIMARY KEY,
-            session_name text NOT NULL,
-            created_at timestamptz NOT NULL DEFAULT NOW(),
-            status text NOT NULL DEFAULT 'active'
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inventory_lines (
-            session_id integer NOT NULL REFERENCES inventory_sessions(session_id) ON DELETE CASCADE,
-            line_no integer NOT NULL,
-            sku text NOT NULL,
-            name text NOT NULL,
-            regal text,
-            fach text,
-            platz text,
-            soll_menge integer NOT NULL,
-            ist_menge integer,
-            PRIMARY KEY (session_id, line_no)
-        )
-        """
-    )
+    apply_app_schema(cur)
     con.commit()
     cur.close()
     con.close()
+
+
+def database_schema_issues():
+    con = db()
+    cur = con.cursor()
+    try:
+        return collect_schema_issues(cur)
+    finally:
+        cur.close()
+        con.close()
 
 
 class DatabaseUnavailableError(RuntimeError):
@@ -1017,7 +868,9 @@ def _probe_database_ready():
     if _is_default_db_settings(SETTINGS):
         return False, "Bitte zuerst DB Einstellungen in Shift+F11 speichern."
     try:
-        init_db()
+        issues = database_schema_issues()
+        if issues:
+            return False, "DB Migration noetig. scripts/run_db_migrations.py ausfuehren."
         return True, ""
     except Exception as exc:
         return False, _summarize_db_error(exc)
@@ -2977,6 +2830,127 @@ def _cups_label_print_options(label_format):
     return options
 
 
+def _short_print_output(value, limit=220):
+    text = (value or "").strip().replace("\n", " | ")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _build_simple_test_page_pdf(title, lines=None, page_size="A4"):
+    width, height = address_label._page_dimensions_points(page_size)
+    margin = 36
+    text_lines = [str(title or "Testseite").strip() or "Testseite"]
+    text_lines.extend(str(line).strip() for line in (lines or []) if str(line).strip())
+    content_lines = [
+        "BT",
+        "/F1 18 Tf",
+        f"1 0 0 1 {margin:.2f} {height - margin - 10:.2f} Tm ({address_label._pdf_escape(text_lines[0])}) Tj",
+        "ET",
+        "BT",
+        "/F1 11 Tf",
+    ]
+    current_y = height - margin - 42
+    for line in text_lines[1:]:
+        content_lines.append(f"1 0 0 1 {margin:.2f} {current_y:.2f} Tm ({address_label._pdf_escape(line)}) Tj")
+        current_y -= 15
+    content_lines.append("ET")
+    content = "\n".join(content_lines).encode("latin-1", errors="replace")
+
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] "
+            "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        f"<< /Length {len(content)} >>\nstream\n{content.decode('latin-1')}\nendstream",
+    ]
+    pdf = "%PDF-1.4\n"
+    offsets = []
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf.encode("latin-1")))
+        pdf += f"{index} 0 obj\n{obj}\nendobj\n"
+    xref_start = len(pdf.encode("latin-1"))
+    pdf += f"xref\n0 {len(objects) + 1}\n"
+    pdf += "0000000000 65535 f \n"
+    for offset in offsets:
+        pdf += f"{offset:010d} 00000 n \n"
+    pdf += f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n"
+    return pdf.encode("latin-1")
+
+
+def _run_lp_command(cmd, *, print_kind, printer, title, source_path=None, extra=None):
+    source_path = str(source_path or "")
+    file_exists = bool(source_path and os.path.isfile(source_path))
+    file_size = os.path.getsize(source_path) if file_exists else None
+    PRINT_LOGGER.info(
+        "Druckstart kind=%s printer=%s title=%s path=%s exists=%s size=%s extra=%s cmd=%s",
+        print_kind,
+        printer,
+        title,
+        source_path or "-",
+        file_exists,
+        file_size if file_size is not None else "-",
+        extra or "-",
+        json.dumps(cmd, ensure_ascii=True),
+    )
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    PRINT_LOGGER.info(
+        "Druckok kind=%s printer=%s title=%s stdout=%s stderr=%s",
+        print_kind,
+        printer,
+        title,
+        _short_print_output(result.stdout),
+        _short_print_output(result.stderr),
+    )
+    return result
+
+
+def _print_test_page_to_printer(stdscr, printer, title, page_size="A4", lines=None):
+    if not (printer or "").strip():
+        message_box(stdscr, "Fehler", "Kein Drucker fuer Testseite gesetzt.")
+        return False
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+        temp_path = handle.name
+    try:
+        Path(temp_path).write_bytes(_build_simple_test_page_pdf(title, lines=lines, page_size=page_size))
+        cmd = ["lp", "-d", printer, "-t", title]
+        cmd.extend(_cups_label_print_options(page_size))
+        cmd.append(temp_path)
+        _run_lp_command(
+            cmd,
+            print_kind="test_page",
+            printer=printer,
+            title=title,
+            source_path=temp_path,
+            extra=f"page_size={page_size}",
+        )
+    except FileNotFoundError:
+        PRINT_LOGGER.exception("lp nicht verfuegbar fuer Testseite printer=%s title=%s", printer, title)
+        message_box(stdscr, "Druckfehler", "lp/Drucksystem ist auf diesem System nicht verfuegbar.")
+        return False
+    except subprocess.CalledProcessError as exc:
+        PRINT_LOGGER.exception("Testseite fehlgeschlagen printer=%s title=%s", printer, title)
+        error_text = _short_print_output(exc.stderr or str(exc), limit=160)
+        message_box(stdscr, "Druckfehler", f"{(error_text[:20] or 'Druckfehler')} {PRINT_LOG_PATH.name}"[:56])
+        return False
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+    message_box(stdscr, "Druck", "Testseite wurde an Drucker gesendet.")
+    return True
+
+
 def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
     carrier_key = effective_shipping_carrier(carrier)
     printer = _shipping_printer_for_carrier(carrier_key)
@@ -2988,12 +2962,13 @@ def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
     cmd.extend(_cups_label_print_options(label_format))
     cmd.append(pdf_path)
     try:
-        subprocess.run(
+        _run_lp_command(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
+            print_kind="shipping_label",
+            printer=printer,
+            title=title,
+            source_path=pdf_path,
+            extra=f"carrier={carrier_key} format={label_format}",
         )
     except FileNotFoundError:
         PRINT_LOGGER.exception("lp nicht verfuegbar fuer Versandlabel path=%s", pdf_path)
@@ -5073,6 +5048,56 @@ def _shipping_settings_initial_values():
     return values
 
 
+def _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields):
+    if active_name == "picklist_printer":
+        printer = (values.get("picklist_printer") or "").strip()
+        return {
+            "printer": printer,
+            "page_size": "A4",
+            "title": "Pickliste Testseite",
+            "lines": [f"Drucker: {printer or '-'}", "Typ: Pickliste", f"Zeit: {datetime.datetime.now():%Y-%m-%d %H:%M:%S}"],
+        }
+    if active_name in {"delivery_note_printer", "delivery_note_format"}:
+        printer = (values.get("delivery_note_printer") or "").strip()
+        page_size = _normalize_shipping_label_format(values.get("delivery_note_format", "A4"))
+        return {
+            "printer": printer,
+            "page_size": page_size,
+            "title": "Lieferschein Testseite",
+            "lines": [f"Drucker: {printer or '-'}", f"Format: {page_size}", "Typ: Lieferschein"],
+        }
+    if active_name == "shipping_label_printer":
+        printer = (values.get("shipping_label_printer") or "").strip()
+        page_size = _normalize_shipping_label_format(values.get("shipping_label_format", "A6"))
+        return {
+            "printer": printer,
+            "page_size": page_size,
+            "title": "Versandlabel Testseite",
+            "lines": [f"Drucker: {printer or '-'}", f"Format: {page_size}", "Typ: Versandlabel Fallback"],
+        }
+    if active_name in {"shipping_label_format", *shipping_printer_fields.keys(), *shipping_format_fields.keys()}:
+        carrier_code = shipping_printer_fields.get(active_name) or shipping_format_fields.get(active_name)
+        if not carrier_code:
+            return None
+        printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
+        format_field = _shipping_carrier_setting_field(carrier_code, "format")
+        printer = (values.get(printer_field) or values.get("shipping_label_printer") or "").strip()
+        page_size = _normalize_shipping_label_format(
+            values.get(format_field) or values.get("shipping_label_format") or "A6"
+        )
+        return {
+            "printer": printer,
+            "page_size": page_size,
+            "title": f"{_shipping_carrier_label(carrier_code)} Testseite",
+            "lines": [
+                f"Drucker: {printer or '-'}",
+                f"Format: {page_size}",
+                f"Typ: {_shipping_carrier_label(carrier_code)}",
+            ],
+        }
+    return None
+
+
 def settings_dialog(stdscr):
     global SETTINGS
 
@@ -5284,7 +5309,7 @@ def settings_dialog(stdscr):
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  F6 Auswahl  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  F6 Auswahl  F7 Testseite  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         draw_footer_line(win, height - 2, 1, width - 2, footer)
         win.attrset(curses.color_pair(1))
@@ -5412,6 +5437,20 @@ def settings_dialog(stdscr):
                     values[active_name] = file_dialog(stdscr, current_value, "Logo waehlen", extensions={".png", ".jpg", ".jpeg", ".svg", ".pdf"})
                     cursor_positions[active_name] = len(str(values.get(active_name, "")))
                 continue
+
+        if key == curses.KEY_F7:
+            context = _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields)
+            if context is None:
+                message_box(stdscr, "Drucktest", "Hier ist keine Testseite verfuegbar.")
+                continue
+            _print_test_page_to_printer(
+                stdscr,
+                context["printer"],
+                context["title"],
+                page_size=context["page_size"],
+                lines=context["lines"],
+            )
+            continue
 
         if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             if active_name == "language":
@@ -6504,18 +6543,13 @@ def print_picklist(stdscr, order, order_items):
         temp_path = handle.name
 
     try:
-        PRINT_LOGGER.debug(
-            "Sende Pickliste an Drucker printer=%s order=%s items=%s",
-            printer,
-            order["order_name"],
-            len(order_items),
-        )
-        subprocess.run(
+        _run_lp_command(
             ["lp", "-d", printer, "-t", f"Pickliste {order['order_name']}", temp_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
+            print_kind="picklist",
+            printer=printer,
+            title=f"Pickliste {order['order_name']}",
+            source_path=temp_path,
+            extra=f"items={len(order_items)}",
         )
     except FileNotFoundError:
         PRINT_LOGGER.exception("lp/Drucksystem nicht verfuegbar fuer Pickliste order=%s", order["order_name"])
@@ -6617,18 +6651,13 @@ def print_delivery_note(stdscr, order, order_items):
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path, rows = create_delivery_note_pdf(order, order_items, output_dir=temp_dir)
-            PRINT_LOGGER.debug(
-                "Sende Lieferschein an Drucker printer=%s order=%s items=%s",
-                printer,
-                order["order_name"],
-                len(rows),
-            )
-            subprocess.run(
+            _run_lp_command(
                 ["lp", "-d", printer, "-t", f"Lieferschein {order['order_name']}", temp_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
+                print_kind="delivery_note",
+                printer=printer,
+                title=f"Lieferschein {order['order_name']}",
+                source_path=temp_path,
+                extra=f"items={len(rows)} format={_delivery_note_format()}",
             )
     except FileNotFoundError as exc:
         PRINT_LOGGER.exception("Lieferschein-Druck nicht moeglich order=%s", order["order_name"])
@@ -6745,18 +6774,13 @@ def print_inventory_list(stdscr, session, lines):
         temp_path = handle.name
 
     try:
-        PRINT_LOGGER.debug(
-            "Sende Inventurliste an Drucker printer=%s session=%s positions=%s",
-            printer,
-            session["session_name"],
-            len(lines),
-        )
-        subprocess.run(
+        _run_lp_command(
             ["lp", "-d", printer, "-t", session["session_name"], temp_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
+            print_kind="inventory_list",
+            printer=printer,
+            title=session["session_name"],
+            source_path=temp_path,
+            extra=f"positions={len(lines)}",
         )
     except FileNotFoundError:
         PRINT_LOGGER.exception("lp/Drucksystem nicht verfuegbar fuer Inventurliste session=%s", session["session_name"])
@@ -7165,12 +7189,13 @@ def _print_delivery_note_pdf_path(order, pdf_path):
     cmd = ["lp", "-d", printer, "-t", f"Lieferschein {order['order_name']}"]
     cmd.extend(_cups_label_print_options(_delivery_note_format()))
     cmd.append(pdf_path)
-    subprocess.run(
+    _run_lp_command(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
+        print_kind="delivery_note",
+        printer=printer,
+        title=f"Lieferschein {order['order_name']}",
+        source_path=pdf_path,
+        extra=f"format={_delivery_note_format()}",
     )
 
 
@@ -7181,12 +7206,13 @@ def _print_merged_delivery_note_pdf(pdf_path, title="Lieferschein Sammeldruck"):
     cmd = ["lp", "-d", printer, "-t", title]
     cmd.extend(_cups_label_print_options(_delivery_note_format()))
     cmd.append(pdf_path)
-    subprocess.run(
+    _run_lp_command(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
+        print_kind="delivery_note_bulk",
+        printer=printer,
+        title=title,
+        source_path=pdf_path,
+        extra=f"format={_delivery_note_format()}",
     )
 
 

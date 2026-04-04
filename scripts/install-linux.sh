@@ -9,6 +9,40 @@ APPLICATIONS_DIR="${HOME}/.local/share/applications"
 ICONS_DIR="${HOME}/.local/share/icons/hicolor/scalable/apps"
 DESKTOP_FILE="${APPLICATIONS_DIR}/lager-mc.desktop"
 ICON_TARGET="${ICONS_DIR}/lager-mc.svg"
+BUNDLE_PATH=""
+RUN_MIGRATIONS="ask"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--bundle <bundle.zip>] [--run-migrations] [--skip-migrations]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bundle)
+      BUNDLE_PATH="${2:-}"
+      shift 2
+      ;;
+    --run-migrations)
+      RUN_MIGRATIONS="yes"
+      shift
+      ;;
+    --skip-migrations)
+      RUN_MIGRATIONS="no"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unbekannte Option: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
 
 detect_package_manager() {
   if command -v dnf >/dev/null 2>&1; then
@@ -109,6 +143,51 @@ install_system_dependencies() {
   esac
 }
 
+prompt_bundle_path() {
+  local answer
+  if [[ -n "${BUNDLE_PATH}" ]]; then
+    return
+  fi
+  read -r -p "Bundle-Archiv fuer lokale Settings vorhanden? Pfad eingeben oder leer lassen: " answer
+  BUNDLE_PATH="${answer}"
+}
+
+apply_bundle_if_requested() {
+  if [[ -z "${BUNDLE_PATH}" ]]; then
+    return
+  fi
+  if [[ ! -f "${BUNDLE_PATH}" ]]; then
+    echo "Bundle nicht gefunden: ${BUNDLE_PATH}" >&2
+    exit 1
+  fi
+  echo "Spiele Bundle ein ..."
+  "${VENV_DIR}/bin/python" "${PROJECT_DIR}/scripts/apply_local_bundle.py" "${BUNDLE_PATH}"
+}
+
+maybe_run_migrations() {
+  local should_run="${RUN_MIGRATIONS}"
+  if [[ "${should_run}" == "ask" ]]; then
+    local answer
+    read -r -p "DB-Migration jetzt ausfuehren? [J/n] " answer
+    answer="${answer:-J}"
+    case "${answer}" in
+      n|N)
+        should_run="no"
+        ;;
+      *)
+        should_run="yes"
+        ;;
+    esac
+  fi
+
+  if [[ "${should_run}" != "yes" ]]; then
+    return
+  fi
+
+  echo "Fuehre DB-Migration aus ..."
+  "${VENV_DIR}/bin/python" "${PROJECT_DIR}/scripts/run_db_migrations.py"
+}
+
 echo "Starte Linux-Installation fuer Lager MC ..."
 PKG_MANAGER="$(detect_package_manager)"
 install_system_dependencies "${PKG_MANAGER}"
@@ -120,6 +199,10 @@ echo "Installiere Python-Abhaengigkeiten ..."
 "${VENV_DIR}/bin/python" -m ensurepip --upgrade
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip wheel
 "${VENV_DIR}/bin/python" -m pip install -r "${PROJECT_DIR}/requirements.txt"
+
+prompt_bundle_path
+apply_bundle_if_requested
+maybe_run_migrations
 
 mkdir -p "${BIN_DIR}"
 mkdir -p "${APPLICATIONS_DIR}"

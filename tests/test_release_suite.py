@@ -1,6 +1,8 @@
 import base64
 import address_label
+import app_logging
 import importlib
+import importlib.util
 import json
 import os
 import shutil
@@ -30,6 +32,7 @@ def install_psycopg2_stub():
 
     psycopg2_module = types.ModuleType("psycopg2")
     psycopg2_module.extras = extras_module
+    psycopg2_module.Error = type("Psycopg2Error", (Exception,), {})
     bootstrap_cursor = FakeCursor()
     bootstrap_connection = FakeConnection(bootstrap_cursor)
     psycopg2_module.connect = lambda *args, **kwargs: bootstrap_connection
@@ -74,12 +77,16 @@ class FakeConnection:
         self._cursor = cursor
         self.committed = False
         self.closed = False
+        self.isolation_level = None
 
     def cursor(self, *args, **kwargs):
         return self._cursor
 
     def commit(self):
         self.committed = True
+
+    def set_isolation_level(self, level):
+        self.isolation_level = level
 
     def close(self):
         self.closed = True
@@ -257,7 +264,104 @@ class ShippingHistorySchemaTests(unittest.TestCase):
 
         queries = "\n".join(query for query, _ in cursor.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS shipping_labels", queries)
-        self.assertNotIn("gls_labels", queries)
+
+
+class DatabaseSchemaTests(unittest.TestCase):
+    def test_apply_app_schema_adds_required_items_and_inventory_sql(self):
+        from shipping.schema import apply_app_schema
+
+        cursor = FakeCursor()
+
+        apply_app_schema(cursor)
+
+        queries = "\n".join(query for query, _ in cursor.executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS items", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS external_fulfillment", queries)
+        self.assertIn("CREATE TABLE IF NOT EXISTS inventory_sessions", queries)
+        self.assertIn("CREATE TABLE IF NOT EXISTS inventory_lines", queries)
+
+    def test_collect_schema_issues_reports_missing_tables(self):
+        from shipping.schema import collect_schema_issues
+
+        cursor = FakeCursor(fetchall_results=[[]])
+
+        issues = collect_schema_issues(cursor)
+
+        self.assertIn("Tabelle fehlt: items", issues)
+        self.assertIn("Tabelle fehlt: inventory_sessions", issues)
+
+    def test_probe_database_ready_requires_migration_when_schema_is_incomplete(self):
+        lager_mc = load_lager_mc()
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "database_schema_issues", return_value=["Spalte fehlt: items.available"]),
+            mock.patch.object(lager_mc, "init_db", side_effect=AssertionError("init_db darf nicht laufen")),
+        ):
+            ready, message = lager_mc._probe_database_ready()
+
+        self.assertFalse(ready)
+        self.assertIn("DB Migration noetig", message)
+
+
+class MigrationScriptTests(unittest.TestCase):
+    def _load_module(self, path, name):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_run_db_migrations_script_applies_schema_and_commits(self):
+        script = self._load_module(ROOT / "scripts" / "run_db_migrations.py", "run_db_migrations_test")
+        cursor = FakeCursor()
+        connection = FakeConnection(cursor)
+
+        with (
+            mock.patch.object(script, "load_settings", return_value={
+                "db_host": "db",
+                "db_name": "lagerdb",
+                "db_user": "lager",
+                "db_pass": "secret",
+            }),
+            mock.patch.object(script, "ensure_database_exists", return_value=False),
+            mock.patch.object(script, "connect_from_settings", return_value=connection),
+            mock.patch.object(script, "apply_app_schema") as apply_mock,
+            mock.patch.object(script, "collect_schema_issues", return_value=[]),
+        ):
+            result = script.main()
+
+        self.assertEqual(result, 0)
+        apply_mock.assert_called_once_with(cursor)
+        self.assertTrue(connection.committed)
+
+    def test_ensure_database_exists_creates_missing_database(self):
+        script = self._load_module(ROOT / "scripts" / "run_db_migrations.py", "run_db_migrations_create_test")
+        settings = {
+            "db_host": "db",
+            "db_name": "lagerdb",
+            "db_user": "lager",
+            "db_pass": "secret",
+        }
+
+        missing_error = script.psycopg2.Error()
+        missing_error.pgcode = "3D000"
+        maintenance_cursor = FakeCursor(fetchone_results=[None])
+        maintenance_connection = FakeConnection(maintenance_cursor)
+
+        connect_calls = []
+
+        def fake_connect(**kwargs):
+            connect_calls.append(kwargs)
+            if kwargs["database"] == "lagerdb":
+                raise missing_error
+            return maintenance_connection
+
+        with mock.patch.object(script.psycopg2, "connect", side_effect=fake_connect):
+            created = script.ensure_database_exists(settings)
+
+        self.assertTrue(created)
+        self.assertEqual(connect_calls[0]["database"], "lagerdb")
+        self.assertIn("CREATE DATABASE", maintenance_cursor.executed[1][0])
 
 
 class InternetmarkeClientTests(unittest.TestCase):
@@ -981,6 +1085,38 @@ class LagerMcLogicTests(unittest.TestCase):
                 "number-up=1",
             ],
         )
+
+    def test_build_simple_test_page_pdf_returns_pdf_bytes(self):
+        pdf_bytes = self.lager_mc._build_simple_test_page_pdf(
+            "Versandlabel Testseite",
+            lines=["Drucker: Xerox", "Format: 100x62"],
+            page_size="100x62",
+        )
+
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
+        self.assertIn(b"Helvetica", pdf_bytes)
+
+    def test_settings_print_test_context_for_carrier_printer_uses_selected_values(self):
+        values = {
+            "shipping_label_printer": "Fallback",
+            "shipping_label_format": "A6",
+            "shipping_label_printer_gls": "GLS-Printer",
+            "shipping_label_format_gls": "100x62",
+        }
+
+        context = self.lager_mc._settings_print_test_context(
+            "shipping_label_printer_gls",
+            values,
+            self.lager_mc._shipping_printer_field_map(),
+            self.lager_mc._shipping_format_field_map(),
+        )
+
+        self.assertEqual(context["printer"], "GLS-Printer")
+        self.assertEqual(context["page_size"], "100x62")
+        self.assertIn("GLS", context["title"])
+
+    def test_print_log_path_uses_print_log_name(self):
+        self.assertEqual(app_logging.PRINT_LOG_PATH.name, "print.log")
 
     def test_enqueue_shopify_fulfillment_job_blocks_test_and_free_carriers(self):
         with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify uebertragen werden"):

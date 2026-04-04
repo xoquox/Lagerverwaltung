@@ -46,6 +46,19 @@ cd Lagerverwaltung
 ./scripts/install-linux.sh
 ```
 
+Direkt von GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xoquox/Lagerverwaltung/main/scripts/install-from-github.sh | bash
+```
+
+Die Installation fragt optional nach:
+
+- einem Bundle-Archiv fuer lokale Settings und Dateien
+- einer DB-Migration
+
+Das Migrationsskript legt die konfigurierte Datenbank bei Bedarf an und baut danach das Schema auf.
+
 Start:
 
 ```bash
@@ -311,6 +324,12 @@ Import:
 python3 scripts/apply_local_bundle.py /pfad/zum/lager_mc_local_bundle_*.zip
 ```
 
+DB-Migration:
+
+```bash
+python3 scripts/run_db_migrations.py
+```
+
 Ein Bundle enthaelt portable Projektdateien wie:
 
 - API-Zugaenge
@@ -330,5 +349,5 @@ Nicht ueberschrieben werden lokale Arbeitsplatz-Einstellungen wie:
 Wichtige Logdateien:
 
 - [logs/lagerverwaltung.log](/home/chrisi/Lagerverwaltung/logs/lagerverwaltung.log)
-- [logs/druck.log](/home/chrisi/Lagerverwaltung/logs/druck.log)
+- [logs/print.log](/home/chrisi/Lagerverwaltung/logs/print.log)
 - [logs/shopify-sync.log](/home/chrisi/Lagerverwaltung/logs/shopify-sync.log)

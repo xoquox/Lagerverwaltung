@@ -41,11 +41,11 @@ if str(BASE_DIR) not in sys.path:
 from shipping.history import (
     SHIPPING_LABEL_TABLE,
     claim_shopify_fulfillment_jobs as _claim_shopify_fulfillment_jobs,
-    ensure_shipping_history_schema,
     mark_shopify_fulfillment_job_done as _mark_shopify_fulfillment_job_done,
     mark_shopify_fulfillment_job_failed as _mark_shopify_fulfillment_job_failed,
     upsert_shopify_shipment as _upsert_shopify_shipment_record,
 )
+from shipping.schema import apply_app_schema, collect_schema_issues
 from sync_version import SYNC_VERSION
 
 load_dotenv()
@@ -245,143 +245,20 @@ def db():
 def init_db():
     con = db()
     cur = con.cursor()
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS available integer")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS reserved integer DEFAULT 0")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS committed integer DEFAULT 0")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS unavailable integer DEFAULT 0")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS barcode text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_status text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_description text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_price text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_compare_at_price text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost_currency text")
-    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_weight_grams integer")
-    cur.execute("UPDATE items SET reserved = COALESCE(reserved, 0)")
-    cur.execute("UPDATE items SET committed = COALESCE(committed, 0)")
-    cur.execute(
-        """
-        UPDATE items
-        SET unavailable = COALESCE(unavailable, COALESCE(reserved, 0))
-        """
-    )
-    cur.execute(
-        """
-        UPDATE items
-        SET available = GREATEST(
-            menge - COALESCE(unavailable, 0) - COALESCE(committed, 0),
-            0
-        )
-        WHERE available IS NULL
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_orders (
-            order_id text PRIMARY KEY,
-            order_name text NOT NULL,
-            created_at timestamptz,
-            shipping_name text,
-            shipping_address1 text,
-            shipping_zip text,
-            shipping_city text,
-            shipping_country text,
-            shipping_email text,
-            shipping_phone text,
-            fulfillment_status text,
-            payment_status text,
-            updated_at timestamptz NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_country text")
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_email text")
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_phone text")
-    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS payment_status text")
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_shopify_orders_name
-        ON shopify_orders(order_name)
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_order_items (
-            order_id text NOT NULL,
-            line_index integer NOT NULL,
-            order_line_item_id text,
-            sku text,
-            title text NOT NULL,
-            quantity integer NOT NULL,
-            fulfilled_quantity integer NOT NULL DEFAULT 0,
-            PRIMARY KEY (order_id, line_index)
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
-    cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
-    ensure_shipping_history_schema(cur)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS service_runtime_state (
-            service text PRIMARY KEY,
-            version text,
-            status text NOT NULL DEFAULT 'unknown',
-            last_seen_at timestamptz,
-            last_started_at timestamptz,
-            last_finished_at timestamptz,
-            last_pull_at timestamptz,
-            last_push_at timestamptz,
-            last_error text,
-            updated_at timestamptz NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS shopify_customers (
-            customer_id text PRIMARY KEY,
-            first_name text,
-            last_name text,
-            display_name text,
-            email text,
-            phone text,
-            default_name text,
-            default_address1 text,
-            default_zip text,
-            default_city text,
-            default_country text,
-            default_phone text,
-            updated_at timestamptz NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS first_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS last_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS display_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS email text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS phone text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_name text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_address1 text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_zip text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_city text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_country text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS default_phone text")
-    cur.execute("ALTER TABLE shopify_customers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_display_name ON shopify_customers(display_name)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_shopify_customers_email ON shopify_customers(email)")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS version text")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'unknown'")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_seen_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_started_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_finished_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_pull_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_push_at timestamptz")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS last_error text")
-    cur.execute("ALTER TABLE service_runtime_state ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    apply_app_schema(cur)
     con.commit()
     cur.close()
     con.close()
+
+
+def database_schema_issues():
+    con = db()
+    cur = con.cursor()
+    try:
+        return collect_schema_issues(cur)
+    finally:
+        cur.close()
+        con.close()
 
 
 def graphql_request(query, variables=None):
@@ -1374,7 +1251,12 @@ def process_fulfillment_jobs(limit=20):
 
 
 def run_sync_loop():
-    init_db()
+    issues = database_schema_issues()
+    if issues:
+        raise RuntimeError(
+            "DB Migration noetig. run_db_migrations.py ausfuehren. "
+            + "; ".join(issues[:5])
+        )
     update_service_runtime_state(status="idle", mark_seen=True, clear_error=True)
     while True:
         run_started_at = time.monotonic()
