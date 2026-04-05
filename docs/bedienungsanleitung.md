@@ -261,18 +261,18 @@ Die Einstellungen liegen auf `Shift+F11`.
 Tab-Struktur:
 
 - Allgemein
-- Lager
-- Druck
+- Lagerlabel
+- Drucker
 - Versand
+- Lieferschein
 
 Wichtige Bedienung:
 
 - `Tab` und `Shift+Tab` fuer Tabs
 - `Enter` fuer Auswahl oder naechstes Feld
 - `F2` Speichern
-- `F3` Drucker-Auswahl
-- `F4` Format-Auswahl
-- `F6` Dateiauswahl oder Ordnerauswahl, je nach Feld
+- `F6` oeffnet die passende Auswahl zum aktuellen Feld
+- `F7` startet eine Testseite fuer das aktuelle Drucker-/Format-Feld
 
 Wichtige Einstellungen im Versand-Tab:
 
@@ -307,6 +307,16 @@ Zusatz fuer aeltere Bestellungen:
 - `read_all_orders`
 
 Fuer die Kundensuche in manuellen Versandlabels wird zusaetzlich `read_customers` benoetigt.
+
+## Start bei langsamer Datenbankverbindung
+
+Beim Programmstart wird die Datenbankverbindung geprueft.
+
+Wenn die Verbindung noch nicht bereit ist, bleibt die Startansicht sichtbar und zeigt den aktuellen Status.
+
+- `Enter` startet die Pruefung erneut
+- `F2` oeffnet die Einstellungen
+- `F9` beendet das Programm
 
 ## Arbeitsplaetze uebernehmen
 

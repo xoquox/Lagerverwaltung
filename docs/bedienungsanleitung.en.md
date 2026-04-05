@@ -260,19 +260,19 @@ Settings are available under `Shift+F11`.
 
 Tabs:
 
-- General
-- Inventory
-- Printing
-- Shipping
+- Allgemein
+- Lagerlabel
+- Drucker
+- Versand
+- Lieferschein
 
 Important keys:
 
 - `Tab` and `Shift+Tab` for tabs
 - `Enter` for selection or next field
 - `F2` save
-- `F3` printer selection
-- `F4` format selection
-- `F6` file selection or directory selection, depending on the field
+- `F6` opens the matching selection for the current field
+- `F7` starts a test page for the current printer/media field
 
 Important settings in the shipping tab:
 
@@ -307,6 +307,16 @@ Additional scope for older orders:
 - `read_all_orders`
 
 `read_customers` is required for customer lookup in manual shipping labels.
+
+## Startup with slow database connections
+
+The application checks the database connection during startup.
+
+If the connection is not ready yet, the startup view remains visible and shows the current status.
+
+- `Enter` starts the check again
+- `F2` opens settings
+- `F9` exits the application
 
 ## Moving to a new workstation
 
