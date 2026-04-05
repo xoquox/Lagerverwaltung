@@ -290,18 +290,81 @@ class DatabaseSchemaTests(unittest.TestCase):
         self.assertIn("Tabelle fehlt: items", issues)
         self.assertIn("Tabelle fehlt: inventory_sessions", issues)
 
+    def test_collect_schema_issues_accepts_dict_rows(self):
+        from shipping.schema import collect_schema_issues
+
+        cursor = FakeCursor(
+            fetchall_results=[
+                [{"table_name": "items"}],
+                [{"column_name": "sku"}, {"column_name": "name"}],
+            ]
+        )
+
+        issues = collect_schema_issues(cursor)
+
+        self.assertIn("Tabelle fehlt: inventory_sessions", issues)
+        self.assertIn("Spalte fehlt: items.regal", issues)
+
     def test_probe_database_ready_requires_migration_when_schema_is_incomplete(self):
         lager_mc = load_lager_mc()
+        cursor = FakeCursor()
+        con = FakeConnection(cursor)
 
         with (
             mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
-            mock.patch.object(lager_mc, "database_schema_issues", return_value=["Spalte fehlt: items.available"]),
+            mock.patch.object(lager_mc, "db", return_value=con),
+            mock.patch.object(lager_mc, "collect_schema_issues", return_value=["Spalte fehlt: items.available"]),
             mock.patch.object(lager_mc, "init_db", side_effect=AssertionError("init_db darf nicht laufen")),
         ):
             ready, message = lager_mc._probe_database_ready()
 
         self.assertFalse(ready)
         self.assertIn("DB Migration noetig", message)
+
+    def test_probe_database_ready_verbose_reports_progress(self):
+        lager_mc = load_lager_mc()
+        progress_calls = []
+        cursor = FakeCursor()
+        con = FakeConnection(cursor)
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "db", return_value=con),
+            mock.patch.object(lager_mc, "collect_schema_issues", return_value=[]),
+        ):
+            ready, message, lines = lager_mc._probe_database_ready_verbose(progress_calls.append)
+
+        self.assertTrue(ready)
+        self.assertEqual(message, "")
+        self.assertIn("DB Verbindung erfolgreich.", lines)
+        self.assertIn("Pruefe Schema ...", lines)
+        self.assertTrue(progress_calls)
+
+    def test_probe_database_ready_verbose_reports_failure(self):
+        lager_mc = load_lager_mc()
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "db", side_effect=RuntimeError("timeout")),
+        ):
+            ready, message, lines = lager_mc._probe_database_ready_verbose()
+
+        self.assertFalse(ready)
+        self.assertIn("timeout", message)
+        self.assertIn("DB Verbindung fehlgeschlagen.", lines)
+
+    def test_ensure_database_ready_does_not_block_on_sync_probe(self):
+        lager_mc = load_lager_mc()
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "_probe_database_ready", side_effect=AssertionError("sync probe darf nicht laufen")),
+            mock.patch.object(lager_mc, "database_connection_dialog", return_value=True) as dialog_mock,
+        ):
+            ready = lager_mc.ensure_database_ready(object())
+
+        self.assertTrue(ready)
+        dialog_mock.assert_called_once()
 
 
 class MigrationScriptTests(unittest.TestCase):
@@ -1096,6 +1159,16 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
         self.assertIn(b"Helvetica", pdf_bytes)
 
+    def test_safe_addstr_ignores_tight_window_errors(self):
+        class TightWindow:
+            def getmaxyx(self):
+                return (1, 1)
+
+            def addstr(self, y, x, text, *args):
+                raise curses.error("too small")
+
+        self.lager_mc._safe_addstr(TightWindow(), 0, 2, "Titel")
+
     def test_settings_print_test_context_for_carrier_printer_uses_selected_values(self):
         values = {
             "shipping_label_printer": "Fallback",
@@ -1265,6 +1338,25 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["display_name"], "Erika Musterfrau")
 
+    def test_ensure_order_items_loaded_uses_cache_before_db(self):
+        cached = [{"sku": "ABC"}]
+        cache = {"OID-1": cached}
+
+        with mock.patch.object(self.lager_mc, "get_order_items") as get_mock:
+            rows = self.lager_mc.ensure_order_items_loaded("OID-1", cache)
+
+        get_mock.assert_not_called()
+        self.assertIs(rows, cached)
+
+    def test_ensure_order_items_loaded_fetches_and_caches_missing_rows(self):
+        cache = {}
+
+        with mock.patch.object(self.lager_mc, "get_order_items", return_value=[{"sku": "ABC"}]) as get_mock:
+            rows = self.lager_mc.ensure_order_items_loaded("OID-1", cache)
+
+        get_mock.assert_called_once_with("OID-1")
+        self.assertEqual(cache["OID-1"], rows)
+
     def test_list_shipping_labels_queries_shipping_labels_table(self):
         cursor = FakeCursor(fetchall_results=[[{"id": 1}]])
         connection = FakeConnection(cursor)
@@ -1314,7 +1406,7 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(country, "DE")
 
     def test_handle_delivery_note_output_routes_by_mode(self):
-        order = {"order_name": "#1001"}
+        order = {"order_name": "#1001", "order_id": "OID-1"}
         items = [{"sku": "ABC"}]
 
         with mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="print"):
@@ -1334,6 +1426,48 @@ class LagerMcLogicTests(unittest.TestCase):
                         self.lager_mc.handle_delivery_note_output(None, order, items)
         create_mock.assert_called_once_with(order, items)
         print_path_mock.assert_called_once_with(order, "/tmp/note.pdf")
+        message_mock.assert_called_once()
+
+    def test_handle_delivery_note_output_loads_missing_items_from_cache(self):
+        order = {"order_name": "#1001", "order_id": "OID-1"}
+        items = [{"sku": "ABC"}]
+
+        with (
+            mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="print"),
+            mock.patch.object(self.lager_mc, "ensure_order_items_loaded", return_value=items) as ensure_mock,
+            mock.patch.object(self.lager_mc, "print_delivery_note") as print_mock,
+        ):
+            self.lager_mc.handle_delivery_note_output(None, order, order_items=None, order_items_cache={})
+
+        ensure_mock.assert_called_once_with("OID-1", {})
+        print_mock.assert_called_once_with(None, order, items)
+
+    def test_bulk_execution_prints_single_delivery_note_from_temp_path(self):
+        orders = [{"order_id": "OID-1", "order_name": "#1001"}]
+        created = {"label_id": 55, "label_path": "", "shipment_reference": "ADR-1"}
+
+        created_note_paths = []
+
+        def fake_create_note(order, order_items, output_dir=None):
+            path = os.path.join(output_dir or "/tmp", "note.pdf")
+            created_note_paths.append(path)
+            return path, order_items
+
+        with (
+            mock.patch.object(self.lager_mc, "_execution_carrier_dialog", return_value="free"),
+            mock.patch.object(self.lager_mc, "_select_shipping_carrier_options", return_value=[]),
+            mock.patch.object(self.lager_mc, "_bulk_print_mode_dialog", return_value="note"),
+            mock.patch.object(self.lager_mc, "calculate_order_shipping_weight", return_value=(0.5, 500)),
+            mock.patch.object(self.lager_mc, "create_shipping_label", return_value=created),
+            mock.patch.object(self.lager_mc, "create_delivery_note_pdf", side_effect=fake_create_note) as note_mock,
+            mock.patch.object(self.lager_mc, "_print_merged_delivery_note_pdf") as print_note_mock,
+            mock.patch.object(self.lager_mc, "message_box") as message_mock,
+        ):
+            self.lager_mc.run_bulk_execution(None, orders, {"OID-1": [{"sku": "ABC"}]}, {"OID-1"})
+
+        note_mock.assert_called_once()
+        self.assertTrue(created_note_paths[0].endswith("note.pdf"))
+        print_note_mock.assert_called_once_with(created_note_paths[0], title="Lieferschein #1001")
         message_mock.assert_called_once()
 
     def test_create_shipping_label_routes_to_requested_carrier(self):

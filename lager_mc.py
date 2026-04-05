@@ -14,6 +14,7 @@ import locale
 import re
 import ssl
 import subprocess
+import sys
 import string
 import shutil
 import tempfile
@@ -865,63 +866,150 @@ def _execute_db_query(cur, query, params=None, deadlock_retries=1):
 
 
 def _probe_database_ready():
+    ready, message, _steps = _probe_database_ready_verbose()
+    return ready, message
+
+
+def _probe_database_ready_verbose(progress_callback=None):
+    progress_lines = []
+
+    def report(message):
+        text = (message or "").strip()
+        if not text:
+            return
+        progress_lines.append(text)
+        if progress_callback is not None:
+            progress_callback(list(progress_lines))
+
     if _is_default_db_settings(SETTINGS):
-        return False, "Bitte zuerst DB Einstellungen in Shift+F11 speichern."
+        report("DB Einstellungen fehlen.")
+        return False, "Bitte zuerst DB Einstellungen in Shift+F11 speichern.", progress_lines
     try:
-        issues = database_schema_issues()
+        report(f"Verbinde zu {SETTINGS.get('db_host') or '-'} / {SETTINGS.get('db_name') or '-'} ...")
+        con = db()
+        cur = con.cursor()
+        try:
+            report("DB Verbindung erfolgreich.")
+            report("Pruefe Schema ...")
+            issues = collect_schema_issues(cur)
+        finally:
+            cur.close()
+            con.close()
         if issues:
-            return False, "DB Migration noetig. scripts/run_db_migrations.py ausfuehren."
-        return True, ""
+            report("Schema unvollstaendig.")
+            return False, "DB Migration noetig. scripts/run_db_migrations.py ausfuehren.", progress_lines
+        report("Schema ist vollstaendig.")
+        return True, "", progress_lines
     except Exception as exc:
-        return False, _summarize_db_error(exc)
+        report("DB Verbindung fehlgeschlagen.")
+        return False, _summarize_db_error(exc), progress_lines
+
+
+def _request_database_probe(loader, force=False):
+    def load():
+        state = {"lines": []}
+
+        def callback(lines):
+            state["lines"] = list(lines)
+
+        ready, message, lines = _probe_database_ready_verbose(callback)
+        state["lines"] = list(lines)
+        return {"ready": ready, "message": message, "lines": state["lines"]}
+
+    if force:
+        loader.request("database_probe", load)
+        return
+    loader.request("database_probe", load)
+
+
+def _draw_database_wait_screen(stdscr, title, host_line, message, progress_lines, footer, spinner_index=0):
+    stdscr.erase()
+    stdscr.bkgd(" ", curses.color_pair(1))
+    stdscr.box()
+    h, w = stdscr.getmaxyx()
+    stdscr.addstr(0, 2, f" {title} ")
+    inner_width = max(20, w - 4)
+    title_y = max(2, h // 2 - 5)
+    lines = [
+        "Datenbankverbindung",
+        "",
+        host_line,
+    ]
+    message_lines = textwrap.wrap((message or "").strip() or "Verbindung wird aufgebaut.", width=max(20, inner_width - 4)) or ["-"]
+    lines.extend(message_lines[:2])
+    lines.append("")
+    lines.append("Status:")
+    visible_progress = progress_lines[-4:] if progress_lines else ["Warte auf Rueckmeldung..."]
+    spinner = ["|", "/", "-", "\\"]
+    for index, line in enumerate(visible_progress[:4]):
+        prefix = spinner[(spinner_index + index) % len(spinner)] if index == len(visible_progress) - 1 else "-"
+        lines.append(f"{prefix} {line}")
+
+    start_y = max(2, min(title_y, h - len(lines) - 3))
+    for index, line in enumerate(lines):
+        y = start_y + index
+        if y >= h - 2:
+            break
+        if index == 0:
+            stdscr.attrset(curses.color_pair(2))
+            stdscr.addstr(y, 2, _fit(line, inner_width))
+            stdscr.attrset(curses.color_pair(1))
+        else:
+            stdscr.addstr(y, 2, _fit(line, inner_width))
+
+    stdscr.attrset(curses.color_pair(3))
+    draw_footer_line(stdscr, h - 2, 1, w - 2, footer)
+    stdscr.attrset(curses.color_pair(1))
+    stdscr.refresh()
 
 
 def database_connection_dialog(stdscr, error_text):
     message = (error_text or "Datenbank ist nicht erreichbar.").strip()
+    loader = BackgroundValueLoader()
+    _request_database_probe(loader, force=True)
+    progress_lines = ["Verbindungspruefung gestartet."]
+    spinner_index = 0
     while True:
-        h, w = stdscr.getmaxyx()
-        width = min(max(78, int(w * 0.72)), w - 4)
-        height = 11
-        y = max(1, (h - height) // 2)
-        x = max(2, (w - width) // 2)
-
-        draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
-        win.keypad(True)
-        win.timeout(1000)
-        win.bkgd(" ", curses.color_pair(1))
-        win.erase()
-        win.box()
-        win.addstr(0, 2, " DB Problem ")
         host_line = f"Host: {SETTINGS.get('db_host') or '-'}  DB: {SETTINGS.get('db_name') or '-'}"
-        status_line = "Warte auf Verbindung, starte automatisch bei Erfolg."
         footer = "Enter Neu versuchen  F2 Einstellungen  F9 Beenden"
-        wrapped_error = textwrap.wrap(message, width=max(20, width - 4)) or ["Datenbank ist nicht erreichbar."]
-
-        win.addstr(2, 2, _fit(host_line, width - 4))
-        for index, line in enumerate(wrapped_error[:3]):
-            win.addstr(4 + index, 2, _fit(line, width - 4))
-        win.addstr(height - 3, 2, _fit(status_line, width - 4))
-        win.attrset(curses.color_pair(3))
-        win.addstr(height - 2, 2, _fit(footer, width - 4))
-        win.attrset(curses.color_pair(1))
-        win.refresh()
-
-        key = win.getch()
-        if key == -1 or key in (10, 13, curses.KEY_ENTER):
-            ready, latest_error = _probe_database_ready()
-            if ready:
+        probe_result = loader.poll()
+        if probe_result and probe_result.get("key") == "database_probe":
+            value = probe_result.get("value") or {}
+            if value.get("lines"):
+                progress_lines = list(value["lines"])
+            if value.get("ready"):
                 return True
-            if latest_error:
-                message = latest_error
+            if value.get("message"):
+                message = value["message"]
+
+        _draw_database_wait_screen(
+            stdscr,
+            " Lager MC ",
+            host_line,
+            message,
+            progress_lines,
+            footer,
+            spinner_index=spinner_index,
+        )
+        spinner_index += 1
+
+        stdscr.timeout(150)
+        try:
+            key = stdscr.getch()
+        finally:
+            stdscr.timeout(-1)
+
+        if key == -1:
+            continue
+        if key in (10, 13, curses.KEY_ENTER):
+            progress_lines = ["Verbindungspruefung gestartet."]
+            _request_database_probe(loader, force=True)
             continue
         if key == curses.KEY_F2:
             settings_dialog(stdscr)
-            ready, latest_error = _probe_database_ready()
-            if ready:
-                return True
-            if latest_error:
-                message = latest_error
+            progress_lines = ["Verbindungspruefung gestartet."]
+            message = "Warte auf Verbindung, starte automatisch bei Erfolg."
+            _request_database_probe(loader, force=True)
             continue
         if key in (27, curses.KEY_F9):
             return False
@@ -1077,10 +1165,9 @@ def _is_default_db_settings(settings):
 
 
 def ensure_database_ready(stdscr):
-    ready, error_text = _probe_database_ready()
-    if ready:
-        return True
-    return database_connection_dialog(stdscr, error_text)
+    if _is_default_db_settings(SETTINGS):
+        return database_connection_dialog(stdscr, "Bitte zuerst DB Einstellungen in Shift+F11 speichern.")
+    return database_connection_dialog(stdscr, "Verbindung wird aufgebaut.")
 
 
 def get_items(filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
@@ -1478,6 +1565,30 @@ def get_order_items(order_id):
         remote_fulfilled = int(row.get("fulfilled_quantity") or 0)
         local_seen = int(local_fulfilled.get(line_item_id, 0)) if line_item_id else 0
         row["fulfilled_quantity"] = max(0, min(quantity, max(remote_fulfilled, local_seen)))
+    return rows
+
+
+def ensure_order_items_loaded(order_id, order_items_cache=None):
+    if not order_id:
+        return []
+    cache = order_items_cache if isinstance(order_items_cache, dict) else None
+    if cache is not None and order_id in cache:
+        return cache[order_id]
+    rows = get_order_items(order_id)
+    if cache is not None:
+        cache[order_id] = rows
+    return rows
+
+
+def ensure_order_shipments_loaded(order_id, order_shipments_cache=None):
+    if not order_id:
+        return []
+    cache = order_shipments_cache if isinstance(order_shipments_cache, dict) else None
+    if cache is not None and order_id in cache:
+        return cache[order_id]
+    rows = list_shipping_labels(order_id)
+    if cache is not None:
+        cache[order_id] = rows
     return rows
 
 
@@ -4063,6 +4174,26 @@ def draw_footer_line(win, y, x, width, text):
         return
 
 
+def _safe_addstr(win, y, x, text, attr=None):
+    try:
+        max_y, max_x = win.getmaxyx()
+    except curses.error:
+        return
+    if y < 0 or x < 0 or y >= max_y or x >= max_x:
+        return
+    width = max_x - x
+    if width <= 0:
+        return
+    snippet = str(text)[:width]
+    try:
+        if attr is None:
+            win.addstr(y, x, snippet)
+        else:
+            win.addstr(y, x, snippet, attr)
+    except curses.error:
+        return
+
+
 def draw_panel(win, title, lines, selected, top_index, active):
     h, w = win.getmaxyx()
     max_rows = max(0, h - 4)
@@ -4073,10 +4204,10 @@ def draw_panel(win, title, lines, selected, top_index, active):
 
     if active:
         win.attrset(curses.color_pair(2))
-        win.addstr(0, 2, panel_title[:w-4])
+        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)])
         win.attrset(curses.color_pair(1))
     else:
-        win.addstr(0, 2, panel_title[:w-4], curses.A_BOLD)
+        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)], curses.A_BOLD)
 
     visible = lines[top_index:top_index + max_rows]
 
@@ -4086,10 +4217,10 @@ def draw_panel(win, title, lines, selected, top_index, active):
 
         if idx == selected:
             win.attrset(curses.color_pair(2))
-            win.addstr(y, 1, line[:w-2].ljust(w-2))
+            _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
             win.attrset(curses.color_pair(1))
         else:
-            win.addstr(y, 1, line[:w-2].ljust(w-2))
+            _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
 
     win.refresh()
 
@@ -4104,12 +4235,12 @@ def draw_items_panel(win, items, selected, top_index, active):
 
     if active:
         win.attrset(curses.color_pair(2))
-        win.addstr(0, 2, panel_title[:w-4])
+        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)])
         win.attrset(curses.color_pair(1))
     else:
-        win.addstr(0, 2, panel_title[:w-4], curses.A_BOLD)
+        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)], curses.A_BOLD)
 
-    win.addstr(2, 1, format_header()[:w-2].ljust(w-2), curses.A_BOLD)
+    _safe_addstr(win, 2, 1, format_header()[: max(0, w - 2)].ljust(max(0, w - 2)), curses.A_BOLD)
 
     visible = items[top_index:top_index + max_rows]
 
@@ -4120,10 +4251,10 @@ def draw_items_panel(win, items, selected, top_index, active):
 
         if idx == selected:
             win.attrset(curses.color_pair(2))
-            win.addstr(y, 1, line[:w-2].ljust(w-2))
+            _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
             win.attrset(curses.color_pair(1))
         else:
-            win.addstr(y, 1, line[:w-2].ljust(w-2))
+            _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
 
     win.refresh()
 
@@ -4133,10 +4264,10 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     stdscr.attrset(curses.color_pair(1))
     stdscr.erase()
     stdscr.box()
-    stdscr.addstr(0, 2, f" {t('app_title')} ")
+    _safe_addstr(stdscr, 0, 2, f" {t('app_title')} ")
     version_label = f" v{APP_VERSION} "
     version_x = max(2, w - len(version_label) - 2)
-    stdscr.addstr(0, version_x, version_label[: max(0, w - version_x - 1)])
+    _safe_addstr(stdscr, 0, version_x, version_label[: max(0, w - version_x - 1)])
     inner_width = w - 4
     left_width = max(40, int(inner_width * 0.62))
     left_width = min(left_width, inner_width - 24)
@@ -4217,6 +4348,45 @@ def message_box(stdscr, title, message):
     key = stdscr.get_wch()
 
 
+def run_background_action_dialog(stdscr, title, action, detail="Bitte warten..."):
+    state = {"done": False, "result": None, "error": None}
+
+    def runner():
+        try:
+            state["result"] = action()
+        except Exception as exc:
+            state["error"] = exc
+        finally:
+            state["done"] = True
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    spinner = ["|", "/", "-", "\\"]
+    frame = 0
+
+    while not state["done"]:
+        h, w = stdscr.getmaxyx()
+        width = min(64, w - 4)
+        height = 6
+        y = h // 2 - height // 2
+        x = w // 2 - width // 2
+
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.bkgd(" ", curses.color_pair(1))
+        win.box()
+        win.addstr(0, 2, f" {title} ")
+        win.addstr(2, 2, _fit(detail, width - 6))
+        win.addstr(4, 2, f"{spinner[frame % len(spinner)]}".ljust(width - 4))
+        win.refresh()
+        frame += 1
+        time.sleep(0.08)
+
+    if state["error"] is not None:
+        raise state["error"]
+    return state["result"]
+
+
 def confirm_box(stdscr, title, message, default_yes=True):
 
     h, w = stdscr.getmaxyx()
@@ -4258,6 +4428,21 @@ def confirm_box(stdscr, title, message, default_yes=True):
 
         if key in ("n", "N", 27):
             return False
+
+
+def _save_settings_checked(updated):
+    try:
+        con = psycopg2.connect(
+            host=updated["db_host"],
+            dbname=updated["db_name"],
+            user=updated["db_user"],
+            password=updated["db_pass"],
+            cursor_factory=psycopg2.extras.RealDictCursor,
+        )
+    except psycopg2.OperationalError as exc:
+        raise DatabaseUnavailableError(_summarize_db_error(exc)) from exc
+    con.close()
+    return save_settings(updated)
 
 def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra_actions=None, field_validators=None):
 
@@ -5098,6 +5283,92 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
     return None
 
 
+def _settings_context_select(stdscr, active_name, values, shipping_printer_fields, shipping_format_fields, shipping_template_fields, shipping_tracking_mode_fields):
+    if active_name == "language":
+        values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
+    elif active_name == "color_theme":
+        values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
+    elif active_name in {
+        "picklist_printer",
+        "delivery_note_printer",
+        "shipping_label_printer",
+        *shipping_printer_fields.keys(),
+    }:
+        values[active_name] = cups_printer_dialog(stdscr, values[active_name])
+    elif active_name in shipping_format_fields:
+        carrier_code = shipping_format_fields[active_name]
+        printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
+        printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
+        values[active_name] = cups_media_dialog(
+            stdscr,
+            printer_name,
+            values[active_name],
+            f"{_shipping_carrier_label(carrier_code)} Format",
+        )
+    elif active_name == "delivery_note_format":
+        values[active_name] = cups_media_dialog(
+            stdscr,
+            values.get("delivery_note_printer", ""),
+            values[active_name],
+            "Lieferschein Format",
+        )
+    elif active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
+        values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
+    elif active_name == "color_theme_file":
+        values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
+    elif active_name in {"label_font_regular", "label_font_condensed"}:
+        values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
+    elif active_name == "delivery_note_template_path":
+        values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
+    elif active_name in shipping_template_fields:
+        carrier_code = shipping_template_fields[active_name]
+        values[active_name] = file_dialog(
+            stdscr,
+            values.get(active_name, ""),
+            f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
+            extensions={".html", ".htm"},
+        )
+    elif active_name == "delivery_note_logo_source":
+        current_value = (values.get(active_name) or "").strip()
+        if not is_http_url(current_value):
+            values[active_name] = file_dialog(
+                stdscr,
+                current_value,
+                "Logo waehlen",
+                extensions={".png", ".jpg", ".jpeg", ".svg", ".pdf"},
+            )
+    elif active_name in shipping_tracking_mode_fields:
+        values[active_name] = choice_dialog(
+            stdscr,
+            "Shopify Tracking",
+            [
+                {"value": "company", "label": "Carrier + Nummer"},
+                {"value": "company_and_url", "label": "Carrier + Nummer + URL"},
+            ],
+            values[active_name],
+        )
+    elif active_name == "shipping_services_display":
+        values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
+        values["shipping_services_display"] = _shipping_services_summary(values["shipping_services"])
+    elif active_name == "shipping_active_carriers_display":
+        chosen = toggle_choice_dialog(
+            stdscr,
+            "Aktive Versanddienste",
+            _shipping_carrier_options(include_test=True),
+            values.get("shipping_active_carriers", []),
+        )
+        if chosen is not None:
+            values["shipping_active_carriers"] = _normalize_active_shipping_carriers(
+                chosen,
+                fallback_to_defaults=False,
+            )
+            values["shipping_active_carriers_display"] = _shipping_active_carriers_summary(
+                values["shipping_active_carriers"],
+                fallback_to_defaults=False,
+            )
+    return values
+
+
 def settings_dialog(stdscr):
     global SETTINGS
 
@@ -5309,7 +5580,7 @@ def settings_dialog(stdscr):
         for filler in range(3 + len(tab_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
-        footer = "Tab/Shift+Tab Tabs  F3 Drucker  F4 Format  F6 Auswahl  F7 Testseite  Enter Auswahl  F2 Speichern  F9 Zurueck"
+        footer = "Tab/Shift+Tab Tabs  F6 Auswahl  F7 Testseite  Enter Auswahl  F2 Speichern  F9 Zurueck"
         win.attrset(curses.color_pair(3))
         draw_footer_line(win, height - 2, 1, width - 2, footer)
         win.attrset(curses.color_pair(1))
@@ -5379,64 +5650,18 @@ def settings_dialog(stdscr):
             cursor_positions[active_name] = len(str(values.get(active_name, "")))
             continue
 
-        if key == curses.KEY_F3 and active_name in {
-            "picklist_printer",
-            "delivery_note_printer",
-            "shipping_label_printer",
-            *shipping_printer_fields.keys(),
-        }:
-            values[active_name] = cups_printer_dialog(stdscr, values[active_name])
-            cursor_positions[active_name] = len(str(values[active_name]))
-            continue
-
-        if key == curses.KEY_F4 and active_name in {"delivery_note_format", *shipping_format_fields.keys()}:
-            printer_name = ""
-            title = "Druckformat"
-            if active_name == "delivery_note_format":
-                printer_name = values.get("delivery_note_printer", "")
-                title = "Lieferschein Format"
-            elif active_name in shipping_format_fields:
-                carrier_code = shipping_format_fields[active_name]
-                printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
-                printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
-                title = f"{_shipping_carrier_label(carrier_code)} Format"
-            values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
-            cursor_positions[active_name] = len(str(values[active_name]))
-            continue
-
         if key == curses.KEY_F6:
-            if active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
-                values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
-                cursor_positions[active_name] = len(str(values[active_name]))
-                continue
-            if active_name == "color_theme_file":
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
-                cursor_positions[active_name] = len(str(values.get(active_name, "")))
-                continue
-            if active_name in {"label_font_regular", "label_font_condensed"}:
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
-                cursor_positions[active_name] = len(str(values.get(active_name, "")))
-                continue
-            if active_name == "delivery_note_template_path":
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
-                cursor_positions[active_name] = len(str(values.get(active_name, "")))
-                continue
-            if active_name in shipping_template_fields:
-                carrier_code = shipping_template_fields[active_name]
-                values[active_name] = file_dialog(
-                    stdscr,
-                    values.get(active_name, ""),
-                    f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
-                    extensions={".html", ".htm"},
-                )
-                cursor_positions[active_name] = len(str(values.get(active_name, "")))
-                continue
-            if active_name == "delivery_note_logo_source":
-                current_value = (values.get(active_name) or "").strip()
-                if not is_http_url(current_value):
-                    values[active_name] = file_dialog(stdscr, current_value, "Logo waehlen", extensions={".png", ".jpg", ".jpeg", ".svg", ".pdf"})
-                    cursor_positions[active_name] = len(str(values.get(active_name, "")))
-                continue
+            _settings_context_select(
+                stdscr,
+                active_name,
+                values,
+                shipping_printer_fields,
+                shipping_format_fields,
+                shipping_template_fields,
+                shipping_tracking_mode_fields,
+            )
+            cursor_positions[active_name] = len(str(values.get(active_name, "")))
+            continue
 
         if key == curses.KEY_F7:
             context = _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields)
@@ -5453,78 +5678,37 @@ def settings_dialog(stdscr):
             continue
 
         if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
-            if active_name == "language":
-                values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
-            elif active_name == "color_theme":
-                values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
-            elif active_name in {
+            previous_value = values.get(active_name, "")
+            _settings_context_select(
+                stdscr,
+                active_name,
+                values,
+                shipping_printer_fields,
+                shipping_format_fields,
+                shipping_template_fields,
+                shipping_tracking_mode_fields,
+            )
+            if values.get(active_name, "") == previous_value and active_name not in {
+                "language",
+                "color_theme",
+                "delivery_note_format",
+                "shipping_services_display",
+                "shipping_active_carriers_display",
+                *shipping_printer_fields.keys(),
+                *shipping_format_fields.keys(),
+                *shipping_template_fields.keys(),
+                *shipping_tracking_mode_fields.keys(),
                 "picklist_printer",
                 "delivery_note_printer",
                 "shipping_label_printer",
-                *shipping_printer_fields.keys(),
+                "pdf_output_dir",
+                "shipping_label_output_dir",
+                "color_theme_file",
+                "label_font_regular",
+                "label_font_condensed",
+                "delivery_note_template_path",
+                "delivery_note_logo_source",
             }:
-                values[active_name] = cups_printer_dialog(stdscr, values[active_name])
-            elif active_name in shipping_format_fields:
-                printer_name = ""
-                title = "Labelformat"
-                carrier_code = shipping_format_fields[active_name]
-                printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
-                printer_name = values.get(printer_field, "") or values.get("shipping_label_printer")
-                title = f"{_shipping_carrier_label(carrier_code)} Format"
-                values[active_name] = cups_media_dialog(stdscr, printer_name, values[active_name], title)
-            elif active_name == "delivery_note_format":
-                values[active_name] = cups_media_dialog(
-                    stdscr,
-                    values.get("delivery_note_printer", ""),
-                    values[active_name],
-                    "Lieferschein Format",
-                )
-            elif active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
-                values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), "Ordner waehlen")
-            elif active_name == "color_theme_file":
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Theme Datei waehlen", extensions={".json"})
-            elif active_name in {"label_font_regular", "label_font_condensed"}:
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Font waehlen", extensions={".ttf", ".otf"})
-            elif active_name == "delivery_note_template_path":
-                values[active_name] = file_dialog(stdscr, values.get(active_name, ""), "Vorlage waehlen", extensions={".pdf", ".html", ".htm"})
-            elif active_name in shipping_template_fields:
-                carrier_code = shipping_template_fields[active_name]
-                values[active_name] = file_dialog(
-                    stdscr,
-                    values.get(active_name, ""),
-                    f"{_shipping_carrier_label(carrier_code)} Vorlage waehlen",
-                    extensions={".html", ".htm"},
-                )
-            elif active_name in shipping_tracking_mode_fields:
-                values[active_name] = choice_dialog(
-                    stdscr,
-                    "Shopify Tracking",
-                    [
-                        {"value": "company", "label": "Carrier + Nummer"},
-                        {"value": "company_and_url", "label": "Carrier + Nummer + URL"},
-                    ],
-                    values[active_name],
-                )
-            elif active_name == "shipping_services_display":
-                values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
-                values["shipping_services_display"] = _shipping_services_summary(values["shipping_services"])
-            elif active_name == "shipping_active_carriers_display":
-                chosen = toggle_choice_dialog(
-                    stdscr,
-                    "Aktive Versanddienste",
-                    _shipping_carrier_options(include_test=True),
-                    values.get("shipping_active_carriers", []),
-                )
-                if chosen is not None:
-                    values["shipping_active_carriers"] = _normalize_active_shipping_carriers(
-                        chosen,
-                        fallback_to_defaults=False,
-                    )
-                    values["shipping_active_carriers_display"] = _shipping_active_carriers_summary(
-                        values["shipping_active_carriers"],
-                        fallback_to_defaults=False,
-                    )
-            else:
                 if editable_indices:
                     active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
             cursor_positions[active_name] = len(str(values.get(active_name, "")))
@@ -5695,12 +5879,15 @@ def settings_dialog(stdscr):
     updated["shipping_packaging_weight_grams"] = packaging_weight
 
     try:
-        test_db_connection(updated)
+        SETTINGS = run_background_action_dialog(
+            stdscr,
+            "Einstellungen speichern",
+            lambda: (_save_settings_checked(updated)),
+            detail="DB-Verbindung und Einstellungen werden gespeichert...",
+        )
     except Exception as exc:
         message_box(stdscr, "DB Fehler", str(exc)[:56])
         return
-
-    SETTINGS = save_settings(updated)
     apply_color_theme(stdscr)
     message_box(stdscr, t("saved"), t("saved_settings"))
 
@@ -5728,7 +5915,7 @@ def summarize_subprocess_error(exc):
 
 def build_label_print_command(item):
     return [
-        "python3",
+        sys.executable,
         LABEL_PRINT_SCRIPT,
         item["sku"],
         item["name"],
@@ -5776,34 +5963,36 @@ def add_item(stdscr):
     if menge is None:
         return
 
-    con = db()
-    cur = con.cursor()
+    def action():
+        con = db()
+        cur = con.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO items (
+                    sku,name,regal,fach,platz,menge,available,unavailable,committed,reserved,sync_status
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'local')
+                """,
+                (
+                    res["sku"],
+                    res["name"],
+                    regal,
+                    fach,
+                    platz,
+                    menge,
+                    menge,
+                    0,
+                    0,
+                    0,
+                ),
+            )
+            con.commit()
+        finally:
+            cur.close()
+            con.close()
 
-    cur.execute(
-        """
-        INSERT INTO items (
-            sku,name,regal,fach,platz,menge,available,unavailable,committed,reserved,sync_status
-        )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'local')
-        """,
-
-        (
-            res["sku"],
-            res["name"],
-            regal,
-            fach,
-            platz,
-            menge,
-            menge,
-            0,
-            0,
-            0,
-        ),
-    )
-
-    con.commit()
-    cur.close()
-    con.close()
+    run_background_action_dialog(stdscr, "Artikel anlegen", action, detail="Artikel wird gespeichert...")
 
 def change_qty(stdscr, item):
 
@@ -5863,30 +6052,30 @@ def change_qty(stdscr, item):
             return
 
         if key == curses.KEY_F2:
+            def action():
+                con = db()
+                cur = con.cursor()
+                try:
+                    cur.execute(
+                        """
+                        UPDATE items
+                        SET menge=%s,
+                            available=GREATEST(
+                                %s - COALESCE(unavailable, COALESCE(reserved, 0)) - COALESCE(committed, 0),
+                                0
+                            ),
+                            dirty=true,
+                            updated_at=NOW()
+                        WHERE sku=%s
+                        """,
+                        (qty, qty, item["sku"])
+                    )
+                    con.commit()
+                finally:
+                    cur.close()
+                    con.close()
 
-            con = db()
-            cur = con.cursor()
-
-            cur.execute(
-                """
-                UPDATE items
-                SET menge=%s,
-                    available=GREATEST(
-                        %s - COALESCE(unavailable, COALESCE(reserved, 0)) - COALESCE(committed, 0),
-                        0
-                    ),
-                    dirty=true,
-                    updated_at=NOW()
-                WHERE sku=%s
-                """,
-                (qty, qty, item["sku"])
-            )
-
-
-
-            con.commit()
-            cur.close()
-            con.close() 
+            run_background_action_dialog(stdscr, "Menge speichern", action, detail="Artikelmenge wird gespeichert...")
             return
 
         elif key == '+':
@@ -5949,27 +6138,30 @@ def change_location(stdscr, item):
     if platz is None:
         return
 
-    con = db()
-    cur = con.cursor()
+    def action():
+        con = db()
+        cur = con.cursor()
+        try:
+            cur.execute("""
+                UPDATE items
+                SET regal = %s,
+                    fach = %s,
+                    platz = %s,
+                    updated_at = NOW()
+                WHERE sku = %s
+            """,
+            (
+                regal,
+                fach,
+                platz,
+                item["sku"]
+            ))
+            con.commit()
+        finally:
+            cur.close()
+            con.close()
 
-    cur.execute("""
-        UPDATE items
-        SET regal = %s,
-            fach = %s,
-            platz = %s,
-            updated_at = NOW()
-        WHERE sku = %s
-    """,
-    (
-        regal,
-        fach,
-        platz,
-        item["sku"]
-    ))
-
-    con.commit()
-    cur.close()
-    con.close()
+    run_background_action_dialog(stdscr, "Lagerplatz speichern", action, detail="Lagerplatz wird gespeichert...")
     
 def edit_item(stdscr, item):
 
@@ -6014,38 +6206,41 @@ def edit_item(stdscr, item):
         message_box(stdscr, "Fehler", "Menge muss eine Zahl sein.")
         return
 
-    con = db()
-    cur = con.cursor()
+    def action():
+        con = db()
+        cur = con.cursor()
+        try:
+            cur.execute("""
+                UPDATE items
+                SET sku=%s,
+                    name=%s,
+                    regal=%s,
+                    fach=%s,
+                    platz=%s,
+                    menge=%s,
+                    available=GREATEST(
+                        %s - COALESCE(unavailable, COALESCE(reserved, 0)) - COALESCE(committed, 0),
+                        0
+                    ),
+                    updated_at=NOW()
+                WHERE sku=%s
+            """,
+            (
+                res["sku"],
+                res["name"],
+                regal,
+                fach,
+                platz,
+                menge,
+                menge,
+                item["sku"]
+            ))
+            con.commit()
+        finally:
+            cur.close()
+            con.close()
 
-    cur.execute("""
-        UPDATE items
-        SET sku=%s,
-            name=%s,
-            regal=%s,
-            fach=%s,
-            platz=%s,
-            menge=%s,
-            available=GREATEST(
-                %s - COALESCE(unavailable, COALESCE(reserved, 0)) - COALESCE(committed, 0),
-                0
-            ),
-            updated_at=NOW()
-        WHERE sku=%s
-    """,
-    (
-        res["sku"],
-        res["name"],
-        regal,
-        fach,
-        platz,
-        menge,
-        menge,
-        item["sku"]
-    ))
-
-    con.commit()
-    cur.close()
-    con.close()
+    run_background_action_dialog(stdscr, "Artikel speichern", action, detail="Artikel wird gespeichert...")
 
 def print_label(stdscr, item):
 
@@ -6114,31 +6309,41 @@ def delete_item(stdscr, item):
     if not confirm_box(stdscr, "Löschen", f"Artikel {item['sku']} wirklich löschen?"):
         return
 
-    con = db()
-    cur = con.cursor()
-    cur.execute("DELETE FROM items WHERE sku=%s", (item["sku"],))
-    con.commit()
-    cur.close()
-    con.close()
+    def action():
+        con = db()
+        cur = con.cursor()
+        try:
+            cur.execute("DELETE FROM items WHERE sku=%s", (item["sku"],))
+            con.commit()
+        finally:
+            cur.close()
+            con.close()
+
+    run_background_action_dialog(stdscr, "Artikel loeschen", action, detail="Artikel wird geloescht...")
 
 
 def toggle_external_fulfillment(stdscr, item):
     new_value = not bool(item["external_fulfillment"])
 
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        """
-        UPDATE items
-        SET external_fulfillment = %s,
-            updated_at = NOW()
-        WHERE sku = %s
-        """,
-        (new_value, item["sku"]),
-    )
-    con.commit()
-    cur.close()
-    con.close()
+    def action():
+        con = db()
+        cur = con.cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE items
+                SET external_fulfillment = %s,
+                    updated_at = NOW()
+                WHERE sku = %s
+                """,
+                (new_value, item["sku"]),
+            )
+            con.commit()
+        finally:
+            cur.close()
+            con.close()
+
+    run_background_action_dialog(stdscr, "Artikel aktualisieren", action, detail="Artikel wird aktualisiert...")
 
 
 def format_address(order):
@@ -6604,7 +6809,9 @@ def delivery_note_output_mode_dialog(stdscr):
     )
 
 
-def handle_delivery_note_output(stdscr, order, order_items):
+def handle_delivery_note_output(stdscr, order, order_items=None, order_items_cache=None):
+    if order_items is None:
+        order_items = ensure_order_items_loaded(order.get("order_id"), order_items_cache)
     mode = delivery_note_output_mode_dialog(stdscr)
     if not mode:
         return
@@ -7256,77 +7463,73 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     note_paths_to_print = []
     printed_label_ids = []
 
-    for order in selected_orders:
-        carrier = effective_shipping_carrier(carrier_map.get(order["order_id"]))
-        try:
-            order_items = order_items_cache.get(order["order_id"])
-            if order_items is None:
-                order_items = get_order_items(order["order_id"])
-                order_items_cache[order["order_id"]] = order_items
-
-            order_weight_kg, _order_weight_grams = calculate_order_shipping_weight(order, order_items)
-            created = create_shipping_label(
-                order,
-                weight_kg=order_weight_kg,
-                carrier=carrier,
-                service_codes=carrier_options,
-            )
-            if print_mode in {"both", "label"} and created.get("label_path"):
-                label_paths_to_print.append(created["label_path"])
-                if created.get("label_id") is not None:
-                    printed_label_ids.append(created["label_id"])
-
-            note_path, _rows = create_delivery_note_pdf(order, order_items)
-            if print_mode in {"both", "note"}:
-                note_paths_to_print.append(note_path)
-
-            if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
-                labels_for_order = list_shipping_labels(order["order_id"])
-                created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
-                if created_row:
-                    try:
-                        queue_result = enqueue_shopify_fulfillment_job(created_row, notify_customer=False)
-                    except Exception:
-                        PRINT_LOGGER.exception("Bulk Shopify Queue fehlgeschlagen order=%s", order.get("order_name"))
-                        queue_failed_count += 1
-                    else:
-                        if queue_result.get("created"):
-                            queued_count += 1
-                            update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
-
-            success_count += 1
-        except DatabaseUnavailableError:
-            raise
-        except Exception as exc:
-            failure_count += 1
-            short_error = str(exc).strip() or exc.__class__.__name__
-            last_failure_summary = f"{order.get('order_name')}: {short_error}"[:220]
-            LOGGER.exception(
-                "Bulk-Ausfuehrung fehlgeschlagen order=%s carrier=%s print_mode=%s shopify_mode=%s",
-                order.get("order_name"),
-                carrier,
-                print_mode,
-                shopify_mode,
-            )
-            LOGGER.error(
-                "Bulk Fehler order=%s detail=%s",
-                order.get("order_name"),
-                short_error[:500],
-            )
-            PRINT_LOGGER.exception("Bulk-Ausfuehrung fehlgeschlagen order=%s", order.get("order_name"))
-            PRINT_LOGGER.error("Bulk Fehler order=%s detail=%s", order.get("order_name"), short_error[:500])
-
-    if failure_count and last_failure_summary:
-        selected_order_ids.clear()
-        message_box(
-            stdscr,
-            "Bulk",
-            f"OK:{success_count} Err:{failure_count} {last_failure_summary[:28]} {MAIN_LOG_PATH.name}"[:56],
-        )
-        return
-
     try:
         with tempfile.TemporaryDirectory(prefix="lager-bulk-print-") as temp_dir:
+            for order in selected_orders:
+                carrier = effective_shipping_carrier(carrier_map.get(order["order_id"]))
+                try:
+                    order_items = ensure_order_items_loaded(order["order_id"], order_items_cache)
+                    order_weight_kg, _order_weight_grams = calculate_order_shipping_weight(order, order_items)
+                    created = create_shipping_label(
+                        order,
+                        weight_kg=order_weight_kg,
+                        carrier=carrier,
+                        service_codes=carrier_options,
+                    )
+                    if print_mode in {"both", "label"} and created.get("label_path"):
+                        label_paths_to_print.append(created["label_path"])
+                        if created.get("label_id") is not None:
+                            printed_label_ids.append(created["label_id"])
+
+                    if print_mode in {"both", "note"}:
+                        note_path, _rows = create_delivery_note_pdf(order, order_items, output_dir=temp_dir)
+                        note_paths_to_print.append(note_path)
+
+                    if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
+                        labels_for_order = ensure_order_shipments_loaded(order["order_id"])
+                        created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
+                        if created_row:
+                            try:
+                                queue_result = enqueue_shopify_fulfillment_job(created_row, notify_customer=False)
+                            except Exception:
+                                PRINT_LOGGER.exception("Bulk Shopify Queue fehlgeschlagen order=%s", order.get("order_name"))
+                                queue_failed_count += 1
+                            else:
+                                if queue_result.get("created"):
+                                    queued_count += 1
+                                    update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
+
+                    success_count += 1
+                except DatabaseUnavailableError:
+                    raise
+                except Exception as exc:
+                    failure_count += 1
+                    short_error = str(exc).strip() or exc.__class__.__name__
+                    last_failure_summary = f"{order.get('order_name')}: {short_error}"[:220]
+                    LOGGER.exception(
+                        "Bulk-Ausfuehrung fehlgeschlagen order=%s carrier=%s print_mode=%s shopify_mode=%s",
+                        order.get("order_name"),
+                        carrier,
+                        print_mode,
+                        shopify_mode,
+                    )
+                    LOGGER.error(
+                        "Bulk Fehler order=%s detail=%s",
+                        order.get("order_name"),
+                        short_error[:500],
+                    )
+                    PRINT_LOGGER.exception("Bulk-Ausfuehrung fehlgeschlagen order=%s", order.get("order_name"))
+                    PRINT_LOGGER.error("Bulk Fehler order=%s detail=%s", order.get("order_name"), short_error[:500])
+
+            if failure_count and last_failure_summary:
+                selected_order_ids.clear()
+                message_box(
+                    stdscr,
+                    "Bulk",
+                    f"OK:{success_count} Err:{failure_count} {last_failure_summary[:28]} {MAIN_LOG_PATH.name}"[:56],
+                )
+                return
+
             if label_paths_to_print:
                 merged_label_pdf = os.path.join(temp_dir, f"shipping_labels_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
                 _merge_pdf_files(label_paths_to_print, merged_label_pdf)
@@ -7335,9 +7538,12 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     for label_id in printed_label_ids:
                         update_shipping_label_status(label_id, "PRINTED")
             if note_paths_to_print:
-                merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
-                _merge_pdf_files(note_paths_to_print, merged_note_pdf)
-                _print_merged_delivery_note_pdf(merged_note_pdf)
+                if len(note_paths_to_print) == 1:
+                    _print_merged_delivery_note_pdf(note_paths_to_print[0], title=f"Lieferschein {selected_orders[0]['order_name']}")
+                else:
+                    merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+                    _merge_pdf_files(note_paths_to_print, merged_note_pdf)
+                    _print_merged_delivery_note_pdf(merged_note_pdf)
     except Exception as exc:
         LOGGER.exception("Bulk-Sammeldruck fehlgeschlagen carrier=%s print_mode=%s", carrier, print_mode)
         PRINT_LOGGER.exception("Bulk-Sammeldruck fehlgeschlagen carrier=%s", carrier)
@@ -7741,10 +7947,9 @@ def orders_dialog(stdscr):
             orders_snapshot_reload_pending = False
             if loader_result.get("error") is None and loader_result.get("value") is not None:
                 orders_snapshot = loader_result["value"]
-                order_items_cache = {}
-                order_shipments_cache = {}
-                _ORDER_ITEMS_LOADER.clear()
-                _ORDER_SHIPMENTS_LOADER.clear()
+                active_order_ids = {row.get("order_id") for row in orders_snapshot if row.get("order_id")}
+                order_items_cache = {key: value for key, value in order_items_cache.items() if key in active_order_ids}
+                order_shipments_cache = {key: value for key, value in order_shipments_cache.items() if key in active_order_ids}
                 rebuild_orders_view = True
                 last_orders_snapshot_refresh_at = loader_result["loaded_at"]
 
@@ -7752,8 +7957,9 @@ def orders_dialog(stdscr):
             if reload_orders_snapshot:
                 if not orders_snapshot:
                     orders_snapshot = _load_orders_snapshot()
-                    order_items_cache = {}
-                    order_shipments_cache = {}
+                    active_order_ids = {row.get("order_id") for row in orders_snapshot if row.get("order_id")}
+                    order_items_cache = {key: value for key, value in order_items_cache.items() if key in active_order_ids}
+                    order_shipments_cache = {key: value for key, value in order_shipments_cache.items() if key in active_order_ids}
                     last_orders_snapshot_refresh_at = time.monotonic()
                     rebuild_orders_view = True
                 elif not orders_snapshot_reload_pending:
@@ -7993,6 +8199,7 @@ def orders_dialog(stdscr):
                 reload_orders_snapshot = True
         elif key == curses.KEY_F6 and selected_order:
             try:
+                order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
                 order_shipments_cache.pop(selected_order_id, None)
                 order_items_cache.pop(selected_order_id, None)
@@ -8011,6 +8218,7 @@ def orders_dialog(stdscr):
                 reload_orders_snapshot = True
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
             try:
+                order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
                 order_shipments_cache.pop(selected_order_id, None)
                 order_items_cache.pop(selected_order_id, None)
@@ -8063,7 +8271,7 @@ def orders_dialog(stdscr):
                 reload_orders_snapshot = True
         elif key == curses.KEY_F11 and selected_order:
             try:
-                handle_delivery_note_output(stdscr, selected_order, order_items)
+                handle_delivery_note_output(stdscr, selected_order, order_items=None, order_items_cache=order_items_cache)
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -8077,6 +8285,7 @@ def orders_dialog(stdscr):
                     return
                 reload_orders_snapshot = True
         elif key == curses.KEY_F10 and selected_order:
+            order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
             print_picklist(stdscr, selected_order, order_items)
         elif key == " " and selected_order:
             order_id = selected_order["order_id"]
@@ -8119,7 +8328,12 @@ def inventory_dialog(stdscr):
     if session is None:
         if not confirm_box(stdscr, "Inventur", "Neue Inventur starten?"):
             return False
-        session = create_inventory_session()
+        session = run_background_action_dialog(
+            stdscr,
+            "Inventur",
+            create_inventory_session,
+            detail="Inventur wird erzeugt...",
+        )
 
     selected = 0
     top_index = 0
@@ -8199,14 +8413,24 @@ def inventory_dialog(stdscr):
             selected = move_selection(lines, selected, -max(1, list_height - 2))
         elif key == curses.KEY_F2:
             if confirm_box(stdscr, "Inventur", "Neue Inventur erzeugen? Aktive wird archiviert."):
-                session = create_inventory_session()
+                session = run_background_action_dialog(
+                    stdscr,
+                    "Inventur",
+                    create_inventory_session,
+                    detail="Inventur wird erzeugt...",
+                )
                 selected = 0
                 top_index = 0
                 reload_lines = True
         elif key == curses.KEY_F3 and lines:
             qty = inventory_count_dialog(stdscr, lines[selected])
             if qty is not None:
-                set_inventory_count(session["session_id"], lines[selected]["line_no"], qty)
+                run_background_action_dialog(
+                    stdscr,
+                    "Inventur",
+                    lambda: set_inventory_count(session["session_id"], lines[selected]["line_no"], qty),
+                    detail="Inventurposition wird gespeichert...",
+                )
                 reload_lines = True
         elif key == curses.KEY_F4:
             path = export_inventory_csv(session, all_lines)
@@ -8223,7 +8447,12 @@ def inventory_dialog(stdscr):
             if counted_now == 0:
                 message_box(stdscr, "Inventur", "Noch keine Ist-Mengen erfasst.")
             elif confirm_box(stdscr, "Inventur", "Erfasste Mengen in Bestand uebernehmen?"):
-                apply_inventory_session(session["session_id"])
+                run_background_action_dialog(
+                    stdscr,
+                    "Inventur",
+                    lambda: apply_inventory_session(session["session_id"]),
+                    detail="Inventur wird uebernommen...",
+                )
                 message_box(stdscr, "Inventur", "Inventur wurde uebernommen.")
                 return True
 
