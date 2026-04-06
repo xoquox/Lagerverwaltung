@@ -61,8 +61,9 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
-API_VERSION = "2026-01"
+API_VERSION = "2026-04"
 SHOPIFY_LOCATION_ID = 67402989753
+SHOPIFY_LOCATION_GID = f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}"
 GRAPHQL_URL = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
 SYNC_INTERVAL = 60
 REQUEST_TIMEOUT_SECONDS = 45
@@ -298,42 +299,91 @@ def graphql_request(query, variables=None):
     return data["data"]
 
 
-def get_products_page(url):
-    ensure_runtime_dependencies()
-    headers = {
-        "X-Shopify-Access-Token": TOKEN,
+def _inventory_item_gid(value):
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("gid://"):
+        return text
+    return f"gid://shopify/InventoryItem/{text}"
+
+
+def _weight_grams_from_measurement(measurement):
+    weight = (measurement or {}).get("weight") or {}
+    value = weight.get("value")
+    unit = (weight.get("unit") or "").upper()
+    if value in (None, ""):
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if unit == "GRAMS":
+        grams = numeric_value
+    elif unit == "KILOGRAMS":
+        grams = numeric_value * 1000.0
+    elif unit == "OUNCES":
+        grams = numeric_value * 28.349523125
+    elif unit == "POUNDS":
+        grams = numeric_value * 453.59237
+    else:
+        return None
+
+    return int(round(grams))
+
+
+def get_all_product_variants():
+    query = """
+    query ProductVariantsPage($after: String) {
+      productVariants(first: 250, after: $after) {
+        nodes {
+          id
+          sku
+          barcode
+          price
+          compareAtPrice
+          inventoryQuantity
+          product {
+            id
+            title
+            status
+            descriptionHtml
+          }
+          inventoryItem {
+            id
+            sku
+            unitCost {
+              amount
+              currencyCode
+            }
+            measurement {
+              weight {
+                unit
+                value
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
     }
+    """
 
-    response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return response
-
-
-def get_all_products():
-    products = []
-    url = f"https://{SHOP}/admin/api/{API_VERSION}/products.json?limit=250"
-
-    while url:
-        response = get_products_page(url)
-        data = response.json()
-        products.extend(data["products"])
-
-        log_info("Geladen: %s Produkte", len(products))
-
-        link = response.headers.get("Link")
-        next_url = None
-
-        if link:
-            parts = link.split(",")
-
-            for part in parts:
-                if 'rel="next"' in part:
-                    next_url = part.split(";")[0].strip()[1:-1]
-
-        url = next_url
+    variants = []
+    after = None
+    while True:
+        data = graphql_request(query, {"after": after})
+        page = data["productVariants"]
+        variants.extend(page["nodes"])
+        log_info("Produktvarianten-Seite geladen: gesamt=%s has_next=%s", len(variants), page["pageInfo"]["hasNextPage"])
+        if not page["pageInfo"]["hasNextPage"]:
+            return variants
+        after = page["pageInfo"]["endCursor"]
         time.sleep(0.5)
-
-    return products
 
 def push_inventory_changes():
 
@@ -357,28 +407,55 @@ def push_inventory_changes():
 
     log_info("Push %s Lageraenderungen zu Shopify", len(rows))
 
-    headers = {
-        "X-Shopify-Access-Token": TOKEN,
-        "Content-Type": "application/json",
-    }
-
     pushed_count = 0
     for sku, available_qty, inventory_item_id in rows:
-        payload = {
-            "location_id": SHOPIFY_LOCATION_ID,
-            "inventory_item_id": inventory_item_id,
-            "available": available_qty,
+        inventory_item_gid = _inventory_item_gid(inventory_item_id)
+        if not inventory_item_gid:
+            log_error("Shopify Inventory-Sync uebersprungen: fehlende inventory item id fuer sku=%s", sku)
+            continue
+        mutation = """
+        mutation InventorySet($input: InventorySetQuantitiesInput!) {
+          inventorySetQuantities(input: $input) {
+            inventoryAdjustmentGroup {
+              createdAt
+            }
+            userErrors {
+              code
+              field
+              message
+            }
+          }
         }
+        """
+        variables = {
+            "input": {
+                "name": "available",
+                "reason": "correction",
+                "referenceDocumentUri": f"gid://lagerverwaltung/InventorySync/{sku}",
+                "quantities": [
+                    {
+                        "inventoryItemId": inventory_item_gid,
+                        "locationId": SHOPIFY_LOCATION_GID,
+                        "quantity": int(available_qty),
+                        "changeFromQuantity": None,
+                    }
+                ],
+            }
+        }
+        try:
+            data = graphql_request(mutation, variables)
+        except Exception as exc:
+            log_error("Shopify Fehler sku=%s action=inventorySetQuantities error=%s", sku, shorten_text(exc))
+            continue
 
-        response = requests.post(
-            f"https://{SHOP}/admin/api/{API_VERSION}/inventory_levels/set.json",
-            json=payload,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-
-        if response.status_code != 200:
-            log_error("Shopify Fehler sku=%s status=%s body=%s", sku, response.status_code, shorten_text(response.text))
+        payload = (data.get("inventorySetQuantities") or {})
+        user_errors = payload.get("userErrors") or []
+        if user_errors:
+            log_error(
+                "Shopify Fehler sku=%s action=inventorySetQuantities user_errors=%s",
+                sku,
+                shorten_text(json.dumps(user_errors, ensure_ascii=False)),
+            )
             continue
 
         log_info("Shopify Update sku=%s available=%s", sku, available_qty)
@@ -545,43 +622,35 @@ def sync_inventory_levels():
 
 
 def sync_products():
-
-    products = get_all_products()
-    inventory_item_ids = []
-    for product in products:
-        for variant in product["variants"]:
-            inventory_item_id = variant.get("inventory_item_id")
-            if inventory_item_id:
-                inventory_item_ids.append(inventory_item_id)
-
-    unit_cost_by_inventory_item_id = get_inventory_item_unit_costs(inventory_item_ids)
+    variants = get_all_product_variants()
+    product_ids = set()
 
     con = db()
     cur = con.cursor()
 
-    for product in products:
+    for variant in variants:
+        product = variant.get("product") or {}
+        inventory_item = variant.get("inventoryItem") or {}
 
-        product_id = product["id"]
-        name = product["title"]
+        product_id = product.get("id")
+        if product_id:
+            product_ids.add(product_id)
 
-        for variant in product["variants"]:
+        sku = (variant.get("sku") or inventory_item.get("sku") or "").strip()
+        if not sku:
+            continue
 
-            sku = variant["sku"]
+        variant_id = variant.get("id")
+        inventory_item_id = inventory_item.get("id")
+        barcode = variant.get("barcode")
+        price = variant.get("price")
+        compare_at_price = variant.get("compareAtPrice")
+        weight_grams = _weight_grams_from_measurement(inventory_item.get("measurement"))
+        unit_cost = inventory_item.get("unitCost") or {}
+        qty = int(variant.get("inventoryQuantity") or 0)
+        log_info("Import sku=%s qty=%s", sku, qty)
 
-            if not sku:
-                continue
-
-            variant_id = variant["id"]
-            inventory_item_id = variant["inventory_item_id"]
-            barcode = variant.get("barcode")
-            price = variant.get("price")
-            compare_at_price = variant.get("compare_at_price")
-            weight_grams = variant.get("grams")
-            unit_cost = unit_cost_by_inventory_item_id.get(inventory_item_id, {})
-            qty = variant["inventory_quantity"]
-            log_info("Import sku=%s qty=%s", sku, qty)
-
-            cur.execute("""
+        cur.execute("""
             INSERT INTO items(
                 sku,
                 name,
@@ -639,76 +708,30 @@ def sync_products():
                     ELSE items.dirty
                 END
             """,
-            (
-                sku,
-                name,
-                qty,
-                qty,
-                0,
-                0,
-                0,
-                product_id,
-                variant_id,
-                inventory_item_id,
-                barcode,
-                product.get("status"),
-                product.get("body_html"),
-                price,
-                compare_at_price,
-                unit_cost.get("amount"),
-                unit_cost.get("currency"),
-                weight_grams,
-            ))
+        (
+            sku,
+            product.get("title"),
+            qty,
+            qty,
+            0,
+            0,
+            0,
+            product_id,
+            variant_id,
+            inventory_item_id,
+            barcode,
+            product.get("status"),
+            product.get("descriptionHtml"),
+            price,
+            compare_at_price,
+            unit_cost.get("amount"),
+            unit_cost.get("currencyCode"),
+            weight_grams,
+        ))
 
     con.commit()
     con.close()
-    return len(products)
-
-
-def _chunks(values, size):
-    for index in range(0, len(values), size):
-        yield values[index : index + size]
-
-
-def get_inventory_item_unit_costs(inventory_item_ids):
-    ids = sorted({item_id for item_id in inventory_item_ids if item_id})
-    if not ids:
-        return {}
-
-    query = """
-    query InventoryItemUnitCosts($ids: [ID!]!) {
-      nodes(ids: $ids) {
-        ... on InventoryItem {
-          id
-          unitCost {
-            amount
-            currencyCode
-          }
-        }
-      }
-    }
-    """
-
-    costs = {}
-    for chunk in _chunks(ids, 100):
-        gid_chunk = [f"gid://shopify/InventoryItem/{item_id}" for item_id in chunk]
-        data = graphql_request(query, {"ids": gid_chunk})
-        for node in data["nodes"]:
-            if not node:
-                continue
-            gid = node["id"]
-            try:
-                item_id = int(gid.rsplit("/", 1)[-1])
-            except (TypeError, ValueError):
-                continue
-            unit_cost = node.get("unitCost") or {}
-            costs[item_id] = {
-                "amount": unit_cost.get("amount"),
-                "currency": unit_cost.get("currencyCode"),
-            }
-        time.sleep(0.2)
-
-    return costs
+    return len(product_ids)
 
 
 def get_all_orders():

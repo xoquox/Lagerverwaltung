@@ -255,6 +255,130 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(insert_params[7], "Musterstr. 1")
         self.assertEqual(insert_params[10], "Germany")
 
+    def test_get_all_product_variants_paginates_graphql_connection(self):
+        responses = [
+            {
+                "productVariants": {
+                    "nodes": [
+                        {"id": "gid://shopify/ProductVariant/1", "sku": "SKU-1"},
+                    ],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+                }
+            },
+            {
+                "productVariants": {
+                    "nodes": [
+                        {"id": "gid://shopify/ProductVariant/2", "sku": "SKU-2"},
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            },
+        ]
+
+        with mock.patch.object(self.shopify_sync, "graphql_request", side_effect=responses) as graphql_mock:
+            variants = self.shopify_sync.get_all_product_variants()
+
+        self.assertEqual([row["sku"] for row in variants], ["SKU-1", "SKU-2"])
+        self.assertEqual(graphql_mock.call_count, 2)
+        self.assertEqual(graphql_mock.call_args_list[0].args[1], {"after": None})
+        self.assertEqual(graphql_mock.call_args_list[1].args[1], {"after": "cursor-1"})
+
+    def test_push_inventory_changes_uses_inventory_set_quantities_mutation(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+            def fetchall(self):
+                return [("SKU-1", 7, "12345")]
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        graphql_response = {
+            "inventorySetQuantities": {
+                "inventoryAdjustmentGroup": {"createdAt": "2026-04-04T18:00:00Z"},
+                "userErrors": [],
+            }
+        }
+
+        with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+            with mock.patch.object(self.shopify_sync, "graphql_request", return_value=graphql_response) as graphql_mock:
+                count = self.shopify_sync.push_inventory_changes()
+
+        self.assertEqual(count, 1)
+        self.assertIn("inventorySetQuantities", graphql_mock.call_args.args[0])
+        variables = graphql_mock.call_args.args[1]
+        self.assertEqual(variables["input"]["name"], "available")
+        self.assertEqual(variables["input"]["quantities"][0]["inventoryItemId"], "gid://shopify/InventoryItem/12345")
+        self.assertEqual(variables["input"]["quantities"][0]["locationId"], self.shopify_sync.SHOPIFY_LOCATION_GID)
+        self.assertEqual(variables["input"]["quantities"][0]["quantity"], 7)
+        self.assertTrue(any("UPDATE items SET dirty = FALSE" in query for query, _ in executed))
+
+    def test_sync_products_writes_graphql_variant_fields(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        variants = [
+            {
+                "id": "gid://shopify/ProductVariant/11",
+                "sku": "SKU-11",
+                "barcode": "BAR-11",
+                "price": "19.99",
+                "compareAtPrice": "24.99",
+                "inventoryQuantity": 5,
+                "product": {
+                    "id": "gid://shopify/Product/9",
+                    "title": "Produkt A",
+                    "status": "ACTIVE",
+                    "descriptionHtml": "<p>Beschreibung</p>",
+                },
+                "inventoryItem": {
+                    "id": "gid://shopify/InventoryItem/77",
+                    "sku": "SKU-11",
+                    "unitCost": {"amount": "12.50", "currencyCode": "EUR"},
+                    "measurement": {"weight": {"unit": "KILOGRAMS", "value": 0.25}},
+                },
+            }
+        ]
+
+        with mock.patch.object(self.shopify_sync, "get_all_product_variants", return_value=variants):
+            with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+                count = self.shopify_sync.sync_products()
+
+        self.assertEqual(count, 1)
+        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO items(" in q)
+        self.assertIn("INSERT INTO items(", insert_query)
+        self.assertEqual(insert_params[0], "SKU-11")
+        self.assertEqual(insert_params[1], "Produkt A")
+        self.assertEqual(insert_params[7], "gid://shopify/Product/9")
+        self.assertEqual(insert_params[8], "gid://shopify/ProductVariant/11")
+        self.assertEqual(insert_params[9], "gid://shopify/InventoryItem/77")
+        self.assertEqual(insert_params[15], "12.50")
+        self.assertEqual(insert_params[16], "EUR")
+        self.assertEqual(insert_params[17], 250)
+
     def test_upsert_shopify_shipment_writes_shipping_labels_table(self):
         executed = []
 
