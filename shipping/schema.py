@@ -307,6 +307,11 @@ def apply_app_schema(cur):
 
 
 def collect_schema_issues(cur):
+    def _row_value(row, key):
+        if isinstance(row, dict):
+            return row.get(key)
+        return row[0]
+
     table_names = list(REQUIRED_TABLE_COLUMNS.keys())
     cur.execute(
         """
@@ -315,7 +320,7 @@ def collect_schema_issues(cur):
         WHERE table_schema = 'public'
         """
     )
-    existing_tables = {row[0] for row in cur.fetchall()}
+    existing_tables = {_row_value(row, "table_name") for row in cur.fetchall()}
 
     issues = []
     for table_name in table_names:
@@ -330,7 +335,7 @@ def collect_schema_issues(cur):
             """,
             (table_name,),
         )
-        existing_columns = {row[0] for row in cur.fetchall()}
+        existing_columns = {_row_value(row, "column_name") for row in cur.fetchall()}
         missing_columns = sorted(REQUIRED_TABLE_COLUMNS[table_name] - existing_columns)
         for column_name in missing_columns:
             issues.append(f"Spalte fehlt: {table_name}.{column_name}")

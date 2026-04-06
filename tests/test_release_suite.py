@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import os
+import queue
 import shutil
 import sys
 import tempfile
@@ -290,18 +291,81 @@ class DatabaseSchemaTests(unittest.TestCase):
         self.assertIn("Tabelle fehlt: items", issues)
         self.assertIn("Tabelle fehlt: inventory_sessions", issues)
 
+    def test_collect_schema_issues_accepts_dict_rows(self):
+        from shipping.schema import collect_schema_issues
+
+        cursor = FakeCursor(
+            fetchall_results=[
+                [{"table_name": "items"}],
+                [{"column_name": "sku"}, {"column_name": "name"}],
+            ]
+        )
+
+        issues = collect_schema_issues(cursor)
+
+        self.assertIn("Tabelle fehlt: inventory_sessions", issues)
+        self.assertIn("Spalte fehlt: items.regal", issues)
+
     def test_probe_database_ready_requires_migration_when_schema_is_incomplete(self):
         lager_mc = load_lager_mc()
+        cursor = FakeCursor()
+        con = FakeConnection(cursor)
 
         with (
             mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
-            mock.patch.object(lager_mc, "database_schema_issues", return_value=["Spalte fehlt: items.available"]),
+            mock.patch.object(lager_mc, "db", return_value=con),
+            mock.patch.object(lager_mc, "collect_schema_issues", return_value=["Spalte fehlt: items.available"]),
             mock.patch.object(lager_mc, "init_db", side_effect=AssertionError("init_db darf nicht laufen")),
         ):
             ready, message = lager_mc._probe_database_ready()
 
         self.assertFalse(ready)
         self.assertIn("DB Migration noetig", message)
+
+    def test_probe_database_ready_verbose_reports_progress(self):
+        lager_mc = load_lager_mc()
+        progress_calls = []
+        cursor = FakeCursor()
+        con = FakeConnection(cursor)
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "db", return_value=con),
+            mock.patch.object(lager_mc, "collect_schema_issues", return_value=[]),
+        ):
+            ready, message, lines = lager_mc._probe_database_ready_verbose(progress_calls.append)
+
+        self.assertTrue(ready)
+        self.assertEqual(message, "")
+        self.assertIn("DB Verbindung erfolgreich.", lines)
+        self.assertIn("Pruefe Schema ...", lines)
+        self.assertTrue(progress_calls)
+
+    def test_probe_database_ready_verbose_reports_failure(self):
+        lager_mc = load_lager_mc()
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "db", side_effect=RuntimeError("timeout")),
+        ):
+            ready, message, lines = lager_mc._probe_database_ready_verbose()
+
+        self.assertFalse(ready)
+        self.assertIn("timeout", message)
+        self.assertIn("DB Verbindung fehlgeschlagen.", lines)
+
+    def test_ensure_database_ready_does_not_block_on_sync_probe(self):
+        lager_mc = load_lager_mc()
+
+        with (
+            mock.patch.object(lager_mc, "_is_default_db_settings", return_value=False),
+            mock.patch.object(lager_mc, "_probe_database_ready", side_effect=AssertionError("sync probe darf nicht laufen")),
+            mock.patch.object(lager_mc, "database_connection_dialog", return_value=True) as dialog_mock,
+        ):
+            ready = lager_mc.ensure_database_ready(object())
+
+        self.assertTrue(ready)
+        dialog_mock.assert_called_once()
 
 
 class MigrationScriptTests(unittest.TestCase):
@@ -539,12 +603,29 @@ class LagerMcLogicTests(unittest.TestCase):
     def setUpClass(cls):
         cls.lager_mc = load_lager_mc()
 
+    def setUp(self):
+        self.lager_mc._PENDING_ITEM_WRITES.clear()
+        while True:
+            try:
+                self.lager_mc._BACKGROUND_UI_EVENTS.get_nowait()
+            except queue.Empty:
+                break
+
     def test_normalize_regal_accepts_single_letter_only(self):
         self.assertEqual(self.lager_mc.normalize_regal("A"), "A")
         self.assertIsNone(self.lager_mc.normalize_regal(" a "))
         self.assertEqual(self.lager_mc.normalize_regal(""), "")
         self.assertIsNone(self.lager_mc.normalize_regal("AA"))
         self.assertIsNone(self.lager_mc.normalize_regal("1"))
+
+    def test_translation_keys_match_across_languages(self):
+        translations = self.lager_mc.TRANSLATIONS
+        base_keys = set(translations["de"].keys())
+        for language, values in translations.items():
+            self.assertEqual(set(values.keys()), base_keys, msg=f"ungueltige Schluessel fuer {language}")
+
+    def test_supported_languages_follow_translation_tables(self):
+        self.assertEqual(self.lager_mc.SUPPORTED_LANGUAGES, set(self.lager_mc.TRANSLATIONS.keys()))
 
     def test_resolve_post_product_selection_uses_base_and_options(self):
         product = self.lager_mc._resolve_post_product_selection(
@@ -1096,6 +1177,16 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertTrue(pdf_bytes.startswith(b"%PDF-1.4"))
         self.assertIn(b"Helvetica", pdf_bytes)
 
+    def test_safe_addstr_ignores_tight_window_errors(self):
+        class TightWindow:
+            def getmaxyx(self):
+                return (1, 1)
+
+            def addstr(self, y, x, text, *args):
+                raise curses.error("too small")
+
+        self.lager_mc._safe_addstr(TightWindow(), 0, 2, "Titel")
+
     def test_settings_print_test_context_for_carrier_printer_uses_selected_values(self):
         values = {
             "shipping_label_printer": "Fallback",
@@ -1119,7 +1210,7 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(app_logging.PRINT_LOG_PATH.name, "print.log")
 
     def test_enqueue_shopify_fulfillment_job_blocks_test_and_free_carriers(self):
-        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify uebertragen werden"):
+        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify gesendet werden"):
             self.lager_mc.enqueue_shopify_fulfillment_job(
                 {
                     "id": 7,
@@ -1128,7 +1219,7 @@ class LagerMcLogicTests(unittest.TestCase):
                     "carrier": "test",
                 }
             )
-        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify uebertragen werden"):
+        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify gesendet werden"):
             self.lager_mc.enqueue_shopify_fulfillment_job(
                 {
                     "id": 8,
@@ -1265,6 +1356,200 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["display_name"], "Erika Musterfrau")
 
+    def test_update_item_snapshot_quantity_updates_qty_and_available(self):
+        rows = [
+            {"sku": "SKU-1", "menge": 5, "unavailable": 1, "committed": 2, "available": 2, "dirty": False},
+        ]
+
+        changed = self.lager_mc._update_item_snapshot_quantity(rows, "SKU-1", 9)
+
+        self.assertTrue(changed)
+        self.assertEqual(rows[0]["menge"], 9)
+        self.assertEqual(rows[0]["available"], 6)
+        self.assertTrue(rows[0]["dirty"])
+
+    def test_update_item_snapshot_quantity_returns_false_for_unknown_sku(self):
+        rows = [{"sku": "SKU-1", "menge": 5, "unavailable": 0, "committed": 0, "available": 5, "dirty": False}]
+
+        changed = self.lager_mc._update_item_snapshot_quantity(rows, "SKU-2", 9)
+
+        self.assertFalse(changed)
+
+    def test_update_item_snapshot_location_updates_row(self):
+        rows = [
+            {"sku": "SKU-1", "regal": "A", "fach": "1", "platz": "1", "dirty": False},
+        ]
+
+        changed = self.lager_mc._update_item_snapshot_location(rows, "SKU-1", "B", "2", "3")
+
+        self.assertTrue(changed)
+        self.assertEqual(rows[0]["regal"], "B")
+        self.assertEqual(rows[0]["fach"], "2")
+        self.assertEqual(rows[0]["platz"], "3")
+        self.assertTrue(rows[0]["dirty"])
+
+    def test_update_item_snapshot_location_returns_false_for_unknown_sku(self):
+        rows = [{"sku": "SKU-1", "regal": "A", "fach": "1", "platz": "1", "dirty": False}]
+
+        changed = self.lager_mc._update_item_snapshot_location(rows, "SKU-2", "B", "2", "3")
+
+        self.assertFalse(changed)
+
+    def test_enqueue_item_write_state_merges_updates_for_same_sku(self):
+        state_map = {}
+
+        first = self.lager_mc._enqueue_item_write_state(state_map, "SKU-1", {"qty": 8})
+        second = self.lager_mc._enqueue_item_write_state(
+            state_map,
+            "SKU-1",
+            {"regal": "A", "fach": "2", "platz": "3"},
+        )
+
+        self.assertFalse(first["merged"])
+        self.assertTrue(first["start_worker"])
+        self.assertTrue(second["merged"])
+        self.assertFalse(second["start_worker"])
+        self.assertEqual(
+            state_map["SKU-1"]["pending"],
+            {"qty": 8, "regal": "A", "fach": "2", "platz": "3"},
+        )
+
+    def test_apply_item_write_db_updates_qty_and_location_in_one_statement(self):
+        cursor = FakeCursor()
+        connection = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=connection):
+            self.lager_mc._apply_item_write_db(
+                "SKU-1",
+                {"qty": 9, "regal": "B", "fach": "4", "platz": "2"},
+            )
+
+        self.assertTrue(connection.committed)
+        query, params = cursor.executed[0]
+        self.assertIn("UPDATE items SET", query)
+        self.assertIn("menge=%s", query)
+        self.assertIn("available=GREATEST", query)
+        self.assertIn("regal=%s", query)
+        self.assertIn("fach=%s", query)
+        self.assertIn("platz=%s", query)
+        self.assertEqual(params, (9, 9, "B", "4", "2", "SKU-1"))
+
+    def test_queue_item_write_starts_worker_once_and_merges_followup_for_same_sku(self):
+        created_threads = []
+
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+                created_threads.append(self)
+
+            def start(self):
+                return None
+
+        with mock.patch.object(self.lager_mc.threading, "Thread", FakeThread):
+            first = self.lager_mc.queue_item_write("SKU-1", qty=5)
+            second = self.lager_mc.queue_item_write("SKU-1", regal="A", fach="1", platz="2")
+
+        self.assertTrue(first["started"])
+        self.assertFalse(first["merged"])
+        self.assertFalse(second["started"])
+        self.assertTrue(second["merged"])
+        self.assertEqual(len(created_threads), 1)
+        self.assertEqual(created_threads[0].args, ("SKU-1",))
+        self.assertTrue(created_threads[0].daemon)
+        self.assertEqual(
+            self.lager_mc._PENDING_ITEM_WRITES["SKU-1"]["pending"],
+            {"qty": 5, "regal": "A", "fach": "1", "platz": "2"},
+        )
+
+    def test_pending_item_write_exit_dialog_returns_exit_without_open_writes(self):
+        result = self.lager_mc.pending_item_write_exit_dialog(None)
+
+        self.assertEqual(result, "exit")
+
+    def test_pending_item_write_exit_dialog_uses_choice_dialog_when_writes_are_open(self):
+        self.lager_mc._PENDING_ITEM_WRITES["SKU-1"] = {"pending": {"qty": 8}, "running": True}
+
+        with mock.patch.object(self.lager_mc, "choice_dialog", return_value="wait") as choice_mock:
+            result = self.lager_mc.pending_item_write_exit_dialog(object())
+
+        self.assertEqual(result, "wait")
+        choice_mock.assert_called_once()
+        self.assertIn("Offene Schreibaktionen", choice_mock.call_args.args)
+
+    def test_pending_item_write_exit_dialog_translates_labels_for_english(self):
+        self.lager_mc._PENDING_ITEM_WRITES["SKU-1"] = {"pending": {"qty": 8}, "running": True}
+
+        with (
+            mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False),
+            mock.patch.object(self.lager_mc, "choice_dialog", return_value="wait") as choice_mock,
+        ):
+            result = self.lager_mc.pending_item_write_exit_dialog(object())
+
+        self.assertEqual(result, "wait")
+        args = choice_mock.call_args.args
+        self.assertEqual(args[1], "Open write actions")
+        self.assertEqual(args[2][0]["label"], "Wait and exit (1 open)")
+        self.assertEqual(args[2][1]["label"], "Exit now")
+        self.assertEqual(args[2][2]["label"], "Back")
+
+    def test_new_item_write_messages_translate_for_english(self):
+        with mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False):
+            self.assertEqual(self.lager_mc.t("qty_change_footer"), "Enter Save   F9 Cancel")
+            self.assertEqual(
+                self.lager_mc.t("item_write_pending_qty", sku="SKU-1"),
+                "Saving quantity for SKU-1...",
+            )
+            self.assertEqual(
+                self.lager_mc.t("item_write_saved", label="Quantity", sku="SKU-1"),
+                "Quantity for SKU-1 saved.",
+            )
+            self.assertEqual(self.lager_mc.t("db_wait_footer"), "Enter Retry  F2 Settings  F9 Exit")
+            self.assertEqual(
+                self.lager_mc.t("orders_footer"),
+                " Space Mark  A All  F1 Open  F2 Status  F3 Payment  F4 Jump  F5 Shipping Label  Shift+F5 Manual  F6 Partial  F7 Bulk  F8 Shipping History  F9 Back  F10 Picklist  F11 Delivery Note ",
+            )
+
+    def test_shipping_service_summary_translates_for_english(self):
+        with mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False):
+            summary = self.lager_mc._shipping_services_summary(["service_flexdelivery", "service_smsservice"])
+
+        self.assertEqual(
+            summary,
+            "FlexDelivery - delivery options for the recipient, SMS Service - shipping information by SMS",
+        )
+
+    def test_language_package_exposes_country_names_for_all_supported_languages(self):
+        import languages
+
+        self.assertEqual(set(languages.TRANSLATIONS.keys()), languages.SUPPORTED_LANGUAGES)
+        self.assertEqual(
+            [option["value"] for option in self.lager_mc.MANUAL_LABEL_COUNTRY_OPTIONS],
+            languages.COUNTRY_ORDER,
+        )
+        for language in languages.SUPPORTED_LANGUAGES:
+            self.assertEqual(set(languages.COUNTRY_ORDER), set(languages.COUNTRY_NAMES[language].keys()))
+
+    def test_ensure_order_items_loaded_uses_cache_before_db(self):
+        cached = [{"sku": "ABC"}]
+        cache = {"OID-1": cached}
+
+        with mock.patch.object(self.lager_mc, "get_order_items") as get_mock:
+            rows = self.lager_mc.ensure_order_items_loaded("OID-1", cache)
+
+        get_mock.assert_not_called()
+        self.assertIs(rows, cached)
+
+    def test_ensure_order_items_loaded_fetches_and_caches_missing_rows(self):
+        cache = {}
+
+        with mock.patch.object(self.lager_mc, "get_order_items", return_value=[{"sku": "ABC"}]) as get_mock:
+            rows = self.lager_mc.ensure_order_items_loaded("OID-1", cache)
+
+        get_mock.assert_called_once_with("OID-1")
+        self.assertEqual(cache["OID-1"], rows)
+
     def test_list_shipping_labels_queries_shipping_labels_table(self):
         cursor = FakeCursor(fetchall_results=[[{"id": 1}]])
         connection = FakeConnection(cursor)
@@ -1314,7 +1599,7 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(country, "DE")
 
     def test_handle_delivery_note_output_routes_by_mode(self):
-        order = {"order_name": "#1001"}
+        order = {"order_name": "#1001", "order_id": "OID-1"}
         items = [{"sku": "ABC"}]
 
         with mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="print"):
@@ -1334,6 +1619,48 @@ class LagerMcLogicTests(unittest.TestCase):
                         self.lager_mc.handle_delivery_note_output(None, order, items)
         create_mock.assert_called_once_with(order, items)
         print_path_mock.assert_called_once_with(order, "/tmp/note.pdf")
+        message_mock.assert_called_once()
+
+    def test_handle_delivery_note_output_loads_missing_items_from_cache(self):
+        order = {"order_name": "#1001", "order_id": "OID-1"}
+        items = [{"sku": "ABC"}]
+
+        with (
+            mock.patch.object(self.lager_mc, "delivery_note_output_mode_dialog", return_value="print"),
+            mock.patch.object(self.lager_mc, "ensure_order_items_loaded", return_value=items) as ensure_mock,
+            mock.patch.object(self.lager_mc, "print_delivery_note") as print_mock,
+        ):
+            self.lager_mc.handle_delivery_note_output(None, order, order_items=None, order_items_cache={})
+
+        ensure_mock.assert_called_once_with("OID-1", {})
+        print_mock.assert_called_once_with(None, order, items)
+
+    def test_bulk_execution_prints_single_delivery_note_from_temp_path(self):
+        orders = [{"order_id": "OID-1", "order_name": "#1001"}]
+        created = {"label_id": 55, "label_path": "", "shipment_reference": "ADR-1"}
+
+        created_note_paths = []
+
+        def fake_create_note(order, order_items, output_dir=None):
+            path = os.path.join(output_dir or "/tmp", "note.pdf")
+            created_note_paths.append(path)
+            return path, order_items
+
+        with (
+            mock.patch.object(self.lager_mc, "_execution_carrier_dialog", return_value="free"),
+            mock.patch.object(self.lager_mc, "_select_shipping_carrier_options", return_value=[]),
+            mock.patch.object(self.lager_mc, "_bulk_print_mode_dialog", return_value="note"),
+            mock.patch.object(self.lager_mc, "calculate_order_shipping_weight", return_value=(0.5, 500)),
+            mock.patch.object(self.lager_mc, "create_shipping_label", return_value=created),
+            mock.patch.object(self.lager_mc, "create_delivery_note_pdf", side_effect=fake_create_note) as note_mock,
+            mock.patch.object(self.lager_mc, "_print_merged_delivery_note_pdf") as print_note_mock,
+            mock.patch.object(self.lager_mc, "message_box") as message_mock,
+        ):
+            self.lager_mc.run_bulk_execution(None, orders, {"OID-1": [{"sku": "ABC"}]}, {"OID-1"})
+
+        note_mock.assert_called_once()
+        self.assertTrue(created_note_paths[0].endswith("note.pdf"))
+        print_note_mock.assert_called_once_with(created_note_paths[0], title="Lieferschein #1001")
         message_mock.assert_called_once()
 
     def test_create_shipping_label_routes_to_requested_carrier(self):
