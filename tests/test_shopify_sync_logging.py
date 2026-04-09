@@ -319,9 +319,9 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         variables = graphql_mock.call_args.args[1]
         self.assertEqual(variables["input"]["name"], "available")
         self.assertEqual(variables["input"]["quantities"][0]["inventoryItemId"], "gid://shopify/InventoryItem/12345")
-        self.assertEqual(variables["input"]["quantities"][0]["locationId"], self.shopify_sync.SHOPIFY_LOCATION_GID)
+        self.assertEqual(variables["input"]["quantities"][0]["locationId"], self.shopify_sync._location_gid())
         self.assertEqual(variables["input"]["quantities"][0]["quantity"], 7)
-        self.assertTrue(any("UPDATE items SET dirty = FALSE" in query for query, _ in executed))
+        self.assertTrue(any("UPDATE item_location_inventory SET dirty = FALSE" in query for query, _ in executed))
 
     def test_sync_products_writes_graphql_variant_fields(self):
         executed = []
@@ -372,12 +372,13 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertIn("INSERT INTO items(", insert_query)
         self.assertEqual(insert_params[0], "SKU-11")
         self.assertEqual(insert_params[1], "Produkt A")
-        self.assertEqual(insert_params[7], "gid://shopify/Product/9")
-        self.assertEqual(insert_params[8], "gid://shopify/ProductVariant/11")
-        self.assertEqual(insert_params[9], "gid://shopify/InventoryItem/77")
-        self.assertEqual(insert_params[15], "12.50")
-        self.assertEqual(insert_params[16], "EUR")
-        self.assertEqual(insert_params[17], 250)
+        self.assertEqual(insert_params[2], "SKU-11")
+        self.assertEqual(insert_params[8], "gid://shopify/Product/9")
+        self.assertEqual(insert_params[9], "gid://shopify/ProductVariant/11")
+        self.assertEqual(insert_params[10], "gid://shopify/InventoryItem/77")
+        self.assertEqual(insert_params[16], "12.50")
+        self.assertEqual(insert_params[17], "EUR")
+        self.assertEqual(insert_params[18], 250)
 
     def test_upsert_shopify_shipment_writes_shipping_labels_table(self):
         executed = []
@@ -396,6 +397,152 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertIn("INSERT INTO shipping_labels", query)
         self.assertEqual(params[0], "gls")
         self.assertEqual(params[4], "1234567890")
+
+    def test_run_connect_flow_writes_expiring_token_bundle(self):
+        env_path = ROOT / "shopify-sync" / ".env.test-connect"
+        if env_path.exists():
+            env_path.unlink()
+
+        callback_payload = {
+            "shop": "example-shop.myshopify.com",
+            "token": "shpat_access",
+            "refresh_token": "shprt_refresh",
+            "token_expires_at": 1712443600,
+            "refresh_token_expires_at": 1715040000,
+            "scope": "read_products",
+        }
+
+        with mock.patch.object(self.shopify_sync, "_wait_for_local_oauth_callback", return_value=callback_payload):
+            original_write_sync_env_values = self.shopify_sync.write_sync_env_values
+            target_env_path = env_path
+            with mock.patch.object(
+                self.shopify_sync,
+                "write_sync_env_values",
+                side_effect=lambda updates, env_path=None: original_write_sync_env_values(updates, env_path=env_path or target_env_path),
+            ):
+                result = self.shopify_sync.run_connect_flow(
+                    "example-shop.myshopify.com",
+                    relay_base_url="https://relay.example.test",
+                    port=3459,
+                    timeout_seconds=30,
+                    open_browser=False,
+                )
+
+        self.assertEqual(result["token"], "shpat_access")
+        env_text = env_path.read_text(encoding="utf-8")
+        self.assertIn("SHOP=example-shop.myshopify.com", env_text)
+        self.assertIn("TOKEN=shpat_access", env_text)
+        self.assertIn("REFRESH_TOKEN=shprt_refresh", env_text)
+        self.assertIn("TOKEN_EXPIRES_AT=1712443600", env_text)
+        env_path.unlink()
+
+    def test_refresh_access_token_updates_runtime_and_env(self):
+        env_path = ROOT / "shopify-sync" / ".env.test-refresh"
+        if env_path.exists():
+            env_path.unlink()
+
+        class FakeResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "ok": True,
+                    "shop": "example-shop.myshopify.com",
+                    "token": "shpat_new",
+                    "refresh_token": "shprt_new",
+                    "token_expires_at": 1712447200,
+                    "refresh_token_expires_at": 1717640000,
+                    "scope": "read_products",
+                }
+
+        original_write_sync_env_values = self.shopify_sync.write_sync_env_values
+        target_env_path = env_path
+        with mock.patch.object(
+            self.shopify_sync,
+            "write_sync_env_values",
+            side_effect=lambda updates, env_path=None: original_write_sync_env_values(updates, env_path=env_path or target_env_path),
+        ):
+            with mock.patch.object(self.shopify_sync.requests, "post", return_value=FakeResponse()) as post_mock:
+                with mock.patch.object(self.shopify_sync.time, "time", return_value=1712443500):
+                    old_values = (
+                        self.shopify_sync.SHOP,
+                        self.shopify_sync.TOKEN,
+                        self.shopify_sync.REFRESH_TOKEN,
+                        self.shopify_sync.TOKEN_EXPIRES_AT,
+                        self.shopify_sync.REFRESH_TOKEN_EXPIRES_AT,
+                        self.shopify_sync.SHOPIFY_CONNECT_BASE_URL,
+                    )
+                    self.shopify_sync.SHOP = "example-shop.myshopify.com"
+                    self.shopify_sync.TOKEN = "shpat_old"
+                    self.shopify_sync.REFRESH_TOKEN = "shprt_old"
+                    self.shopify_sync.TOKEN_EXPIRES_AT = 1712443600
+                    self.shopify_sync.REFRESH_TOKEN_EXPIRES_AT = 1717640000
+                    self.shopify_sync.SHOPIFY_CONNECT_BASE_URL = "https://relay.example.test"
+                    refreshed = self.shopify_sync._refresh_access_token()
+
+        self.assertTrue(refreshed)
+        post_mock.assert_called_once()
+        self.assertEqual(self.shopify_sync.TOKEN, "shpat_new")
+        self.assertEqual(self.shopify_sync.REFRESH_TOKEN, "shprt_new")
+        env_text = env_path.read_text(encoding="utf-8")
+        self.assertIn("TOKEN=shpat_new", env_text)
+        self.assertIn("REFRESH_TOKEN=shprt_new", env_text)
+        env_path.unlink()
+        (
+            self.shopify_sync.SHOP,
+            self.shopify_sync.TOKEN,
+            self.shopify_sync.REFRESH_TOKEN,
+            self.shopify_sync.TOKEN_EXPIRES_AT,
+            self.shopify_sync.REFRESH_TOKEN_EXPIRES_AT,
+            self.shopify_sync.SHOPIFY_CONNECT_BASE_URL,
+        ) = old_values
+
+    def test_post_refresh_request_follows_redirect_with_post(self):
+        class FakeResponse:
+            def __init__(self, status_code, location=None, url="https://relay.example.test/shopify/refresh", text=""):
+                self.status_code = status_code
+                self.url = url
+                self.text = text
+                self.headers = {}
+                if location:
+                    self.headers["Location"] = location
+
+        calls = []
+
+        def fake_post(url, json=None, timeout=None, allow_redirects=None):
+            calls.append((url, json, timeout, allow_redirects))
+            if len(calls) == 1:
+                return FakeResponse(301, location="/shopify/refresh/", url=url)
+            return FakeResponse(200, url=url)
+
+        with mock.patch.object(self.shopify_sync.requests, "post", side_effect=fake_post):
+            response = self.shopify_sync._post_refresh_request(
+                "https://relay.example.test",
+                {"shop": "example-shop.myshopify.com", "refresh_token": "shprt_old"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], "https://relay.example.test/shopify/refresh")
+        self.assertEqual(calls[1][0], "https://relay.example.test/shopify/refresh/")
+        self.assertFalse(calls[0][3])
+        self.assertFalse(calls[1][3])
+
+    def test_get_location_inventory_levels_raises_clear_error_for_missing_location(self):
+        old_location_id = self.shopify_sync.SHOPIFY_LOCATION_ID
+        self.shopify_sync.SHOPIFY_LOCATION_ID = "67402989753"
+        try:
+            with mock.patch.object(self.shopify_sync, "graphql_request", return_value={"location": None}):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.shopify_sync.get_location_inventory_levels()
+        finally:
+            self.shopify_sync.SHOPIFY_LOCATION_ID = old_location_id
+
+        self.assertIn("Shopify-Location nicht gefunden oder nicht lesbar", str(raised.exception))
+        self.assertIn("SHOPIFY_LOCATION_ID", str(raised.exception))
 
 
 if __name__ == "__main__":

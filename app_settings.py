@@ -8,6 +8,7 @@ LOCAL_SETTINGS_PATH = Path(__file__).resolve().parent / "settings.local.json"
 
 DEFAULT_SETTINGS = {
     "db_host": "localhost",
+    "db_port": 5432,
     "db_name": "lagerdb",
     "db_user": "lager",
     "db_pass": "",
@@ -48,6 +49,7 @@ DEFAULT_SETTINGS = {
     "shopify_tracking_mode_post": "company_and_url",
     "shopify_tracking_url_gls": "",
     "shopify_tracking_url_post": "https://www.deutschepost.de/sendung/simpleQuery.html?form.sendungsnummer={tracking_number}",
+    "shopify_active_location_id": "",
     "gls_api_url": "",
     "gls_user": "",
     "gls_password": "",
