@@ -108,7 +108,7 @@ def create_bundle(root_dir):
     (stage_dir / "README.txt").write_text(
         "\n".join(
             [
-                "Dieses Archiv enthaelt lokale/private Lagerverwaltungs-Dateien fuer einen neuen Arbeitsplatz.",
+                "Dieses Archiv enthaelt lokale/private Lager-MC-Dateien fuer einen neuen Arbeitsplatz.",
                 "",
                 "Installationsablauf:",
                 "1. Git-Repo normal klonen.",

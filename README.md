@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="assets/lager-mc.svg" alt="Lager MC" width="160">
+  <img src="assets/lager-mc.svg" alt="Lager-MC" width="160">
 </p>
 
-# Lagerverwaltung
+# Lager-MC
 
-Terminalbasierte Lagerverwaltung mit Lagerplatzpflege, Bestellansicht, Inventur, Shopify-Anbindung und Versandabwicklung.
+Terminalbasierte Lager- und Versandsoftware mit Lagerplatzpflege, Bestellansicht, Inventur, Shopify-Anbindung und Versandabwicklung.
 
 Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 
@@ -43,4 +43,4 @@ Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Ver
 
 ## Varianten
 
-- Fork mit den Kernfunktionen fuer Lagerverwaltung ohne Shopify-Integration und Versand: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)
+- Fork mit den Kernfunktionen von Lager-MC ohne Shopify-Integration und Versand: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)

@@ -537,7 +537,7 @@ def _load_logo_image_for_pdf(source):
 def _load_binary_source(source):
     source_text = str(source).strip()
     if source_text.startswith(("http://", "https://")):
-        request = urllib.request.Request(source_text, headers={"User-Agent": "Lagerverwaltung/1.0"})
+        request = urllib.request.Request(source_text, headers={"User-Agent": "Lager-MC/1.0"})
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.read()
     return Path(source_text).read_bytes()
@@ -718,7 +718,7 @@ def _build_info_object():
     timestamp = datetime.datetime.now().strftime("D:%Y%m%d%H%M%S+01'00'")
     return (
         b"<<\n"
-        b"/Producer (Lagerverwaltung)\n"
+        b"/Producer (Lager-MC)\n"
         + f"/CreationDate ({timestamp})\n".encode("ascii")
         + f"/ModDate ({timestamp})\n".encode("ascii")
         + b"/Title (\xfe\xff\x00L\x00i\x00e\x00f\x00e\x00r\x00s\x00c\x00h\x00e\x00i\x00n)\n"

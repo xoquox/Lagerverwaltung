@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lagerverwaltung is a terminal-based application for inventory, orders, stocktaking and shipping.
+Lager-MC is a terminal-based application for inventory, orders, stocktaking and shipping.
 
 This manual covers:
 

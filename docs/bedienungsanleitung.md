@@ -2,7 +2,7 @@
 
 ## Zweck
 
-Lagerverwaltung ist eine terminalbasierte Anwendung fuer Lagerbestand, Bestellungen, Inventur und Versand.
+Lager-MC ist eine terminalbasierte Anwendung fuer Lagerbestand, Bestellungen, Inventur und Versand.
 
 Das Handbuch beschreibt diese Bereiche:
 
