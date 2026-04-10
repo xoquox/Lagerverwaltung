@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import os
+import queue
 import shutil
 import sys
 import tempfile
@@ -602,12 +603,29 @@ class LagerMcLogicTests(unittest.TestCase):
     def setUpClass(cls):
         cls.lager_mc = load_lager_mc()
 
+    def setUp(self):
+        self.lager_mc._PENDING_ITEM_WRITES.clear()
+        while True:
+            try:
+                self.lager_mc._BACKGROUND_UI_EVENTS.get_nowait()
+            except queue.Empty:
+                break
+
     def test_normalize_regal_accepts_single_letter_only(self):
         self.assertEqual(self.lager_mc.normalize_regal("A"), "A")
         self.assertIsNone(self.lager_mc.normalize_regal(" a "))
         self.assertEqual(self.lager_mc.normalize_regal(""), "")
         self.assertIsNone(self.lager_mc.normalize_regal("AA"))
         self.assertIsNone(self.lager_mc.normalize_regal("1"))
+
+    def test_translation_keys_match_across_languages(self):
+        translations = self.lager_mc.TRANSLATIONS
+        base_keys = set(translations["de"].keys())
+        for language, values in translations.items():
+            self.assertEqual(set(values.keys()), base_keys, msg=f"ungueltige Schluessel fuer {language}")
+
+    def test_supported_languages_follow_translation_tables(self):
+        self.assertEqual(self.lager_mc.SUPPORTED_LANGUAGES, set(self.lager_mc.TRANSLATIONS.keys()))
 
     def test_resolve_post_product_selection_uses_base_and_options(self):
         product = self.lager_mc._resolve_post_product_selection(
@@ -1192,7 +1210,7 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(app_logging.PRINT_LOG_PATH.name, "print.log")
 
     def test_enqueue_shopify_fulfillment_job_blocks_test_and_free_carriers(self):
-        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify uebertragen werden"):
+        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify gesendet werden"):
             self.lager_mc.enqueue_shopify_fulfillment_job(
                 {
                     "id": 7,
@@ -1201,7 +1219,7 @@ class LagerMcLogicTests(unittest.TestCase):
                     "carrier": "test",
                 }
             )
-        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify uebertragen werden"):
+        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify gesendet werden"):
             self.lager_mc.enqueue_shopify_fulfillment_job(
                 {
                     "id": 8,
@@ -1337,6 +1355,181 @@ class LagerMcLogicTests(unittest.TestCase):
         load_mock.assert_not_called()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["display_name"], "Erika Musterfrau")
+
+    def test_update_item_snapshot_quantity_updates_qty_and_available(self):
+        rows = [
+            {"sku": "SKU-1", "menge": 5, "unavailable": 1, "committed": 2, "available": 2, "dirty": False},
+        ]
+
+        changed = self.lager_mc._update_item_snapshot_quantity(rows, "SKU-1", 9)
+
+        self.assertTrue(changed)
+        self.assertEqual(rows[0]["menge"], 9)
+        self.assertEqual(rows[0]["available"], 6)
+        self.assertTrue(rows[0]["dirty"])
+
+    def test_update_item_snapshot_quantity_returns_false_for_unknown_sku(self):
+        rows = [{"sku": "SKU-1", "menge": 5, "unavailable": 0, "committed": 0, "available": 5, "dirty": False}]
+
+        changed = self.lager_mc._update_item_snapshot_quantity(rows, "SKU-2", 9)
+
+        self.assertFalse(changed)
+
+    def test_update_item_snapshot_location_updates_row(self):
+        rows = [
+            {"sku": "SKU-1", "regal": "A", "fach": "1", "platz": "1", "dirty": False},
+        ]
+
+        changed = self.lager_mc._update_item_snapshot_location(rows, "SKU-1", "B", "2", "3")
+
+        self.assertTrue(changed)
+        self.assertEqual(rows[0]["regal"], "B")
+        self.assertEqual(rows[0]["fach"], "2")
+        self.assertEqual(rows[0]["platz"], "3")
+        self.assertTrue(rows[0]["dirty"])
+
+    def test_update_item_snapshot_location_returns_false_for_unknown_sku(self):
+        rows = [{"sku": "SKU-1", "regal": "A", "fach": "1", "platz": "1", "dirty": False}]
+
+        changed = self.lager_mc._update_item_snapshot_location(rows, "SKU-2", "B", "2", "3")
+
+        self.assertFalse(changed)
+
+    def test_enqueue_item_write_state_merges_updates_for_same_sku(self):
+        state_map = {}
+
+        first = self.lager_mc._enqueue_item_write_state(state_map, "SKU-1", {"qty": 8})
+        second = self.lager_mc._enqueue_item_write_state(
+            state_map,
+            "SKU-1",
+            {"regal": "A", "fach": "2", "platz": "3"},
+        )
+
+        self.assertFalse(first["merged"])
+        self.assertTrue(first["start_worker"])
+        self.assertTrue(second["merged"])
+        self.assertFalse(second["start_worker"])
+        self.assertEqual(
+            state_map["SKU-1"]["pending"],
+            {"qty": 8, "regal": "A", "fach": "2", "platz": "3"},
+        )
+
+    def test_apply_item_write_db_updates_qty_and_location_in_one_statement(self):
+        cursor = FakeCursor()
+        connection = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=connection):
+            self.lager_mc._apply_item_write_db(
+                "SKU-1",
+                {"qty": 9, "regal": "B", "fach": "4", "platz": "2"},
+            )
+
+        self.assertTrue(connection.committed)
+        query, params = cursor.executed[0]
+        self.assertIn("UPDATE items SET", query)
+        self.assertIn("menge=%s", query)
+        self.assertIn("available=GREATEST", query)
+        self.assertIn("regal=%s", query)
+        self.assertIn("fach=%s", query)
+        self.assertIn("platz=%s", query)
+        self.assertEqual(params, (9, 9, "B", "4", "2", "SKU-1"))
+
+    def test_queue_item_write_starts_worker_once_and_merges_followup_for_same_sku(self):
+        created_threads = []
+
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+                created_threads.append(self)
+
+            def start(self):
+                return None
+
+        with mock.patch.object(self.lager_mc.threading, "Thread", FakeThread):
+            first = self.lager_mc.queue_item_write("SKU-1", qty=5)
+            second = self.lager_mc.queue_item_write("SKU-1", regal="A", fach="1", platz="2")
+
+        self.assertTrue(first["started"])
+        self.assertFalse(first["merged"])
+        self.assertFalse(second["started"])
+        self.assertTrue(second["merged"])
+        self.assertEqual(len(created_threads), 1)
+        self.assertEqual(created_threads[0].args, ("SKU-1",))
+        self.assertTrue(created_threads[0].daemon)
+        self.assertEqual(
+            self.lager_mc._PENDING_ITEM_WRITES["SKU-1"]["pending"],
+            {"qty": 5, "regal": "A", "fach": "1", "platz": "2"},
+        )
+
+    def test_pending_item_write_exit_dialog_returns_exit_without_open_writes(self):
+        result = self.lager_mc.pending_item_write_exit_dialog(None)
+
+        self.assertEqual(result, "exit")
+
+    def test_pending_item_write_exit_dialog_uses_choice_dialog_when_writes_are_open(self):
+        self.lager_mc._PENDING_ITEM_WRITES["SKU-1"] = {"pending": {"qty": 8}, "running": True}
+
+        with mock.patch.object(self.lager_mc, "choice_dialog", return_value="wait") as choice_mock:
+            result = self.lager_mc.pending_item_write_exit_dialog(object())
+
+        self.assertEqual(result, "wait")
+        choice_mock.assert_called_once()
+        self.assertIn("Offene Schreibaktionen", choice_mock.call_args.args)
+
+    def test_pending_item_write_exit_dialog_translates_labels_for_english(self):
+        self.lager_mc._PENDING_ITEM_WRITES["SKU-1"] = {"pending": {"qty": 8}, "running": True}
+
+        with (
+            mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False),
+            mock.patch.object(self.lager_mc, "choice_dialog", return_value="wait") as choice_mock,
+        ):
+            result = self.lager_mc.pending_item_write_exit_dialog(object())
+
+        self.assertEqual(result, "wait")
+        args = choice_mock.call_args.args
+        self.assertEqual(args[1], "Open write actions")
+        self.assertEqual(args[2][0]["label"], "Wait and exit (1 open)")
+        self.assertEqual(args[2][1]["label"], "Exit now")
+        self.assertEqual(args[2][2]["label"], "Back")
+
+    def test_new_item_write_messages_translate_for_english(self):
+        with mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False):
+            self.assertEqual(self.lager_mc.t("qty_change_footer"), "Enter Save   F9 Cancel")
+            self.assertEqual(
+                self.lager_mc.t("item_write_pending_qty", sku="SKU-1"),
+                "Saving quantity for SKU-1...",
+            )
+            self.assertEqual(
+                self.lager_mc.t("item_write_saved", label="Quantity", sku="SKU-1"),
+                "Quantity for SKU-1 saved.",
+            )
+            self.assertEqual(self.lager_mc.t("db_wait_footer"), "Enter Retry  F2 Settings  F9 Exit")
+            self.assertEqual(
+                self.lager_mc.t("orders_footer"),
+                " Space Mark  A All  F1 Open  F2 Status  F3 Payment  F4 Jump  F5 Shipping Label  Shift+F5 Manual  F6 Partial  F7 Bulk  F8 Shipping History  F9 Back  F10 Picklist  F11 Delivery Note ",
+            )
+
+    def test_shipping_service_summary_translates_for_english(self):
+        with mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False):
+            summary = self.lager_mc._shipping_services_summary(["service_flexdelivery", "service_smsservice"])
+
+        self.assertEqual(
+            summary,
+            "FlexDelivery - delivery options for the recipient, SMS Service - shipping information by SMS",
+        )
+
+    def test_language_package_exposes_country_names_for_all_supported_languages(self):
+        import languages
+
+        self.assertEqual(set(languages.TRANSLATIONS.keys()), languages.SUPPORTED_LANGUAGES)
+        self.assertEqual(
+            [option["value"] for option in self.lager_mc.MANUAL_LABEL_COUNTRY_OPTIONS],
+            languages.COUNTRY_ORDER,
+        )
+        for language in languages.SUPPORTED_LANGUAGES:
+            self.assertEqual(set(languages.COUNTRY_ORDER), set(languages.COUNTRY_NAMES[language].keys()))
 
     def test_ensure_order_items_loaded_uses_cache_before_db(self):
         cached = [{"sku": "ABC"}]

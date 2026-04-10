@@ -665,6 +665,7 @@ choose_target_dir() {
 
 download_release() {
   local archive_path
+  local python_script
   archive_path="$(mktemp "${TMPDIR:-/tmp}/lager-mc-release-XXXXXX.tar.gz")"
   fetch_url "${ARCHIVE_URL}" "${archive_path}"
 
@@ -676,7 +677,41 @@ download_release() {
     mkdir -p "${INSTALL_ROOT}"
   fi
 
-  run_logged tar -xzf "${archive_path}" --strip-components=1 -C "${INSTALL_ROOT}"
+  python_script="$(mktemp "${TMPDIR:-/tmp}/lager-mc-archive-layout-XXXXXX.py")"
+  cat > "${python_script}" <<'PY'
+import sys
+import tarfile
+
+archive_path = sys.argv[1]
+
+with tarfile.open(archive_path, "r:*") as tar:
+    names = [member.name for member in tar.getmembers() if member.name and member.name not in (".", "./")]
+
+top_levels = set()
+has_root_file = False
+for name in names:
+    normalized = name.lstrip("./")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        continue
+    top_levels.add(parts[0])
+    if len(parts) == 1:
+        has_root_file = True
+
+if len(top_levels) == 1 and not has_root_file:
+    print("1")
+else:
+    print("0")
+PY
+  local strip_components
+  strip_components="$(python3 "${python_script}" "${archive_path}")"
+  rm -f "${python_script}"
+
+  if [[ "${strip_components}" == "1" ]]; then
+    run_logged tar -xzf "${archive_path}" --strip-components=1 -C "${INSTALL_ROOT}"
+  else
+    run_logged tar -xzf "${archive_path}" -C "${INSTALL_ROOT}"
+  fi
   rm -f "${archive_path}"
 }
 
