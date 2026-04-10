@@ -6,6 +6,7 @@ from shipping.history import ensure_shipping_history_schema
 REQUIRED_TABLE_COLUMNS = {
     "items": {
         "sku",
+        "display_sku",
         "name",
         "regal",
         "fach",
@@ -100,6 +101,27 @@ REQUIRED_TABLE_COLUMNS = {
         "soll_menge",
         "ist_menge",
     },
+    "shopify_locations": {
+        "location_id",
+        "name",
+        "fulfills_online_orders",
+        "is_active",
+        "updated_at",
+    },
+    "item_location_inventory": {
+        "sku",
+        "location_id",
+        "regal",
+        "fach",
+        "platz",
+        "menge",
+        "available",
+        "reserved",
+        "committed",
+        "unavailable",
+        "dirty",
+        "updated_at",
+    },
 }
 
 
@@ -108,6 +130,7 @@ def apply_app_schema(cur):
         """
         CREATE TABLE IF NOT EXISTS items (
             sku text PRIMARY KEY,
+            display_sku text,
             name text NOT NULL,
             regal text,
             fach text,
@@ -136,6 +159,7 @@ def apply_app_schema(cur):
         )
         """
     )
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS display_sku text")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS available integer")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS reserved integer DEFAULT 0")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS committed integer DEFAULT 0")
@@ -158,6 +182,7 @@ def apply_app_schema(cur):
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
     cur.execute("UPDATE items SET reserved = COALESCE(reserved, 0)")
     cur.execute("UPDATE items SET committed = COALESCE(committed, 0)")
+    cur.execute("UPDATE items SET display_sku = sku WHERE display_sku IS NULL")
     cur.execute(
         """
         UPDATE items
@@ -302,6 +327,56 @@ def apply_app_schema(cur):
             ist_menge integer,
             PRIMARY KEY (session_id, line_no)
         )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_locations (
+            location_id text PRIMARY KEY,
+            name text,
+            fulfills_online_orders boolean NOT NULL DEFAULT FALSE,
+            is_active boolean NOT NULL DEFAULT TRUE,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS name text")
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS fulfills_online_orders boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT TRUE")
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS item_location_inventory (
+            sku text NOT NULL REFERENCES items(sku) ON DELETE CASCADE,
+            location_id text NOT NULL REFERENCES shopify_locations(location_id) ON DELETE CASCADE,
+            regal text,
+            fach text,
+            platz text,
+            menge integer NOT NULL DEFAULT 0,
+            available integer,
+            reserved integer NOT NULL DEFAULT 0,
+            committed integer NOT NULL DEFAULT 0,
+            unavailable integer NOT NULL DEFAULT 0,
+            dirty boolean NOT NULL DEFAULT FALSE,
+            updated_at timestamptz NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (sku, location_id)
+        )
+        """
+    )
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS regal text")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS fach text")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS platz text")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS menge integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS available integer")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS reserved integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS committed integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS unavailable integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_item_location_inventory_location
+        ON item_location_inventory(location_id)
         """
     )
 

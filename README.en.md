@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="assets/lager-mc.svg" alt="Lager MC" width="160">
+  <img src="assets/lager-mc.svg" alt="Lager-MC" width="160">
 </p>
 
-# Lagerverwaltung
+# Lager-MC
 
-Terminal-based inventory management with storage locations, order handling, stocktaking, Shopify integration and shipping workflows.
+Terminal-based warehouse and shipping software with storage locations, order handling, stocktaking, Shopify integration and shipping workflows.
 
 License: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 
@@ -40,4 +40,4 @@ The carrier structure uses central carrier definitions with shared shipping hist
 
 ## Repository variants
 
-- Fork with the core inventory features without Shopify integration and shipping: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)
+- Fork with the core Lager-MC features without Shopify integration and shipping: [simple-storage-core](https://github.com/b4ckspace/simple-storage-core)

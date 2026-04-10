@@ -221,7 +221,7 @@ cat > "${DESKTOP_FILE}" <<EOF
 Version=1.0
 Type=Application
 Name=Lager MC
-Comment=Terminaloberflaeche fuer Lagerverwaltung
+Comment=Terminaloberflaeche fuer Lager-MC
 Exec=${LAUNCHER}
 Icon=${ICON_TARGET}
 Terminal=true

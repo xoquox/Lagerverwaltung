@@ -86,6 +86,8 @@ _BACKGROUND_UI_EVENTS = queue.Queue()
 _PENDING_ITEM_WRITES = {}
 _PENDING_ITEM_WRITES_LOCK = threading.Lock()
 _UNSET = object()
+_ACTIVE_SHOPIFY_LOCATION_ID = (SETTINGS.get("shopify_active_location_id") or "").strip() or None
+_ACTIVE_SHOPIFY_LOCATION_NAME = ""
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label_key": "shipping_service_flexdelivery", "locked": False},
@@ -152,10 +154,11 @@ SHOPIFY_CUSTOMER_CACHE_SECONDS = 120.0
 
 COLS = [
     ("SKU", 18),
-    ("Name", 60),
+    ("Name", 52),
     ("Regal", 7),
     ("Fach", 6),
     ("Platz", 7),
+    ("Lokal", 7),
     ("Gesamt", 7),
     ("N. verf.", 8),
     ("Best.", 7),
@@ -740,6 +743,7 @@ def db():
     try:
         return psycopg2.connect(
             host=SETTINGS["db_host"],
+            port=int(SETTINGS.get("db_port", 5432)),
             dbname=SETTINGS["db_name"],
             user=SETTINGS["db_user"],
             password=SETTINGS["db_pass"],
@@ -747,6 +751,74 @@ def db():
         )
     except psycopg2.OperationalError as exc:
         raise DatabaseUnavailableError(_summarize_db_error(exc)) from exc
+
+
+def _display_sku_value(row):
+    value = (row.get("display_sku") or "").strip()
+    return value or "-/-"
+
+
+def _active_shopify_location_id():
+    return _ACTIVE_SHOPIFY_LOCATION_ID
+
+
+def _set_active_shopify_location(location_id=None, location_name=""):
+    global _ACTIVE_SHOPIFY_LOCATION_ID, _ACTIVE_SHOPIFY_LOCATION_NAME
+    _ACTIVE_SHOPIFY_LOCATION_ID = (location_id or "").strip() or None
+    _ACTIVE_SHOPIFY_LOCATION_NAME = (location_name or "").strip()
+
+
+def get_shopify_locations_snapshot():
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT
+            location_id,
+            COALESCE(NULLIF(name, ''), location_id) AS name,
+            COALESCE(fulfills_online_orders, FALSE) AS fulfills_online_orders,
+            COALESCE(is_active, TRUE) AS is_active
+        FROM shopify_locations
+        ORDER BY LOWER(COALESCE(NULLIF(name, ''), location_id)), location_id
+        """
+    )
+    rows = cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+
+def _resolve_active_shopify_location(locations, current_location_id=None):
+    available = [row for row in (locations or []) if row.get("location_id")]
+    if not available:
+        _set_active_shopify_location(None, "")
+        return None
+    wanted = (current_location_id or _active_shopify_location_id() or "").strip()
+    for row in available:
+        if row["location_id"] == wanted:
+            _set_active_shopify_location(row["location_id"], row.get("name") or "")
+            return row
+    fallback = available[0]
+    _set_active_shopify_location(fallback["location_id"], fallback.get("name") or "")
+    return fallback
+
+
+def _cycle_shopify_location(locations, current_location_id, step):
+    available = [row for row in (locations or []) if row.get("location_id")]
+    if not available:
+        return None
+    if not current_location_id:
+        target = available[0]
+        _set_active_shopify_location(target["location_id"], target.get("name") or "")
+        return target
+    for index, row in enumerate(available):
+        if row["location_id"] == current_location_id:
+            target = available[(index + step) % len(available)]
+            _set_active_shopify_location(target["location_id"], target.get("name") or "")
+            return target
+    target = available[0]
+    _set_active_shopify_location(target["location_id"], target.get("name") or "")
+    return target
 
 
 def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=SERVICE_RUNTIME_CACHE_SECONDS, force=False):
@@ -871,6 +943,7 @@ def format_shopify_sync_status_label(row=None, now=None):
 def test_db_connection(settings):
     con = psycopg2.connect(
         host=settings["db_host"],
+        port=int(settings.get("db_port", 5432)),
         dbname=settings["db_name"],
         user=settings["db_user"],
         password=settings["db_pass"],
@@ -879,7 +952,7 @@ def test_db_connection(settings):
 
 
 def _is_default_db_settings(settings):
-    for key in ("db_host", "db_name", "db_user", "db_pass"):
+    for key in ("db_host", "db_port", "db_name", "db_user", "db_pass"):
         if settings.get(key) != DEFAULT_SETTINGS.get(key):
             return False
     return True
@@ -891,7 +964,7 @@ def ensure_database_ready(stdscr):
     return database_connection_dialog(stdscr, "Verbindung wird aufgebaut.")
 
 
-def get_items(filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide"):
+def get_items(filter_text=None, filter_no_location=False, filter_local=False, sort_mode="location", external_mode="hide", active_location_id=None):
     con = db()
     cur = con.cursor()
 
@@ -899,8 +972,10 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
     params = []
 
     if filter_text:
-        conditions.append("(name ILIKE %s OR sku ILIKE %s OR COALESCE(barcode, '') ILIKE %s)")
-        params.extend([f"%{filter_text}%", f"%{filter_text}%", f"%{filter_text}%"])
+        conditions.append(
+            "(name ILIKE %s OR COALESCE(display_sku, sku) ILIKE %s OR sku ILIKE %s OR COALESCE(barcode, '') ILIKE %s)"
+        )
+        params.extend([f"%{filter_text}%", f"%{filter_text}%", f"%{filter_text}%", f"%{filter_text}%"])
 
     if filter_no_location:
         conditions.append("(regal IS NULL OR regal='' OR fach IS NULL OR platz IS NULL)")
@@ -927,87 +1002,118 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
         order = "ORDER BY regal NULLS LAST, fach NULLS LAST, platz NULLS LAST"
 
     query = f"""
+    WITH location_totals AS (
+        SELECT
+            sku,
+            COALESCE(SUM(menge), 0) AS total_menge
+        FROM item_location_inventory
+        GROUP BY sku
+    )
     SELECT
-        sku,
-        name,
-        regal,
-        fach,
-        platz,
-        menge,
-        COALESCE(reserved, 0) AS reserved,
-        COALESCE(committed, 0) AS committed,
-        COALESCE(unavailable, COALESCE(reserved, 0)) AS unavailable,
+        items.sku,
+        items.display_sku,
+        items.name,
+        COALESCE(ili.regal, items.regal) AS regal,
+        COALESCE(ili.fach, items.fach) AS fach,
+        COALESCE(ili.platz, items.platz) AS platz,
+        COALESCE(ili.menge, items.menge, 0) AS menge,
+        COALESCE(location_totals.total_menge, items.menge, 0) AS gesamt_menge,
+        COALESCE(ili.reserved, items.reserved, 0) AS reserved,
+        COALESCE(ili.committed, items.committed, 0) AS committed,
+        COALESCE(ili.unavailable, items.unavailable, COALESCE(ili.reserved, items.reserved, 0)) AS unavailable,
         COALESCE(
-            available,
+            ili.available,
+            items.available,
             GREATEST(
-                menge
-                - COALESCE(unavailable, COALESCE(reserved, 0))
-                - COALESCE(committed, 0),
+                COALESCE(ili.menge, items.menge, 0)
+                - COALESCE(ili.unavailable, items.unavailable, COALESCE(ili.reserved, items.reserved, 0))
+                - COALESCE(ili.committed, items.committed, 0),
                 0
             )
         ) AS available,
-        dirty,
-        shopify_variant_id,
-        barcode,
-        shopify_product_status,
-        shopify_description,
-        shopify_price,
-        shopify_compare_at_price,
-        shopify_unit_cost,
-        shopify_unit_cost_currency,
-        shopify_weight_grams,
-        sync_status,
-        COALESCE(external_fulfillment, FALSE) AS external_fulfillment
+        COALESCE(ili.dirty, items.dirty, FALSE) AS dirty,
+        items.shopify_variant_id,
+        items.barcode,
+        items.shopify_product_status,
+        items.shopify_description,
+        items.shopify_price,
+        items.shopify_compare_at_price,
+        items.shopify_unit_cost,
+        items.shopify_unit_cost_currency,
+        items.shopify_weight_grams,
+        items.sync_status,
+        COALESCE(items.external_fulfillment, FALSE) AS external_fulfillment,
+        ili.location_id AS shopify_location_id
     FROM items
+    LEFT JOIN item_location_inventory ili
+        ON ili.sku = items.sku AND ili.location_id = %s
+    LEFT JOIN location_totals
+        ON location_totals.sku = items.sku
     {where}
     {order}
     """
 
-    cur.execute(query, params)
+    cur.execute(query, [active_location_id] + params)
     rows = cur.fetchall()
     cur.close()
     con.close()
     return rows
 
 
-def _load_items_snapshot():
+def _load_items_snapshot(active_location_id=None):
     con = db()
     cur = con.cursor()
     cur.execute(
         """
+        WITH location_totals AS (
+            SELECT
+                sku,
+                COALESCE(SUM(menge), 0) AS total_menge
+            FROM item_location_inventory
+            GROUP BY sku
+        )
         SELECT
-            sku,
-            name,
-            regal,
-            fach,
-            platz,
-            menge,
-            COALESCE(reserved, 0) AS reserved,
-            COALESCE(committed, 0) AS committed,
-            COALESCE(unavailable, COALESCE(reserved, 0)) AS unavailable,
+            items.sku,
+            items.display_sku,
+            items.name,
+            COALESCE(ili.regal, items.regal) AS regal,
+            COALESCE(ili.fach, items.fach) AS fach,
+            COALESCE(ili.platz, items.platz) AS platz,
+            COALESCE(ili.menge, items.menge, 0) AS menge,
+            COALESCE(location_totals.total_menge, items.menge, 0) AS gesamt_menge,
+            COALESCE(ili.reserved, items.reserved, 0) AS reserved,
+            COALESCE(ili.committed, items.committed, 0) AS committed,
+            COALESCE(ili.unavailable, items.unavailable, COALESCE(ili.reserved, items.reserved, 0)) AS unavailable,
             COALESCE(
-                available,
+                ili.available,
+                items.available,
                 GREATEST(
-                    menge
-                    - COALESCE(unavailable, COALESCE(reserved, 0))
-                    - COALESCE(committed, 0),
+                    COALESCE(ili.menge, items.menge, 0)
+                    - COALESCE(ili.unavailable, items.unavailable, COALESCE(ili.reserved, items.reserved, 0))
+                    - COALESCE(ili.committed, items.committed, 0),
                     0
                 )
             ) AS available,
-            dirty,
-            shopify_variant_id,
-            barcode,
-            shopify_product_status,
-            shopify_description,
-            shopify_price,
-            shopify_compare_at_price,
-            shopify_unit_cost,
-            shopify_unit_cost_currency,
-            shopify_weight_grams,
-            sync_status,
-            COALESCE(external_fulfillment, FALSE) AS external_fulfillment
+            COALESCE(ili.dirty, items.dirty, FALSE) AS dirty,
+            items.shopify_variant_id,
+            items.barcode,
+            items.shopify_product_status,
+            items.shopify_description,
+            items.shopify_price,
+            items.shopify_compare_at_price,
+            items.shopify_unit_cost,
+            items.shopify_unit_cost_currency,
+            items.shopify_weight_grams,
+            items.sync_status,
+            COALESCE(items.external_fulfillment, FALSE) AS external_fulfillment,
+            ili.location_id AS shopify_location_id
         FROM items
-        """
+        LEFT JOIN item_location_inventory ili
+            ON ili.sku = items.sku AND ili.location_id = %s
+        LEFT JOIN location_totals
+            ON location_totals.sku = items.sku
+        """,
+        (active_location_id,),
     )
     rows = cur.fetchall()
     cur.close()
@@ -1021,6 +1127,7 @@ def _match_item_filter(row, filter_text):
         return True
     fields = (
         row.get("name") or "",
+        row.get("display_sku") or "",
         row.get("sku") or "",
         row.get("barcode") or "",
     )
@@ -1030,17 +1137,17 @@ def _match_item_filter(row, filter_text):
 def _sort_items_snapshot(rows, sort_mode):
     data = list(rows or [])
     if sort_mode == "name":
-        data.sort(key=lambda row: (str(row.get("name") or "").casefold(), str(row.get("sku") or "").casefold()))
+        data.sort(key=lambda row: (str(row.get("name") or "").casefold(), str(_display_sku_value(row)).casefold()))
         return data
     if sort_mode == "sku":
-        data.sort(key=lambda row: str(row.get("sku") or "").casefold())
+        data.sort(key=lambda row: str(_display_sku_value(row)).casefold())
         return data
     data.sort(
         key=lambda row: (
             _sort_location_value(row.get("regal")),
             _sort_location_value(row.get("fach")),
             _sort_location_value(row.get("platz")),
-            str(row.get("sku") or "").casefold(),
+            str(_display_sku_value(row)).casefold(),
         )
     )
     return data
@@ -1255,6 +1362,7 @@ def should_refresh_orders(last_refresh_at, now=None, interval_seconds=ORDERS_AUT
 def get_order_items(order_id):
     con = db()
     cur = con.cursor()
+    active_location_id = _active_shopify_location_id()
     cur.execute(
         """
         SELECT
@@ -1264,17 +1372,19 @@ def get_order_items(order_id):
             oi.title,
             oi.quantity,
             COALESCE(oi.fulfilled_quantity, 0) AS fulfilled_quantity,
-            i.regal,
-            i.fach,
-            i.platz,
+            COALESCE(ili.regal, i.regal) AS regal,
+            COALESCE(ili.fach, i.fach) AS fach,
+            COALESCE(ili.platz, i.platz) AS platz,
             i.shopify_weight_grams,
             COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment
         FROM shopify_order_items oi
         LEFT JOIN items i ON i.sku = oi.sku
+        LEFT JOIN item_location_inventory ili
+            ON ili.sku = i.sku AND ili.location_id = %s
         WHERE oi.order_id = %s
         ORDER BY oi.line_index
         """,
-        (order_id,),
+        (active_location_id, order_id),
     )
     rows = cur.fetchall()
     cur.close()
@@ -3652,12 +3762,13 @@ def format_row(row):
 
 
     vals = [
-        row["sku"],
+        _display_sku_value(row),
         row["name"],
         row["regal"],
         row["fach"],
         row["platz"],
         str(row["menge"]),
+        str(row.get("gesamt_menge", row["menge"])),
         str(row["unavailable"]),
         str(row["committed"]),
         str(row["available"]),
@@ -3670,10 +3781,11 @@ def format_row(row):
 def format_header():
     header_cols = [
         ("SKU", 18),
-        ("Name", 60),
+        ("Name", 52),
         (t("col_shelf"), 7),
         (t("col_bin"), 6),
         (t("col_slot"), 7),
+        (t("col_local"), 7),
         (t("col_total"), 7),
         (t("col_unavailable"), 8),
         (t("col_committed"), 7),
@@ -3711,7 +3823,7 @@ def clean_shopify_description(value):
 
 def build_item_info_lines(item):
     lines = []
-    lines.append(t("item_info_sku", value=item.get("sku") or "-"))
+    lines.append(t("item_info_sku", value=_display_sku_value(item)))
     lines.append(t("item_info_name", value=item.get("name") or "-"))
     lines.append(t("item_info_barcode", value=item.get("barcode") or "-"))
     lines.append(t("item_info_shopify_status", value=item.get("shopify_product_status") or "-"))
@@ -3723,6 +3835,8 @@ def build_item_info_lines(item):
     weight_value = f"{weight_grams} g" if weight_grams is not None else "-"
     lines.append(t("item_info_weight", value=weight_value))
     lines.append(t("item_info_sync", value=item.get("sync_status") or "-"))
+    lines.append(t("item_info_local_qty", value=item.get("menge")))
+    lines.append(t("item_info_total_qty", value=item.get("gesamt_menge", item.get("menge"))))
     lines.append(
         t(
             "item_info_location",
@@ -3831,7 +3945,7 @@ def build_location_rows(items):
                 faecher[fach],
                 key=lambda row: (
                     _sort_location_value(row["platz"]),
-                    str(row["sku"]),
+                    str(_display_sku_value(row)),
                 ),
             )
 
@@ -3839,8 +3953,8 @@ def build_location_rows(items):
                 platz = "" if item["platz"] is None else str(item["platz"]).strip()
                 platz_label = platz if platz else "-"
                 rows.append({
-                    "kind": "item",
-                    "label": f"    {platz_label:>4}  {_fit(item['sku'], 18)} {_fit(item['name'], 22)}",
+                "kind": "item",
+                    "label": f"    {platz_label:>4}  {_fit(_display_sku_value(item), 18)} {_fit(item['name'], 22)}",
                     "item": item,
                 })
 
@@ -4005,7 +4119,22 @@ def draw_items_panel(win, items, selected, top_index, active):
 
     win.refresh()
 
-def draw(stdscr, items, left_selected, left_top_index, location_rows, right_selected, right_top_index, active_pane, filter_text, show_secondary_help, external_mode, sync_status_label=None, notice_text=None):
+def draw(
+    stdscr,
+    items,
+    left_selected,
+    left_top_index,
+    location_rows,
+    right_selected,
+    right_top_index,
+    active_pane,
+    filter_text,
+    show_secondary_help,
+    external_mode,
+    current_shopify_location=None,
+    sync_status_label=None,
+    notice_text=None,
+):
     h, w = stdscr.getmaxyx()
 
     stdscr.attrset(curses.color_pair(1))
@@ -4031,9 +4160,13 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     draw_items_panel(left_win, items, left_selected, left_top_index, active_pane == "left")
 
     right_lines = [row["label"] for row in location_rows] if location_rows else [t("no_locations")]
+    panel_title = t("locations_panel")
+    if current_shopify_location and current_shopify_location.get("name"):
+        panel_title = t("locations_panel_with_name", value=current_shopify_location["name"])
+
     draw_panel(
         right_win,
-        t("locations_panel"),
+        panel_title,
         right_lines,
         right_selected if location_rows else 0,
         right_top_index,
@@ -4047,6 +4180,8 @@ def draw(stdscr, items, left_selected, left_top_index, location_rows, right_sele
     else:
         status = t("status_primary")
     focus = t("focus_items") if active_pane == "left" else t("focus_locations")
+    if current_shopify_location and current_shopify_location.get("name"):
+        focus += t("focus_shopify_location", value=current_shopify_location["name"])
     if external_mode == "only":
         focus = focus[:-1] + t("view_external")
 
@@ -4120,15 +4255,129 @@ def _pending_item_write_count(state_map=None):
 
 def _pending_item_write_skus(state_map=None):
     target = _PENDING_ITEM_WRITES if state_map is None else state_map
-    return sorted(target.keys())
+    values = []
+    for key in target.keys():
+        if isinstance(key, tuple):
+            location_id, sku = key
+            values.append(f"{sku}@{location_id.rsplit('/', 1)[-1]}" if location_id else sku)
+        else:
+            values.append(str(key))
+    return sorted(values)
 
 
-def _apply_item_write_db(sku, updates):
+def _refresh_single_item_totals(cur, sku):
+    cur.execute(
+        """
+        WITH totals AS (
+            SELECT
+                sku,
+                COALESCE(SUM(menge), 0) AS menge,
+                COALESCE(SUM(available), 0) AS available,
+                COALESCE(SUM(reserved), 0) AS reserved,
+                COALESCE(SUM(committed), 0) AS committed,
+                COALESCE(SUM(unavailable), 0) AS unavailable,
+                BOOL_OR(dirty) AS dirty
+            FROM item_location_inventory
+            WHERE sku = %s
+            GROUP BY sku
+        )
+        UPDATE items
+        SET menge = totals.menge,
+            available = totals.available,
+            reserved = totals.reserved,
+            committed = totals.committed,
+            unavailable = totals.unavailable,
+            dirty = totals.dirty,
+            updated_at = NOW()
+        FROM totals
+        WHERE items.sku = totals.sku
+        """,
+        (sku,),
+    )
+
+
+def _apply_item_write_db(sku, updates, location_id=None):
     if not updates:
         return
     con = db()
     cur = con.cursor()
     try:
+        target_location_id = (location_id or "").strip()
+        if target_location_id:
+            cur.execute(
+                """
+                INSERT INTO shopify_locations(location_id, name, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (location_id)
+                DO UPDATE SET updated_at = NOW()
+                """,
+                (target_location_id, target_location_id.rsplit("/", 1)[-1]),
+            )
+            cur.execute(
+                """
+                INSERT INTO item_location_inventory (
+                    sku,
+                    location_id,
+                    regal,
+                    fach,
+                    platz,
+                    menge,
+                    available,
+                    reserved,
+                    committed,
+                    unavailable,
+                    dirty,
+                    updated_at
+                )
+                SELECT
+                    sku,
+                    %s,
+                    regal,
+                    fach,
+                    platz,
+                    menge,
+                    available,
+                    COALESCE(reserved, 0),
+                    COALESCE(committed, 0),
+                    COALESCE(unavailable, COALESCE(reserved, 0)),
+                    dirty,
+                    NOW()
+                FROM items
+                WHERE sku = %s
+                ON CONFLICT (sku, location_id) DO NOTHING
+                """,
+                (target_location_id, sku),
+            )
+
+            set_parts = []
+            params = []
+            if "qty" in updates:
+                qty = int(updates["qty"])
+                set_parts.append("menge=%s")
+                params.append(qty)
+                set_parts.append(
+                    "available=GREATEST(%s - COALESCE(unavailable, COALESCE(reserved, 0)) - COALESCE(committed, 0), 0)"
+                )
+                params.append(qty)
+                set_parts.append("dirty=TRUE")
+            if "regal" in updates:
+                set_parts.append("regal=%s")
+                params.append(updates["regal"])
+            if "fach" in updates:
+                set_parts.append("fach=%s")
+                params.append(updates["fach"])
+            if "platz" in updates:
+                set_parts.append("platz=%s")
+                params.append(updates["platz"])
+            set_parts.append("updated_at=NOW()")
+            params.extend([sku, target_location_id])
+            cur.execute(
+                f"UPDATE item_location_inventory SET {', '.join(set_parts)} WHERE sku=%s AND location_id=%s",
+                tuple(params),
+            )
+            _refresh_single_item_totals(cur, sku)
+            con.commit()
+            return
         set_parts = []
         params = []
         if "qty" in updates:
@@ -4192,19 +4441,23 @@ def _run_item_write_worker(sku):
         action_label = t(f"item_write_{action_key}")
         LOGGER.info("DB-Schreibaktion gestartet sku=%s typ=%s updates=%s", sku, action_key, updates)
         try:
-            _apply_item_write_db(sku, updates)
+            if isinstance(sku, tuple):
+                target_location_id, target_sku = sku
+            else:
+                target_location_id, target_sku = None, sku
+            _apply_item_write_db(target_sku, updates, target_location_id)
         except Exception as exc:
             LOGGER.exception("DB-Schreibaktion fehlgeschlagen sku=%s typ=%s updates=%s", sku, action_key, updates)
             _post_background_ui_event(
                 "items_reload",
-                t("item_write_failed", label=action_label, sku=sku),
+                t("item_write_failed", label=action_label, sku=(target_sku if 'target_sku' in locals() else sku)),
                 error=exc,
             )
         else:
             LOGGER.info("DB-Schreibaktion abgeschlossen sku=%s typ=%s updates=%s", sku, action_key, updates)
             _post_background_ui_event(
                 "items_reload",
-                t("item_write_saved", label=action_label, sku=sku),
+                t("item_write_saved", label=action_label, sku=(target_sku if 'target_sku' in locals() else sku)),
                 error=None,
             )
 
@@ -4219,12 +4472,13 @@ def _run_item_write_worker(sku):
             return
 
 
-def queue_item_write(sku, *, qty=_UNSET, regal=_UNSET, fach=_UNSET, platz=_UNSET):
+def queue_item_write(sku, *, qty=_UNSET, regal=_UNSET, fach=_UNSET, platz=_UNSET, location_id=None):
     updates = _compact_item_write_updates(qty=qty, regal=regal, fach=fach, platz=platz)
     if not updates:
         return {"merged": False, "started": False, "pending": {}, "open_count": _pending_item_write_count()}
+    write_key = ((location_id or "").strip(), sku)
     with _PENDING_ITEM_WRITES_LOCK:
-        result = _enqueue_item_write_state(_PENDING_ITEM_WRITES, sku, updates)
+        result = _enqueue_item_write_state(_PENDING_ITEM_WRITES, write_key, updates)
     LOGGER.info(
         "DB-Schreibaktion vorgemerkt sku=%s merged=%s started=%s offene=%s updates=%s",
         sku,
@@ -4234,7 +4488,7 @@ def queue_item_write(sku, *, qty=_UNSET, regal=_UNSET, fach=_UNSET, platz=_UNSET
         updates,
     )
     if result["start_worker"]:
-        thread = threading.Thread(target=_run_item_write_worker, args=(sku,), daemon=True)
+        thread = threading.Thread(target=_run_item_write_worker, args=(write_key,), daemon=True)
         thread.start()
     return {
         "merged": result["merged"],
@@ -4435,6 +4689,7 @@ def _save_settings_checked(updated):
     try:
         con = psycopg2.connect(
             host=updated["db_host"],
+            port=int(updated.get("db_port", 5432)),
             dbname=updated["db_name"],
             user=updated["db_user"],
             password=updated["db_pass"],
@@ -5392,6 +5647,7 @@ def settings_dialog(stdscr):
 
     values = {
         "db_host": SETTINGS["db_host"],
+        "db_port": str(SETTINGS.get("db_port", DEFAULT_SETTINGS["db_port"])),
         "db_name": SETTINGS["db_name"],
         "db_user": SETTINGS["db_user"],
         "db_pass": SETTINGS["db_pass"],
@@ -5425,6 +5681,7 @@ def settings_dialog(stdscr):
             "title_key": "settings_tab_general",
             "fields": [
                 ("db_host", "field_db_host"),
+                ("db_port", "field_db_port"),
                 ("db_name", "field_db_name"),
                 ("db_user", "field_db_user"),
                 ("db_pass", "field_db_pass"),
@@ -5737,6 +5994,7 @@ def settings_dialog(stdscr):
 
     updated = {
         "db_host": values["db_host"].strip(),
+        "db_port": int((values.get("db_port") or str(DEFAULT_SETTINGS["db_port"])).strip()),
         "db_name": values["db_name"].strip(),
         "db_user": values["db_user"].strip(),
         "db_pass": values["db_pass"],
@@ -5799,6 +6057,7 @@ def settings_dialog(stdscr):
     missing = [
         label for key, label in [
             ("db_host", "DB Host"),
+            ("db_port", "DB Port"),
             ("db_name", "DB Name"),
             ("db_user", "DB User"),
             ("printer_uri", "Drucker URI"),
@@ -6065,7 +6324,7 @@ def change_qty(stdscr, item):
             return
 
         if key in (curses.KEY_F2, 10, 13, "\n", "\r", curses.KEY_ENTER):
-            queue_item_write(item["sku"], qty=qty)
+            queue_item_write(item["sku"], qty=qty, location_id=_active_shopify_location_id())
             return qty
 
         elif key == '+':
@@ -6135,6 +6394,7 @@ def change_location(stdscr, item):
         regal=regal,
         fach=fach,
         platz=platz,
+        location_id=_active_shopify_location_id(),
     )
     return {"regal": regal, "fach": fach, "platz": platz}
     
@@ -8493,6 +8753,8 @@ def main(stdscr):
     filter_local = False
     sort_mode = "location"
     external_mode = "hide"
+    shopify_locations = []
+    active_shopify_location = None
     items_snapshot = []
     last_items_snapshot_refresh_at = None
     items = []
@@ -8526,6 +8788,11 @@ def main(stdscr):
             items_snapshot_reload_pending = False
             if loader_result.get("error") is None and loader_result.get("value") is not None:
                 items_snapshot = loader_result["value"]
+                shopify_locations = get_shopify_locations_snapshot()
+                active_shopify_location = _resolve_active_shopify_location(
+                    shopify_locations,
+                    active_shopify_location["location_id"] if active_shopify_location else None,
+                )
                 last_items_snapshot_refresh_at = loader_result["loaded_at"]
                 rebuild_items_view = True
         if not sync_status_refresh_pending and (
@@ -8542,12 +8809,23 @@ def main(stdscr):
 
         if reload_items_snapshot:
             try:
+                shopify_locations = get_shopify_locations_snapshot()
+                active_shopify_location = _resolve_active_shopify_location(
+                    shopify_locations,
+                    active_shopify_location["location_id"] if active_shopify_location else None,
+                )
                 if not items_snapshot:
-                    items_snapshot = _load_items_snapshot()
+                    items_snapshot = _load_items_snapshot(
+                        active_shopify_location["location_id"] if active_shopify_location else None
+                    )
                     last_items_snapshot_refresh_at = time.monotonic()
                     rebuild_items_view = True
                 elif not items_snapshot_reload_pending:
-                    _ITEMS_SNAPSHOT_LOADER.request("items_snapshot", _load_items_snapshot)
+                    _ITEMS_SNAPSHOT_LOADER.request(
+                        "items_snapshot",
+                        _load_items_snapshot,
+                        active_shopify_location["location_id"] if active_shopify_location else None,
+                    )
                     items_snapshot_reload_pending = True
                 reload_items_snapshot = False
             except DatabaseUnavailableError as exc:
@@ -8607,6 +8885,7 @@ def main(stdscr):
             filter_text,
             show_secondary_help,
             external_mode,
+            active_shopify_location,
             format_shopify_sync_status_label(sync_state),
             notice_text=(transient_notice if transient_notice and time.monotonic() < transient_notice_until else None),
         )
@@ -8671,20 +8950,32 @@ def main(stdscr):
             rebuild_items_view = True
 
         elif key == curses.KEY_F2:
-            filter_local = not filter_local
-            left_selected = 0
-            left_top_index = 0
-            right_selected = 0
-            right_top_index = 0
-            rebuild_items_view = True
+            previous_location = _cycle_shopify_location(
+                shopify_locations,
+                active_shopify_location["location_id"] if active_shopify_location else None,
+                -1,
+            )
+            if previous_location is not None:
+                active_shopify_location = previous_location
+                left_selected = 0
+                left_top_index = 0
+                right_selected = 0
+                right_top_index = 0
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F3:
-            filter_no_location = not filter_no_location
-            left_selected = 0
-            left_top_index = 0
-            right_selected = 0
-            right_top_index = 0
-            rebuild_items_view = True
+            next_location = _cycle_shopify_location(
+                shopify_locations,
+                active_shopify_location["location_id"] if active_shopify_location else None,
+                1,
+            )
+            if next_location is not None:
+                active_shopify_location = next_location
+                left_selected = 0
+                left_top_index = 0
+                right_selected = 0
+                right_top_index = 0
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F4 and selected_item:
             item_info_dialog(stdscr, selected_item)
@@ -8710,7 +9001,7 @@ def main(stdscr):
                         new_location["platz"],
                     ):
                         rebuild_items_view = True
-                    transient_notice = t("item_write_pending_location", sku=selected_item["sku"])
+                    transient_notice = t("item_write_pending_location", sku=_display_sku_value(selected_item))
                     transient_notice_until = time.monotonic() + 3.0
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
@@ -8723,7 +9014,7 @@ def main(stdscr):
                 if new_qty is not None:
                     if _update_item_snapshot_quantity(items_snapshot, selected_item["sku"], new_qty):
                         rebuild_items_view = True
-                    transient_notice = t("item_write_pending_qty", sku=selected_item["sku"])
+                    transient_notice = t("item_write_pending_qty", sku=_display_sku_value(selected_item))
                     transient_notice_until = time.monotonic() + 3.0
             except DatabaseUnavailableError as exc:
                 if not database_connection_dialog(stdscr, str(exc)):
@@ -8741,6 +9032,22 @@ def main(stdscr):
                 if not database_connection_dialog(stdscr, str(exc)):
                     return
                 reload_items_snapshot = True
+
+        elif key == curses.KEY_F2 + 12:
+            filter_local = not filter_local
+            left_selected = 0
+            left_top_index = 0
+            right_selected = 0
+            right_top_index = 0
+            rebuild_items_view = True
+
+        elif key == curses.KEY_F3 + 12:
+            filter_no_location = not filter_no_location
+            left_selected = 0
+            left_top_index = 0
+            right_selected = 0
+            right_top_index = 0
+            rebuild_items_view = True
 
         elif key == curses.KEY_F5 + 12 and selected_item:
             try:

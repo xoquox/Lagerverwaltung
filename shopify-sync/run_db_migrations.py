@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from shopify_sync import DB_HOST, DB_NAME, DB_PASS, DB_USER, db, ensure_runtime_dependencies, load_dotenv
+from shopify_sync import DB_HOST, DB_NAME, DB_PASS, DB_PORT, DB_USER, db, ensure_runtime_dependencies, load_dotenv
 from shipping.schema import apply_app_schema, collect_schema_issues
 
 
@@ -39,6 +39,7 @@ def ensure_database_exists():
         try:
             con = psycopg2.connect(
                 host=DB_HOST,
+                port=int(DB_PORT or 5432),
                 database=maintenance_name,
                 user=DB_USER,
                 password=DB_PASS,
