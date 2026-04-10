@@ -45,6 +45,7 @@ DEFAULT_SETTINGS = {
     "shipping_label_printer_post": "",
     "shipping_services": ["service_flexdelivery"],
     "shipping_packaging_weight_grams": 400,
+    "shopify_location_mode": "single",
     "shopify_tracking_mode_gls": "company",
     "shopify_tracking_mode_post": "company_and_url",
     "shopify_tracking_url_gls": "",

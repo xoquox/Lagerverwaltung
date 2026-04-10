@@ -57,6 +57,28 @@ REQUIRED_TABLE_COLUMNS = {
         "quantity",
         "fulfilled_quantity",
     },
+    "shopify_fulfillment_orders": {
+        "fulfillment_order_id",
+        "order_id",
+        "assigned_location_id",
+        "assigned_location_name",
+        "status",
+        "request_status",
+        "updated_at",
+    },
+    "shopify_fulfillment_order_items": {
+        "fulfillment_order_line_item_id",
+        "fulfillment_order_id",
+        "order_id",
+        "order_line_item_id",
+        "sku",
+        "title",
+        "quantity",
+        "remaining_quantity",
+        "assigned_location_id",
+        "assigned_location_name",
+        "updated_at",
+    },
     "service_runtime_state": {
         "service",
         "version",
@@ -244,6 +266,79 @@ def apply_app_schema(cur):
     )
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_fulfillment_orders (
+            fulfillment_order_id text PRIMARY KEY,
+            order_id text NOT NULL REFERENCES shopify_orders(order_id) ON DELETE CASCADE,
+            assigned_location_id text,
+            assigned_location_name text,
+            status text,
+            request_status text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS assigned_location_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS assigned_location_name text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS status text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS request_status text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_orders_order
+        ON shopify_fulfillment_orders(order_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_orders_location
+        ON shopify_fulfillment_orders(assigned_location_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_fulfillment_order_items (
+            fulfillment_order_line_item_id text PRIMARY KEY,
+            fulfillment_order_id text NOT NULL REFERENCES shopify_fulfillment_orders(fulfillment_order_id) ON DELETE CASCADE,
+            order_id text NOT NULL REFERENCES shopify_orders(order_id) ON DELETE CASCADE,
+            order_line_item_id text,
+            sku text,
+            title text NOT NULL,
+            quantity integer NOT NULL,
+            remaining_quantity integer NOT NULL DEFAULT 0,
+            assigned_location_id text,
+            assigned_location_name text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS sku text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS title text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS remaining_quantity integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS assigned_location_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS assigned_location_name text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_order_items_order
+        ON shopify_fulfillment_order_items(order_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_order_items_location
+        ON shopify_fulfillment_order_items(assigned_location_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_order_items_order_line
+        ON shopify_fulfillment_order_items(order_line_item_id)
+        """
+    )
     ensure_shipping_history_schema(cur)
     cur.execute(
         """

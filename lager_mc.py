@@ -762,6 +762,17 @@ def _active_shopify_location_id():
     return _ACTIVE_SHOPIFY_LOCATION_ID
 
 
+def _shopify_location_mode():
+    mode = str(SETTINGS.get("shopify_location_mode") or DEFAULT_SETTINGS.get("shopify_location_mode") or "single").strip().lower()
+    if mode not in {"single", "multi"}:
+        return "single"
+    return mode
+
+
+def _shopify_location_switch_enabled():
+    return _shopify_location_mode() == "multi"
+
+
 def _set_active_shopify_location(location_id=None, location_name=""):
     global _ACTIVE_SHOPIFY_LOCATION_ID, _ACTIVE_SHOPIFY_LOCATION_NAME
     _ACTIVE_SHOPIFY_LOCATION_ID = (location_id or "").strip() or None
@@ -1178,6 +1189,7 @@ def _filter_items_snapshot(rows, filter_text=None, filter_no_location=False, fil
 def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", payment_filter="all"):
     con = db()
     cur = con.cursor()
+    active_location_id = _active_shopify_location_id()
 
     conditions = []
     params = []
@@ -1218,6 +1230,8 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
     if conditions:
         where = "WHERE " + " AND ".join(conditions)
 
+    query_params = [active_location_id, active_location_id] + params
+
     _execute_db_query(
         cur,
         f"""
@@ -1234,7 +1248,10 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
-            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty
+            COALESCE(fo_stats.total_internal_qty, order_stats.local_internal_qty, 0) AS local_internal_qty,
+            COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
+            COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
+            COALESCE(fo_stats.location_count, 0) AS shopify_location_count
         FROM shopify_orders so
         LEFT JOIN (
             SELECT
@@ -1249,10 +1266,40 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
             LEFT JOIN items i ON i.sku = oi.sku
             GROUP BY oi.order_id
         ) AS order_stats ON order_stats.order_id = so.order_id
+        LEFT JOIN (
+            SELECT
+                foi.order_id,
+                SUM(
+                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                    THEN foi.quantity
+                    ELSE 0
+                    END
+                ) AS total_internal_qty,
+                SUM(
+                    CASE
+                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                         AND foi.assigned_location_id = %s
+                        THEN foi.quantity
+                        ELSE 0
+                    END
+                ) AS active_location_internal_qty,
+                SUM(
+                    CASE
+                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                         AND foi.assigned_location_id = %s
+                        THEN foi.remaining_quantity
+                        ELSE 0
+                    END
+                ) AS active_location_remaining_qty,
+                COUNT(DISTINCT NULLIF(foi.assigned_location_id, '')) AS location_count
+            FROM shopify_fulfillment_order_items foi
+            LEFT JOIN items i ON i.sku = foi.sku
+            GROUP BY foi.order_id
+        ) AS fo_stats ON fo_stats.order_id = so.order_id
         {where}
         ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
         """,
-        params,
+        query_params,
     )
     rows = cur.fetchall()
     cur.close()
@@ -1263,6 +1310,7 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
 def _load_orders_snapshot():
     con = db()
     cur = con.cursor()
+    active_location_id = _active_shopify_location_id()
     _execute_db_query(
         cur,
         """
@@ -1279,7 +1327,10 @@ def _load_orders_snapshot():
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
-            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty
+            COALESCE(fo_stats.total_internal_qty, order_stats.local_internal_qty, 0) AS local_internal_qty,
+            COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
+            COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
+            COALESCE(fo_stats.location_count, 0) AS shopify_location_count
         FROM shopify_orders so
         LEFT JOIN (
             SELECT
@@ -1294,9 +1345,39 @@ def _load_orders_snapshot():
             LEFT JOIN items i ON i.sku = oi.sku
             GROUP BY oi.order_id
         ) AS order_stats ON order_stats.order_id = so.order_id
+        LEFT JOIN (
+            SELECT
+                foi.order_id,
+                SUM(
+                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                    THEN foi.quantity
+                    ELSE 0
+                    END
+                ) AS total_internal_qty,
+                SUM(
+                    CASE
+                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                         AND foi.assigned_location_id = %s
+                        THEN foi.quantity
+                        ELSE 0
+                    END
+                ) AS active_location_internal_qty,
+                SUM(
+                    CASE
+                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                         AND foi.assigned_location_id = %s
+                        THEN foi.remaining_quantity
+                        ELSE 0
+                    END
+                ) AS active_location_remaining_qty,
+                COUNT(DISTINCT NULLIF(foi.assigned_location_id, '')) AS location_count
+            FROM shopify_fulfillment_order_items foi
+            LEFT JOIN items i ON i.sku = foi.sku
+            GROUP BY foi.order_id
+        ) AS fo_stats ON fo_stats.order_id = so.order_id
         ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
         """,
-        [],
+        [active_location_id, active_location_id],
     )
     rows = cur.fetchall()
     cur.close()
@@ -1365,28 +1446,88 @@ def get_order_items(order_id):
     active_location_id = _active_shopify_location_id()
     cur.execute(
         """
-        SELECT
-            oi.line_index,
-            oi.order_line_item_id,
-            oi.sku,
-            oi.title,
-            oi.quantity,
-            COALESCE(oi.fulfilled_quantity, 0) AS fulfilled_quantity,
-            COALESCE(ili.regal, i.regal) AS regal,
-            COALESCE(ili.fach, i.fach) AS fach,
-            COALESCE(ili.platz, i.platz) AS platz,
-            i.shopify_weight_grams,
-            COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment
-        FROM shopify_order_items oi
-        LEFT JOIN items i ON i.sku = oi.sku
-        LEFT JOIN item_location_inventory ili
-            ON ili.sku = i.sku AND ili.location_id = %s
-        WHERE oi.order_id = %s
-        ORDER BY oi.line_index
+        SELECT COUNT(*) AS count
+        FROM shopify_fulfillment_order_items
+        WHERE order_id = %s
         """,
-        (active_location_id, order_id),
+        (order_id,),
     )
-    rows = cur.fetchall()
+    fulfillment_item_count = int((cur.fetchone() or {}).get("count") or 0)
+    if fulfillment_item_count > 0:
+        params = [active_location_id, order_id]
+        location_filter = ""
+        if active_location_id:
+            location_filter = "AND foi.assigned_location_id = %s"
+            params.append(active_location_id)
+        cur.execute(
+            f"""
+            SELECT
+                MIN(foi.fulfillment_order_line_item_id) AS line_index,
+                COALESCE(foi.order_line_item_id, oi.order_line_item_id) AS order_line_item_id,
+                COALESCE(foi.sku, oi.sku) AS sku,
+                COALESCE(MAX(foi.title), MAX(oi.title), '-') AS title,
+                SUM(COALESCE(foi.quantity, 0)) AS quantity,
+                GREATEST(
+                    SUM(COALESCE(foi.quantity, 0)) - SUM(COALESCE(foi.remaining_quantity, 0)),
+                    0
+                ) AS fulfilled_quantity,
+                COALESCE(ili.regal, i.regal) AS regal,
+                COALESCE(ili.fach, i.fach) AS fach,
+                COALESCE(ili.platz, i.platz) AS platz,
+                i.shopify_weight_grams,
+                COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
+                MIN(COALESCE(foi.assigned_location_id, '')) AS assigned_location_id,
+                MIN(COALESCE(foi.assigned_location_name, '')) AS assigned_location_name
+            FROM shopify_fulfillment_order_items foi
+            LEFT JOIN shopify_order_items oi
+                ON oi.order_id = foi.order_id
+               AND oi.order_line_item_id = foi.order_line_item_id
+            LEFT JOIN items i
+                ON i.sku = COALESCE(foi.sku, oi.sku)
+            LEFT JOIN item_location_inventory ili
+                ON ili.sku = i.sku AND ili.location_id = %s
+            WHERE foi.order_id = %s
+              {location_filter}
+            GROUP BY
+                COALESCE(foi.order_line_item_id, oi.order_line_item_id),
+                COALESCE(foi.sku, oi.sku),
+                COALESCE(ili.regal, i.regal),
+                COALESCE(ili.fach, i.fach),
+                COALESCE(ili.platz, i.platz),
+                i.shopify_weight_grams,
+                COALESCE(i.external_fulfillment, FALSE)
+            ORDER BY MIN(foi.assigned_location_name), MIN(foi.fulfillment_order_id), MIN(foi.fulfillment_order_line_item_id)
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    else:
+        cur.execute(
+            """
+            SELECT
+                oi.line_index,
+                oi.order_line_item_id,
+                oi.sku,
+                oi.title,
+                oi.quantity,
+                COALESCE(oi.fulfilled_quantity, 0) AS fulfilled_quantity,
+                COALESCE(ili.regal, i.regal) AS regal,
+                COALESCE(ili.fach, i.fach) AS fach,
+                COALESCE(ili.platz, i.platz) AS platz,
+                i.shopify_weight_grams,
+                COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
+                NULL::text AS assigned_location_id,
+                NULL::text AS assigned_location_name
+            FROM shopify_order_items oi
+            LEFT JOIN items i ON i.sku = oi.sku
+            LEFT JOIN item_location_inventory ili
+                ON ili.sku = i.sku AND ili.location_id = %s
+            WHERE oi.order_id = %s
+            ORDER BY oi.line_index
+            """,
+            (active_location_id, order_id),
+        )
+        rows = cur.fetchall()
     cur.close()
     con.close()
     local_fulfilled = get_local_fulfilled_quantities_for_order(order_id)
@@ -4175,10 +4316,11 @@ def draw(
 
     stdscr.attrset(curses.color_pair(3))
 
-    if show_secondary_help:
-        status = t("status_secondary")
+    if _shopify_location_switch_enabled():
+        status_key = "status_secondary_multi" if show_secondary_help else "status_primary_multi"
     else:
-        status = t("status_primary")
+        status_key = "status_secondary_single" if show_secondary_help else "status_primary_single"
+    status = t(status_key)
     focus = t("focus_items") if active_pane == "left" else t("focus_locations")
     if current_shopify_location and current_shopify_location.get("name"):
         focus += t("focus_shopify_location", value=current_shopify_location["name"])
@@ -5554,6 +5696,40 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
 def _settings_context_select(stdscr, active_name, values, shipping_printer_fields, shipping_format_fields, shipping_template_fields, shipping_tracking_mode_fields):
     if active_name == "language":
         values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
+    elif active_name == "shopify_location_mode":
+        values["shopify_location_mode"] = choice_dialog(
+            stdscr,
+            t("pick_shopify_location_mode"),
+            [
+                {"value": "single", "label": t("shopify_location_mode_single")},
+                {"value": "multi", "label": t("shopify_location_mode_multi")},
+            ],
+            values.get("shopify_location_mode", "single"),
+        )
+    elif active_name == "shopify_active_location_display":
+        locations = get_shopify_locations_snapshot()
+        if not locations:
+            message_box(stdscr, t("settings_title"), t("shopify_locations_unavailable"))
+            return values
+        options = [
+            {
+                "value": row["location_id"],
+                "label": f"{row.get('name') or row['location_id']} [{row['location_id']}]",
+            }
+            for row in locations
+            if row.get("location_id")
+        ]
+        chosen = choice_dialog(
+            stdscr,
+            t("pick_shopify_location"),
+            options,
+            values.get("shopify_active_location_id", ""),
+            cancel_returns_none=True,
+        )
+        if chosen is not None:
+            values["shopify_active_location_id"] = chosen
+            selected_row = next((row for row in locations if row.get("location_id") == chosen), None)
+            values["shopify_active_location_display"] = (selected_row.get("name") if selected_row else chosen) or chosen
     elif active_name == "color_theme":
         values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
     elif active_name in {
@@ -5652,6 +5828,9 @@ def settings_dialog(stdscr):
         "db_user": SETTINGS["db_user"],
         "db_pass": SETTINGS["db_pass"],
         "language": (SETTINGS.get("language") or DEFAULT_SETTINGS["language"]).strip().lower(),
+        "shopify_location_mode": (SETTINGS.get("shopify_location_mode") or DEFAULT_SETTINGS["shopify_location_mode"]).strip().lower(),
+        "shopify_active_location_id": (SETTINGS.get("shopify_active_location_id") or "").strip(),
+        "shopify_active_location_display": (SETTINGS.get("shopify_active_location_id") or "").strip() or "-",
         "color_theme": (SETTINGS.get("color_theme") or DEFAULT_SETTINGS["color_theme"]).strip().lower(),
         "color_theme_file": SETTINGS.get("color_theme_file", ""),
         "printer_uri": SETTINGS["printer_uri"],
@@ -5686,6 +5865,8 @@ def settings_dialog(stdscr):
                 ("db_user", "field_db_user"),
                 ("db_pass", "field_db_pass"),
                 ("language", "field_language"),
+                ("shopify_location_mode", "field_shopify_location_mode"),
+                ("shopify_active_location_display", "field_shopify_active_location"),
                 ("color_theme", "field_theme"),
                 ("color_theme_file", "field_theme_file"),
             ],
@@ -5724,6 +5905,16 @@ def settings_dialog(stdscr):
             ],
         },
     ]
+    initial_locations = get_shopify_locations_snapshot()
+    if initial_locations:
+        selected_row = next(
+            (row for row in initial_locations if row.get("location_id") == values.get("shopify_active_location_id")),
+            None,
+        )
+        if selected_row is None:
+            selected_row = initial_locations[0]
+            values["shopify_active_location_id"] = selected_row.get("location_id") or ""
+        values["shopify_active_location_display"] = (selected_row.get("name") or selected_row.get("location_id") or "-")
     active_tab = 0
     active_field_by_tab = [0 for _ in tabs]
     sync_state = get_service_runtime_state(max_age_seconds=999999)
@@ -5890,7 +6081,7 @@ def settings_dialog(stdscr):
         if not active_name:
             continue
 
-        if active_name in {"shipping_services_display", "shipping_active_carriers_display"}:
+        if active_name in {"shipping_services_display", "shipping_active_carriers_display", "shopify_active_location_display", "shopify_location_mode"}:
             if key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END, curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b', curses.KEY_DC):
                 continue
 
@@ -5960,10 +6151,12 @@ def settings_dialog(stdscr):
             )
             if values.get(active_name, "") == previous_value and active_name not in {
                 "language",
+                "shopify_location_mode",
                 "color_theme",
                 "delivery_note_format",
                 "shipping_services_display",
                 "shipping_active_carriers_display",
+                "shopify_active_location_display",
                 *shipping_printer_fields.keys(),
                 *shipping_format_fields.keys(),
                 *shipping_template_fields.keys(),
@@ -5985,7 +6178,7 @@ def settings_dialog(stdscr):
             continue
 
         if isinstance(key, str) and key.isprintable():
-            if active_name in {"shipping_services_display", "shipping_active_carriers_display"}:
+            if active_name in {"shipping_services_display", "shipping_active_carriers_display", "shopify_active_location_display", "shopify_location_mode"}:
                 continue
             value = str(values.get(active_name, ""))
             pos = cursor_positions[active_name]
@@ -5999,6 +6192,8 @@ def settings_dialog(stdscr):
         "db_user": values["db_user"].strip(),
         "db_pass": values["db_pass"],
         "language": values["language"].strip().lower(),
+        "shopify_location_mode": values["shopify_location_mode"].strip().lower(),
+        "shopify_active_location_id": values["shopify_active_location_id"].strip(),
         "color_theme": values["color_theme"].strip().lower(),
         "color_theme_file": os.path.expanduser(values["color_theme_file"].strip()),
         "printer_uri": values["printer_uri"].strip(),
@@ -6073,6 +6268,9 @@ def settings_dialog(stdscr):
 
     if updated["language"] not in SUPPORTED_LANGUAGES:
         message_box(stdscr, t("error"), t("language_must_be_supported"))
+        return
+    if updated["shopify_location_mode"] not in {"single", "multi"}:
+        message_box(stdscr, t("error"), t("shopify_location_mode_invalid"))
         return
     if updated["color_theme_file"] and not os.path.isfile(updated["color_theme_file"]):
         message_box(stdscr, t("error"), t("theme_file_missing"))
@@ -6160,6 +6358,10 @@ def settings_dialog(stdscr):
     except Exception as exc:
         message_box(stdscr, t("db_error_title"), str(exc)[:56])
         return
+    _set_active_shopify_location(
+        SETTINGS.get("shopify_active_location_id"),
+        values.get("shopify_active_location_display", ""),
+    )
     apply_color_theme(stdscr)
     message_box(stdscr, t("saved"), t("saved_settings"))
 
@@ -7275,7 +7477,7 @@ def format_order_item_row(row, width):
     except (TypeError, ValueError):
         quantity = 0
     qty = _fit(f"{remaining}/{quantity}", qty_width)
-    sku = _fit(row["sku"] or "-", sku_width)
+    sku = _fit(row["sku"] or "-/-", sku_width)
     title_text = row["title"]
     if row["external_fulfillment"]:
         title_text = f"[Extern] {title_text}"
@@ -7511,7 +7713,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
             qty = int(row.get("selected_quantity") or 0)
             remaining = int(row.get("remaining_quantity") or 0)
             total = int(row.get("total_quantity") or 0)
-            sku = row.get("sku") or "-"
+            sku = row.get("sku") or "-/-"
             title = row.get("title") or "-"
             state = t("partial_execution_done_state") if remaining <= 0 else ""
             line = _fit(f"[{qty:>3}/{remaining:<3}/{total:<3}] {_fit(sku, 16)} {title}{state}", width - 3)
@@ -8292,8 +8494,12 @@ def orders_dialog(stdscr):
 
         order_lines = []
         for order in orders:
-            status_value = (order.get("fulfillment_status") or "").strip().lower()
-            open_hint = "[!]" if status_value not in {"fulfilled", "cancelled"} else "   "
+            location_count = int(order.get("shopify_location_count") or 0)
+            if location_count > 0:
+                open_hint = "[!]" if int(order.get("active_location_remaining_qty") or 0) > 0 else "   "
+            else:
+                status_value = (order.get("fulfillment_status") or "").strip().lower()
+                open_hint = "[!]" if status_value not in {"fulfilled", "cancelled"} else "   "
             mark = "[x]" if order["order_id"] in selected_order_ids else "[ ]"
             order_lines.append(
                 f"{mark}{open_hint} {_fit(order['order_name'], 10)} {_fit(format_address(order), left_width - 19)}"
@@ -8326,9 +8532,18 @@ def orders_dialog(stdscr):
             status = _localized_fulfillment_status(selected_order["fulfillment_status"])
             payment_status = _localized_payment_status(selected_order["payment_status"])
             internal_qty = selected_order.get("local_internal_qty") or 0
+            active_location_label = _ACTIVE_SHOPIFY_LOCATION_NAME or _active_shopify_location_id() or "-"
+            active_location_qty = int(selected_order.get("active_location_internal_qty") or 0)
+            active_location_remaining_qty = int(selected_order.get("active_location_remaining_qty") or 0)
+            shopify_location_count = int(selected_order.get("shopify_location_count") or 0)
             detail_lines.append(_fit(t("orders_detail_status", value=status), right_width - 2))
             detail_lines.append(_fit(t("orders_detail_payment", value=payment_status), right_width - 2))
             detail_lines.append(_fit(t("orders_detail_internal_qty", value=internal_qty), right_width - 2))
+            detail_lines.append(_fit(t("orders_detail_shopify_location", value=active_location_label), right_width - 2))
+            detail_lines.append(_fit(t("orders_detail_location_qty", value=active_location_qty), right_width - 2))
+            detail_lines.append(_fit(t("orders_detail_location_open_qty", value=active_location_remaining_qty), right_width - 2))
+            if shopify_location_count > 1:
+                detail_lines.append(_fit(t("orders_detail_location_split", value=shopify_location_count), right_width - 2))
             detail_lines.append(_fit(t("orders_detail_shipping_weight", grams=selected_weight_grams, kg=selected_weight_kg), right_width - 2))
             if selected_order_id and selected_order_id not in order_shipments_cache:
                 detail_lines.append(_fit(t("orders_detail_shipments_loading"), right_width - 2))
@@ -8352,6 +8567,8 @@ def orders_dialog(stdscr):
             if selected_order_id and selected_order_id not in order_items_cache:
                 detail_lines.append(_fit(t("orders_detail_positions_loading"), right_width - 2))
             else:
+                if not order_items and shopify_location_count > 0:
+                    detail_lines.append(_fit(t("orders_detail_no_location_positions"), right_width - 2))
                 for row in order_items:
                     detail_lines.append(format_order_item_row(row, right_width - 2))
         else:
@@ -8950,32 +9167,50 @@ def main(stdscr):
             rebuild_items_view = True
 
         elif key == curses.KEY_F2:
-            previous_location = _cycle_shopify_location(
-                shopify_locations,
-                active_shopify_location["location_id"] if active_shopify_location else None,
-                -1,
-            )
-            if previous_location is not None:
-                active_shopify_location = previous_location
-                left_selected = 0
-                left_top_index = 0
-                right_selected = 0
-                right_top_index = 0
-                reload_items_snapshot = True
+            if _shopify_location_switch_enabled():
+                previous_location = _cycle_shopify_location(
+                    shopify_locations,
+                    active_shopify_location["location_id"] if active_shopify_location else None,
+                    -1,
+                )
+                if previous_location is not None:
+                    active_shopify_location = previous_location
+                    left_selected = 0
+                    left_top_index = 0
+                    right_selected = 0
+                    right_top_index = 0
+                    reload_items_snapshot = True
+            else:
+                try:
+                    add_item(stdscr)
+                    reload_items_snapshot = True
+                except DatabaseUnavailableError as exc:
+                    if not database_connection_dialog(stdscr, str(exc)):
+                        return
+                    reload_items_snapshot = True
 
         elif key == curses.KEY_F3:
-            next_location = _cycle_shopify_location(
-                shopify_locations,
-                active_shopify_location["location_id"] if active_shopify_location else None,
-                1,
-            )
-            if next_location is not None:
-                active_shopify_location = next_location
-                left_selected = 0
-                left_top_index = 0
-                right_selected = 0
-                right_top_index = 0
-                reload_items_snapshot = True
+            if _shopify_location_switch_enabled():
+                next_location = _cycle_shopify_location(
+                    shopify_locations,
+                    active_shopify_location["location_id"] if active_shopify_location else None,
+                    1,
+                )
+                if next_location is not None:
+                    active_shopify_location = next_location
+                    left_selected = 0
+                    left_top_index = 0
+                    right_selected = 0
+                    right_top_index = 0
+                    reload_items_snapshot = True
+            else:
+                try:
+                    if inventory_dialog(stdscr):
+                        reload_items_snapshot = True
+                except DatabaseUnavailableError as exc:
+                    if not database_connection_dialog(stdscr, str(exc)):
+                        return
+                    reload_items_snapshot = True
 
         elif key == curses.KEY_F4 and selected_item:
             item_info_dialog(stdscr, selected_item)
@@ -9063,6 +9298,12 @@ def main(stdscr):
 
         elif key == curses.KEY_F11 + 12:
             settings_dialog(stdscr)
+            shopify_locations = get_shopify_locations_snapshot()
+            active_shopify_location = _resolve_active_shopify_location(
+                shopify_locations,
+                (SETTINGS.get("shopify_active_location_id") or "").strip() or None,
+            )
+            reload_items_snapshot = True
 
         elif key == curses.KEY_F9:
             filter_text = None

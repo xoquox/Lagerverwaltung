@@ -1456,10 +1456,10 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertFalse(second["started"])
         self.assertTrue(second["merged"])
         self.assertEqual(len(created_threads), 1)
-        self.assertEqual(created_threads[0].args, ("SKU-1",))
+        self.assertEqual(created_threads[0].args, (("", "SKU-1"),))
         self.assertTrue(created_threads[0].daemon)
         self.assertEqual(
-            self.lager_mc._PENDING_ITEM_WRITES["SKU-1"]["pending"],
+            self.lager_mc._PENDING_ITEM_WRITES[("", "SKU-1")]["pending"],
             {"qty": 5, "regal": "A", "fach": "1", "platz": "2"},
         )
 

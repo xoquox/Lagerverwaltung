@@ -757,6 +757,36 @@ PY
   rm -f "${python_script}"
 }
 
+write_shopify_location_settings() {
+  local location_mode="$1"
+  local active_location_id="$2"
+  local python_script
+  python_script="$(mktemp "${TMPDIR:-/tmp}/lager-mc-shopify-settings-XXXXXX.py")"
+  cat > "${python_script}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+settings_path = target / "settings.local.json"
+settings = {}
+if settings_path.exists():
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+
+mode = (sys.argv[2] or "single").strip().lower()
+if mode not in {"single", "multi"}:
+    mode = "single"
+
+settings["shopify_location_mode"] = mode
+settings["shopify_active_location_id"] = (sys.argv[3] or "").strip()
+settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.chmod(settings_path, 0o600)
+PY
+  run_logged python3 "${python_script}" "${INSTALL_ROOT}" "${location_mode}" "${active_location_id}"
+  rm -f "${python_script}"
+}
+
 upsert_env_value() {
   local env_path="$1"
   local key="$2"
@@ -898,6 +928,110 @@ configure_shopify_sync_env() {
   upsert_env_value "${sync_env}" "SHOPIFY_CONNECT_BASE_URL" "${CONNECT_BASE_URL}"
 }
 
+load_shopify_locations_json() {
+  local output_path
+  output_path="$(mktemp "${TMPDIR:-/tmp}/lager-mc-locations-XXXXXX.json")"
+  if ! run_logged "${VENV_DIR}/bin/python" "${INSTALL_ROOT}/shopify-sync/shopify_sync.py" list-locations --json > /dev/null; then
+    rm -f "${output_path}"
+    return 1
+  fi
+  if ! "${VENV_DIR}/bin/python" "${INSTALL_ROOT}/shopify-sync/shopify_sync.py" list-locations --json > "${output_path}" 2>>"${LOG_FILE}"; then
+    rm -f "${output_path}"
+    return 1
+  fi
+  printf '%s\n' "${output_path}"
+}
+
+select_shopify_location_mode() {
+  SHOPIFY_LOCATION_MODE_VALUE="$(
+    ui_menu \
+      "Shopify-Location" \
+      "Bitte den Betriebsmodus fuer diese Lager-MC-Installation waehlen." \
+      "single" "Nur eine Shopify-Location an diesem Arbeitsplatz verwenden" \
+      "multi" "Zwischen mehreren Shopify-Locations in Lager-MC umschalten"
+  )"
+  [[ -n "${SHOPIFY_LOCATION_MODE_VALUE}" ]] || die "Kein Shopify-Location-Modus gewaehlt."
+}
+
+select_shopify_location_from_json() {
+  local json_path="$1"
+  local options_path
+  local default_location_id
+  local selected_location
+  options_path="$(mktemp "${TMPDIR:-/tmp}/lager-mc-location-options-XXXXXX.tsv")"
+  local parser_script
+  parser_script="$(mktemp "${TMPDIR:-/tmp}/lager-mc-location-options-XXXXXX.py")"
+  cat > "${parser_script}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+rows = data.get("locations") or []
+for row in rows:
+    location_id = str(row.get("location_id") or "").strip()
+    if not location_id:
+        continue
+    name = str(row.get("location_name") or location_id).strip() or location_id
+    flags = []
+    if row.get("is_active"):
+        flags.append("aktiv")
+    else:
+        flags.append("inaktiv")
+    if row.get("fulfills_online_orders"):
+        flags.append("online")
+    print(location_id)
+    print(f"{name} ({', '.join(flags)})")
+PY
+  run_logged python3 "${parser_script}" "${json_path}" > "${options_path}"
+  rm -f "${parser_script}"
+  if [[ ! -s "${options_path}" ]]; then
+    rm -f "${options_path}"
+    die "Es wurden keine Shopify-Locations gefunden."
+  fi
+  default_location_id="$(
+    python3 -c 'import json,sys; from pathlib import Path; rows=(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("locations") or []); print((rows[0].get("location_id") or "").strip() if rows else "")' \
+      "${json_path}"
+  )"
+
+  local menu_args=()
+  while IFS= read -r line_id && IFS= read -r line_label; do
+    menu_args+=("${line_id}" "${line_label}")
+  done < "${options_path}"
+  rm -f "${options_path}"
+
+  selected_location="$(
+    ui_menu \
+      "Shopify-Location" \
+      "Bitte die Shopify-Location fuer diese Lager-MC-Installation waehlen." \
+      "${menu_args[@]}"
+  )"
+  if [[ -z "${selected_location}" ]]; then
+    selected_location="${default_location_id}"
+  fi
+  [[ -n "${selected_location}" ]] || die "Keine Shopify-Location gewaehlt."
+  SHOPIFY_ACTIVE_LOCATION_ID_VALUE="${selected_location}"
+}
+
+prompt_shopify_location_settings() {
+  local locations_json_path
+  select_shopify_location_mode
+  locations_json_path="$(load_shopify_locations_json || true)"
+  if [[ -z "${locations_json_path}" || ! -f "${locations_json_path}" ]]; then
+    ui_message "Shopify-Location" "Die Shopify-Locations konnten nicht automatisch geladen werden. Der Modus wird gespeichert, die konkrete Arbeitslocation kann spaeter in Lager-MC unter Shift+F11 gesetzt werden."
+    write_shopify_location_settings "${SHOPIFY_LOCATION_MODE_VALUE}" ""
+    return
+  fi
+
+  if [[ "${SHOPIFY_LOCATION_MODE_VALUE}" == "single" ]]; then
+    select_shopify_location_from_json "${locations_json_path}"
+  else
+    select_shopify_location_from_json "${locations_json_path}"
+  fi
+  rm -f "${locations_json_path}"
+  write_shopify_location_settings "${SHOPIFY_LOCATION_MODE_VALUE}" "${SHOPIFY_ACTIVE_LOCATION_ID_VALUE}"
+}
+
 run_shopify_connect() {
   local shop_domain
   local output_path
@@ -1036,6 +1170,8 @@ main() {
   if [[ "${MODE}" == "complete" ]]; then
     ui_progress 84 "Shopify-Verbindung wird gestartet..."
     run_shopify_connect
+    ui_progress 88 "Shopify-Location wird konfiguriert..."
+    prompt_shopify_location_settings
   elif [[ "${MODE}" == "workstation" ]]; then
     ui_message "Arbeitsplatzmodus" "Die lokale Shopify-Autorisierung wird uebersprungen. Es wird davon ausgegangen, dass ein vorhandener shopify-sync bereits dieselbe PostgreSQL-Datenbank bedient."
   fi

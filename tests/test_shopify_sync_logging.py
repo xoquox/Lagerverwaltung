@@ -186,6 +186,70 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(fulfillments[0]["id"], "f1")
         self.assertEqual(tracking_rows[0]["number"], "123")
 
+    def test_iter_fulfillment_orders_accepts_nodes_shape(self):
+        order = {
+            "fulfillmentOrders": {
+                "nodes": [
+                    {"id": "fo1"},
+                    {"id": "fo2"},
+                    "bad",
+                ]
+            }
+        }
+
+        rows = self.shopify_sync._iter_fulfillment_orders(order)
+
+        self.assertEqual([row["id"] for row in rows], ["fo1", "fo2"])
+
+    def test_build_fulfillment_order_records_extracts_location_and_line_items(self):
+        order = {
+            "id": "gid://shopify/Order/1",
+            "fulfillmentOrders": {
+                "nodes": [
+                    {
+                        "id": "gid://shopify/FulfillmentOrder/10",
+                        "status": "OPEN",
+                        "requestStatus": "UNSUBMITTED",
+                        "assignedLocation": {
+                            "location": {
+                                "id": "gid://shopify/Location/100",
+                                "name": "Werkstatt",
+                                "fulfillsOnlineOrders": True,
+                                "isActive": True,
+                            }
+                        },
+                        "lineItems": {
+                            "nodes": [
+                                {
+                                    "id": "gid://shopify/FulfillmentOrderLineItem/55",
+                                    "sku": "ABC-1",
+                                    "productTitle": "Artikel A",
+                                    "remainingQuantity": 2,
+                                    "totalQuantity": 5,
+                                    "lineItem": {
+                                        "id": "gid://shopify/LineItem/9",
+                                        "name": "Artikel A",
+                                        "sku": "ABC-1",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+        }
+
+        orders_payload, items_payload = self.shopify_sync._build_fulfillment_order_records(order)
+
+        self.assertEqual(len(orders_payload), 1)
+        self.assertEqual(orders_payload[0]["assigned_location_id"], "gid://shopify/Location/100")
+        self.assertEqual(orders_payload[0]["assigned_location_name"], "Werkstatt")
+        self.assertEqual(len(items_payload), 1)
+        self.assertEqual(items_payload[0]["order_line_item_id"], "gid://shopify/LineItem/9")
+        self.assertEqual(items_payload[0]["sku"], "ABC-1")
+        self.assertEqual(items_payload[0]["quantity"], 5)
+        self.assertEqual(items_payload[0]["remaining_quantity"], 2)
+
     def test_main_prints_version_for_flag(self):
         with mock.patch.object(self.shopify_sync.argparse.ArgumentParser, "parse_args", return_value=types.SimpleNamespace(version=True, command=None)):
             with mock.patch("builtins.print") as print_mock:
@@ -202,6 +266,45 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         payload = json.loads(print_mock.call_args.args[0])
         self.assertEqual(payload["service"], "shopify-sync")
         self.assertEqual(payload["version"], self.shopify_sync.SYNC_VERSION)
+
+    def test_format_locations_text_renders_name_id_and_status(self):
+        text = self.shopify_sync.format_locations_text(
+            [
+                {
+                    "location_id": "gid://shopify/Location/100",
+                    "location_name": "Werkstatt",
+                    "fulfills_online_orders": True,
+                    "is_active": True,
+                },
+                {
+                    "location_id": "gid://shopify/Location/200",
+                    "location_name": "Lager Nord",
+                    "fulfills_online_orders": False,
+                    "is_active": False,
+                },
+            ]
+        )
+
+        self.assertIn("1. Werkstatt [gid://shopify/Location/100] (active, online)", text)
+        self.assertIn("2. Lager Nord [gid://shopify/Location/200] (inactive)", text)
+
+    def test_main_prints_location_payload_for_subcommand(self):
+        args = types.SimpleNamespace(version=False, command="list-locations", json=True)
+        locations = [
+            {
+                "location_id": "gid://shopify/Location/100",
+                "location_name": "Werkstatt",
+                "fulfills_online_orders": True,
+                "is_active": True,
+            }
+        ]
+        with mock.patch.object(self.shopify_sync.argparse.ArgumentParser, "parse_args", return_value=args):
+            with mock.patch.object(self.shopify_sync, "build_locations_payload", return_value=locations):
+                with mock.patch("builtins.print") as print_mock:
+                    self.shopify_sync.main()
+
+        payload = json.loads(print_mock.call_args.args[0])
+        self.assertEqual(payload["locations"][0]["location_name"], "Werkstatt")
 
     def test_sync_customers_truncates_and_inserts_default_address(self):
         executed = []

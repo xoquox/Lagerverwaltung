@@ -797,6 +797,43 @@ def get_shopify_locations():
         time.sleep(0.5)
 
 
+def build_locations_payload():
+    rows = []
+    for entry in get_shopify_locations():
+        location_id = (entry.get("location_id") or "").strip()
+        rows.append(
+            {
+                "location_id": location_id,
+                "location_name": (entry.get("name") or "").strip() or location_id,
+                "fulfills_online_orders": bool(entry.get("fulfills_online_orders")),
+                "is_active": bool(entry.get("is_active", True)),
+            }
+        )
+    return rows
+
+
+def format_locations_text(locations):
+    if not locations:
+        return "Keine Shopify-Locations gefunden."
+    lines = []
+    for index, entry in enumerate(locations, start=1):
+        status_parts = []
+        if entry.get("is_active"):
+            status_parts.append("active")
+        else:
+            status_parts.append("inactive")
+        if entry.get("fulfills_online_orders"):
+            status_parts.append("online")
+        line = f"{index}. {entry.get('location_name') or '-'}"
+        location_id = (entry.get("location_id") or "").strip()
+        if location_id:
+            line += f" [{location_id}]"
+        if status_parts:
+            line += f" ({', '.join(status_parts)})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _inventory_quantities_from_entries(entries):
     quantities = {entry["name"]: entry["quantity"] for entry in entries or []}
     unavailable = (
@@ -1353,6 +1390,35 @@ def get_all_orders():
               unfulfilledQuantity
             }
           }
+          fulfillmentOrders(first: 50) {
+            nodes {
+              id
+              status
+              requestStatus
+              assignedLocation {
+                location {
+                  id
+                  name
+                  fulfillsOnlineOrders
+                  isActive
+                }
+              }
+              lineItems(first: 100) {
+                nodes {
+                  id
+                  sku
+                  productTitle
+                  remainingQuantity
+                  totalQuantity
+                  lineItem {
+                    id
+                    name
+                    sku
+                  }
+                }
+              }
+            }
+          }
           fulfillments {
             id
             status
@@ -1492,6 +1558,8 @@ def sync_orders():
 
     con = db()
     cur = con.cursor()
+    cur.execute("TRUNCATE TABLE shopify_fulfillment_order_items")
+    cur.execute("TRUNCATE TABLE shopify_fulfillment_orders")
     cur.execute("TRUNCATE TABLE shopify_order_items")
     cur.execute("TRUNCATE TABLE shopify_orders")
 
@@ -1557,6 +1625,81 @@ def sync_orders():
                     max(0, int(line_item.get("quantity") or 0) - int(line_item.get("unfulfilledQuantity") or 0)),
                 ),
             )
+        fulfillment_orders_payload, fulfillment_order_items_payload = _build_fulfillment_order_records(order)
+        for fulfillment_order in fulfillment_orders_payload:
+            location_id = fulfillment_order.get("assigned_location_id")
+            if location_id:
+                cur.execute(
+                    """
+                    INSERT INTO shopify_locations(location_id, name, fulfills_online_orders, is_active, updated_at)
+                    VALUES (%s,%s,%s,%s,NOW())
+                    ON CONFLICT (location_id)
+                    DO UPDATE SET
+                        name = EXCLUDED.name,
+                        fulfills_online_orders = EXCLUDED.fulfills_online_orders,
+                        is_active = EXCLUDED.is_active,
+                        updated_at = NOW()
+                    """,
+                    (
+                        location_id,
+                        fulfillment_order.get("assigned_location_name") or location_id,
+                        bool(fulfillment_order.get("fulfills_online_orders")),
+                        True if fulfillment_order.get("is_active") is None else bool(fulfillment_order.get("is_active")),
+                    ),
+                )
+            cur.execute(
+                """
+                INSERT INTO shopify_fulfillment_orders (
+                    fulfillment_order_id,
+                    order_id,
+                    assigned_location_id,
+                    assigned_location_name,
+                    status,
+                    request_status,
+                    updated_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,NOW())
+                """,
+                (
+                    fulfillment_order["fulfillment_order_id"],
+                    fulfillment_order["order_id"],
+                    fulfillment_order.get("assigned_location_id"),
+                    fulfillment_order.get("assigned_location_name"),
+                    fulfillment_order.get("status"),
+                    fulfillment_order.get("request_status"),
+                ),
+            )
+        for line in fulfillment_order_items_payload:
+            cur.execute(
+                """
+                INSERT INTO shopify_fulfillment_order_items (
+                    fulfillment_order_line_item_id,
+                    fulfillment_order_id,
+                    order_id,
+                    order_line_item_id,
+                    sku,
+                    title,
+                    quantity,
+                    remaining_quantity,
+                    assigned_location_id,
+                    assigned_location_name,
+                    updated_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                """,
+                (
+                    line["fulfillment_order_line_item_id"],
+                    line["fulfillment_order_id"],
+                    line["order_id"],
+                    line.get("order_line_item_id"),
+                    line.get("sku"),
+                    line.get("title"),
+                    line.get("quantity"),
+                    line.get("remaining_quantity"),
+                    line.get("assigned_location_id"),
+                    line.get("assigned_location_name"),
+                ),
+            )
         sync_order_shipments(cur, order)
 
     con.commit()
@@ -1600,6 +1743,15 @@ def _iter_fulfillments(order):
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _iter_fulfillment_orders(order):
+    rows = order.get("fulfillmentOrders") or []
+    if isinstance(rows, dict):
+        rows = rows.get("nodes") or []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def _iter_tracking_rows(fulfillment):
     rows = fulfillment.get("trackingInfo") or []
     if isinstance(rows, dict):
@@ -1607,6 +1759,63 @@ def _iter_tracking_rows(fulfillment):
     if not isinstance(rows, list):
         return []
     return [row for row in rows if isinstance(row, dict)]
+
+
+def _assigned_location_payload(fulfillment_order):
+    assigned = fulfillment_order.get("assignedLocation") or {}
+    location = assigned.get("location") or {}
+    location_id = (location.get("id") or "").strip() or None
+    location_name = (location.get("name") or "").strip() or location_id or ""
+    return {
+        "location_id": location_id,
+        "location_name": location_name,
+        "fulfills_online_orders": bool(location.get("fulfillsOnlineOrders")),
+        "is_active": True if location.get("isActive") is None else bool(location.get("isActive")),
+    }
+
+
+def _build_fulfillment_order_records(order):
+    orders_payload = []
+    items_payload = []
+    for fulfillment_order in _iter_fulfillment_orders(order):
+        fulfillment_order_id = (fulfillment_order.get("id") or "").strip()
+        if not fulfillment_order_id:
+            continue
+        location = _assigned_location_payload(fulfillment_order)
+        orders_payload.append(
+            {
+                "fulfillment_order_id": fulfillment_order_id,
+                "order_id": order["id"],
+                "assigned_location_id": location["location_id"],
+                "assigned_location_name": location["location_name"],
+                "status": (fulfillment_order.get("status") or "").strip(),
+                "request_status": (fulfillment_order.get("requestStatus") or "").strip(),
+                "fulfills_online_orders": location["fulfills_online_orders"],
+                "is_active": location["is_active"],
+            }
+        )
+        for line in (fulfillment_order.get("lineItems") or {}).get("nodes") or []:
+            if not isinstance(line, dict):
+                continue
+            fulfillment_order_line_item_id = (line.get("id") or "").strip()
+            if not fulfillment_order_line_item_id:
+                continue
+            line_item = line.get("lineItem") or {}
+            items_payload.append(
+                {
+                    "fulfillment_order_line_item_id": fulfillment_order_line_item_id,
+                    "fulfillment_order_id": fulfillment_order_id,
+                    "order_id": order["id"],
+                    "order_line_item_id": (line_item.get("id") or "").strip() or None,
+                    "sku": (line.get("sku") or line_item.get("sku") or "").strip() or None,
+                    "title": (line_item.get("name") or line.get("productTitle") or "-").strip() or "-",
+                    "quantity": int(line.get("totalQuantity") or 0),
+                    "remaining_quantity": int(line.get("remainingQuantity") or 0),
+                    "assigned_location_id": location["location_id"],
+                    "assigned_location_name": location["location_name"],
+                }
+            )
+    return orders_payload, items_payload
 
 
 def upsert_shopify_shipment(cur, order, fulfillment, tracking):
@@ -1920,6 +2129,8 @@ def main():
     fulfill_cmd.add_argument("--tracking-number", required=True, help="Trackingnummer")
     fulfill_cmd.add_argument("--company", required=True, help="Versanddienstleister")
     fulfill_cmd.add_argument("--notify-customer", action="store_true", help="Kundenbenachrichtigung aktivieren")
+    locations_cmd = sub.add_parser("list-locations", help="Shopify-Locations auflisten")
+    locations_cmd.add_argument("--json", action="store_true", help="Locations als JSON ausgeben")
     version_cmd = sub.add_parser("version", help="Shopify-Sync-Version ausgeben")
     version_cmd.add_argument("--json", action="store_true", help="Version als JSON ausgeben")
 
@@ -1951,6 +2162,13 @@ def main():
             notify_customer=args.notify_customer,
         )
         print(json.dumps(result, ensure_ascii=False))
+        return
+    if args.command == "list-locations":
+        locations = build_locations_payload()
+        if args.json:
+            print(json.dumps({"locations": locations}, ensure_ascii=False))
+        else:
+            print(format_locations_text(locations))
         return
 
     run_sync_loop()
