@@ -23,6 +23,7 @@ AUTOCOMMIT_LEVEL = getattr(
 def connect_from_settings(settings):
     return psycopg2.connect(
         host=settings["db_host"],
+        port=int(settings.get("db_port", 5432)),
         database=settings["db_name"],
         user=settings["db_user"],
         password=settings["db_pass"],
@@ -48,6 +49,7 @@ def ensure_database_exists(settings):
         try:
             con = psycopg2.connect(
                 host=settings["db_host"],
+                port=int(settings.get("db_port", 5432)),
                 database=maintenance_name,
                 user=settings["db_user"],
                 password=settings["db_pass"],
