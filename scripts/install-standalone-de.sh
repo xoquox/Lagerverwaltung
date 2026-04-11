@@ -370,12 +370,25 @@ ui_menu() {
   local title="$1"
   local prompt="$2"
   shift 2
+  local rc=0
   case "${UI_BACKEND}" in
     dialog)
-      dialog --stdout --backtitle "Lager-MC Installer" --title "${title}" --menu "${prompt}" 20 90 10 "$@"
+      local result=""
+      result="$(dialog --stdout --backtitle "Lager-MC Installer" --title "${title}" --menu "${prompt}" 20 90 10 "$@")" || rc=$?
+      if (( rc != 0 )); then
+        printf '\n'
+        return 1
+      fi
+      printf '%s\n' "${result}"
       ;;
     whiptail)
-      whiptail --stdout --backtitle "Lager-MC Installer" --title "${title}" --menu "${prompt}" 20 90 10 "$@"
+      local result=""
+      result="$(whiptail --stdout --backtitle "Lager-MC Installer" --title "${title}" --menu "${prompt}" 20 90 10 "$@")" || rc=$?
+      if (( rc != 0 )); then
+        printf '\n'
+        return 1
+      fi
+      printf '%s\n' "${result}"
       ;;
     *)
       local options=("$@")
@@ -390,7 +403,10 @@ ui_menu() {
       local selection
       while true; do
         printf 'Auswahl: '
-        read -r selection
+        read -r selection || return 1
+        if [[ -z "${selection}" ]]; then
+          return 1
+        fi
         if [[ "${selection}" =~ ^[0-9]+$ ]] && [[ ${selection} -ge 1 ]] && [[ ${selection} -le ${count} ]]; then
           local chosen_offset=$(( (selection - 1) * 2 ))
           printf '%s\n' "${options[${chosen_offset}]}"
@@ -943,69 +959,69 @@ load_shopify_locations_json() {
 }
 
 select_shopify_location_mode() {
-  SHOPIFY_LOCATION_MODE_VALUE="$(
+  if ! SHOPIFY_LOCATION_MODE_VALUE="$(
     ui_menu \
       "Shopify-Location" \
       "Bitte den Betriebsmodus fuer diese Lager-MC-Installation waehlen." \
       "single" "Nur eine Shopify-Location an diesem Arbeitsplatz verwenden" \
       "multi" "Zwischen mehreren Shopify-Locations in Lager-MC umschalten"
-  )"
+  )"; then
+    die "Kein Shopify-Location-Modus gewaehlt."
+  fi
   [[ -n "${SHOPIFY_LOCATION_MODE_VALUE}" ]] || die "Kein Shopify-Location-Modus gewaehlt."
 }
 
 select_shopify_location_from_json() {
   local json_path="$1"
-  local options_path
   local default_location_id
-  local selected_location
-  options_path="$(mktemp "${TMPDIR:-/tmp}/lager-mc-location-options-XXXXXX.tsv")"
+  local selected_index=""
+  local selected_location=""
+  local location_count=0
+  local menu_args=()
   local parser_script
-  parser_script="$(mktemp "${TMPDIR:-/tmp}/lager-mc-location-options-XXXXXX.py")"
+  parser_script="$(mktemp "${TMPDIR:-/tmp}/lager-mc-location-menu-XXXXXX.py")"
   cat > "${parser_script}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-rows = data.get("locations") or []
+rows = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("locations") or []
+index = 1
 for row in rows:
     location_id = str(row.get("location_id") or "").strip()
     if not location_id:
         continue
     name = str(row.get("location_name") or location_id).strip() or location_id
-    flags = []
-    if row.get("is_active"):
-        flags.append("aktiv")
-    else:
-        flags.append("inaktiv")
+    flags = ["aktiv" if row.get("is_active") else "inaktiv"]
     if row.get("fulfills_online_orders"):
         flags.append("online")
-    print(location_id)
-    print(f"{name} ({', '.join(flags)})")
+    print(f"{index}\t{location_id}\t{name} ({', '.join(flags)})")
+    index += 1
 PY
-  run_logged python3 "${parser_script}" "${json_path}" > "${options_path}"
+  while IFS=$'\t' read -r idx location_id label; do
+    [[ -n "${idx}" && -n "${location_id}" ]] || continue
+    if [[ -z "${default_location_id:-}" ]]; then
+      default_location_id="${location_id}"
+    fi
+    menu_args+=("${idx}" "${label}")
+    printf -v "SHOPIFY_LOCATION_ID_${idx}" '%s' "${location_id}"
+    location_count=$((location_count + 1))
+  done < <(python3 "${parser_script}" "${json_path}")
   rm -f "${parser_script}"
-  if [[ ! -s "${options_path}" ]]; then
-    rm -f "${options_path}"
+  if (( location_count == 0 )); then
     die "Es wurden keine Shopify-Locations gefunden."
   fi
-  default_location_id="$(
-    python3 -c 'import json,sys; from pathlib import Path; rows=(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("locations") or []); print((rows[0].get("location_id") or "").strip() if rows else "")' \
-      "${json_path}"
-  )"
-
-  local menu_args=()
-  while IFS= read -r line_id && IFS= read -r line_label; do
-    menu_args+=("${line_id}" "${line_label}")
-  done < "${options_path}"
-  rm -f "${options_path}"
-
-  selected_location="$(
+  if ! selected_index="$(
     ui_menu \
       "Shopify-Location" \
       "Bitte die Shopify-Location fuer diese Lager-MC-Installation waehlen." \
       "${menu_args[@]}"
-  )"
+  )"; then
+    selected_index="1"
+  fi
+  [[ -n "${selected_index}" ]] || selected_index="1"
+  local id_var="SHOPIFY_LOCATION_ID_${selected_index}"
+  selected_location="${!id_var:-}"
   if [[ -z "${selected_location}" ]]; then
     selected_location="${default_location_id}"
   fi

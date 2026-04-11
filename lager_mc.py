@@ -1647,6 +1647,10 @@ def _shipping_format_field_map():
     return _shipping_carrier_field_to_code("format")
 
 
+def _shipping_scale_field_map():
+    return _shipping_carrier_field_to_code("scale")
+
+
 def _shipping_template_field_map():
     return _shipping_carrier_field_to_code("template")
 
@@ -2856,6 +2860,27 @@ def _normalize_shipping_label_format(value):
     return raw
 
 
+def _normalize_scale_mode(value):
+    normalized = (value or "").strip().lower()
+    if normalized in {"fit", "none"}:
+        return normalized
+    return "none"
+
+
+def _normalize_duplex_mode(value):
+    normalized = (value or "").strip().lower()
+    if normalized in {"off", "long", "short"}:
+        return normalized
+    return "off"
+
+
+def _normalize_color_mode(value):
+    normalized = (value or "").strip().lower()
+    if normalized in {"color", "grayscale"}:
+        return normalized
+    return "color"
+
+
 def _shipping_printer_for_carrier(carrier):
     c = (carrier or "").strip().lower()
     printer_field = _shipping_carrier_setting_field(c, "printer")
@@ -2871,6 +2896,14 @@ def _shipping_format_for_carrier(carrier):
     specific = SETTINGS.get(format_field) if format_field else None
     fallback = SETTINGS.get("shipping_label_format", defaults.get(c, "A6"))
     return _normalize_shipping_label_format(specific or fallback or defaults.get(c, "A6"))
+
+
+def _shipping_scale_mode_for_carrier(carrier):
+    c = (carrier or "").strip().lower()
+    scale_field = _shipping_carrier_setting_field(c, "scale")
+    specific = SETTINGS.get(scale_field) if scale_field else None
+    fallback = SETTINGS.get("shipping_label_scale_mode", DEFAULT_SETTINGS.get("shipping_label_scale_mode", "none"))
+    return _normalize_scale_mode(specific or fallback)
 
 
 def _delivery_note_format():
@@ -2890,27 +2923,54 @@ def _cups_media_value_for_format(label_format):
     return (label_format or "").strip() or None
 
 
-def _cups_label_print_options(label_format):
+def _cups_print_options(label_format, *, scale_mode="none", duplex_mode="off", color_mode=None):
     media = _cups_media_value_for_format(label_format)
     options = []
     if media:
         options.extend(["-o", f"media={media}"])
         options.extend(["-o", f"PageSize={media}"])
-    options.extend(
-        [
-            "-o",
-            "print-scaling=none",
-            "-o",
-            "fit-to-page=false",
-            "-o",
-            "scaling=100",
-            "-o",
-            "page-border=none",
-            "-o",
-            "number-up=1",
-        ]
-    )
+    if _normalize_scale_mode(scale_mode) == "fit":
+        options.extend(["-o", "print-scaling=fit", "-o", "fit-to-page=true"])
+    else:
+        options.extend(["-o", "print-scaling=none", "-o", "fit-to-page=false", "-o", "scaling=100"])
+    normalized_duplex = _normalize_duplex_mode(duplex_mode)
+    if normalized_duplex == "long":
+        options.extend(["-o", "sides=two-sided-long-edge"])
+    elif normalized_duplex == "short":
+        options.extend(["-o", "sides=two-sided-short-edge"])
+    else:
+        options.extend(["-o", "sides=one-sided"])
+    normalized_color = (color_mode or "").strip().lower()
+    if normalized_color == "grayscale":
+        options.extend(["-o", "print-color-mode=monochrome", "-o", "ColorModel=Gray"])
+    elif normalized_color == "color":
+        options.extend(["-o", "print-color-mode=color"])
+    options.extend(["-o", "page-border=none", "-o", "number-up=1"])
     return options
+
+
+def _cups_label_print_options(label_format, *, carrier=None):
+    return _cups_print_options(
+        label_format,
+        scale_mode=_shipping_scale_mode_for_carrier(carrier),
+        duplex_mode="off",
+        color_mode=None,
+    )
+
+
+def _cups_delivery_note_print_options(label_format):
+    return _cups_print_options(
+        label_format,
+        scale_mode=_normalize_scale_mode(
+            SETTINGS.get("delivery_note_scale_mode", DEFAULT_SETTINGS.get("delivery_note_scale_mode", "none"))
+        ),
+        duplex_mode=_normalize_duplex_mode(
+            SETTINGS.get("delivery_note_duplex", DEFAULT_SETTINGS.get("delivery_note_duplex", "off"))
+        ),
+        color_mode=_normalize_color_mode(
+            SETTINGS.get("delivery_note_color_mode", DEFAULT_SETTINGS.get("delivery_note_color_mode", "color"))
+        ),
+    )
 
 
 def _short_print_output(value, limit=220):
@@ -2918,6 +2978,22 @@ def _short_print_output(value, limit=220):
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)] + "..."
+
+
+def _print_test_summary_line(context):
+    parts = []
+    printer = (context.get("printer") or "").strip() or "-"
+    page_size = (context.get("page_size") or "").strip() or "-"
+    parts.append(t("print_test_line_printer", value=printer))
+    parts.append(t("print_test_line_format", value=page_size))
+    for line in context.get("lines") or []:
+        text = str(line or "").strip()
+        if not text:
+            continue
+        if text in parts:
+            continue
+        parts.append(text)
+    return " | ".join(parts)
 
 
 def _build_simple_test_page_pdf(title, lines=None, page_size="A4"):
@@ -3042,7 +3118,7 @@ def _print_pdf_via_lp(stdscr, pdf_path, title, carrier=None):
         return False
     label_format = _shipping_format_for_carrier(carrier_key)
     cmd = ["lp", "-d", printer, "-t", title]
-    cmd.extend(_cups_label_print_options(label_format))
+    cmd.extend(_cups_label_print_options(label_format, carrier=carrier_key))
     cmd.append(pdf_path)
     try:
         _run_lp_command(
@@ -5547,6 +5623,9 @@ def _shipping_printer_tab_fields():
         ("picklist_printer", "field_picklist_printer"),
         ("delivery_note_printer", "field_delivery_printer"),
         ("delivery_note_format", "field_delivery_format"),
+        ("delivery_note_scale_mode", "field_delivery_scale_mode"),
+        ("delivery_note_duplex", "field_delivery_duplex"),
+        ("delivery_note_color_mode", "field_delivery_color_mode"),
     ]
     for code in _configurable_shipping_carrier_codes():
         definition = _shipping_carrier_definition(code)
@@ -5571,6 +5650,10 @@ def _shipping_settings_tab_fields():
         format_label_key = definition.get("format_field_label_key")
         if format_field and format_label_key:
             fields.append((format_field, format_label_key))
+        scale_field = definition.get("scale_field")
+        scale_label_key = definition.get("scale_field_label_key")
+        if scale_field and scale_label_key:
+            fields.append((scale_field, scale_label_key))
         template_field = definition.get("template_field")
         template_label_key = definition.get("template_field_label_key")
         if template_field and template_label_key:
@@ -5612,6 +5695,11 @@ def _shipping_settings_initial_values():
             values[format_field] = _normalize_shipping_label_format(
                 SETTINGS.get(format_field, definition.get("default_format", "A6"))
             )
+        scale_field = definition.get("scale_field")
+        if scale_field:
+            values[scale_field] = _normalize_scale_mode(
+                SETTINGS.get(scale_field, SETTINGS.get("shipping_label_scale_mode", "none"))
+            )
         tracking_mode_field = definition.get("tracking_mode_field")
         if tracking_mode_field:
             values[tracking_mode_field] = (
@@ -5631,7 +5719,7 @@ def _shipping_settings_initial_values():
     return values
 
 
-def _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields):
+def _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields, shipping_scale_fields):
     if active_name == "picklist_printer":
         printer = (values.get("picklist_printer") or "").strip()
         return {
@@ -5644,9 +5732,12 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
                 t("print_test_line_time", value=f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}"),
             ],
         }
-    if active_name in {"delivery_note_printer", "delivery_note_format"}:
+    if active_name in {"delivery_note_printer", "delivery_note_format", "delivery_note_scale_mode", "delivery_note_duplex", "delivery_note_color_mode"}:
         printer = (values.get("delivery_note_printer") or "").strip()
         page_size = _normalize_shipping_label_format(values.get("delivery_note_format", "A4"))
+        scale_mode = _normalize_scale_mode(values.get("delivery_note_scale_mode", "none"))
+        duplex_mode = _normalize_duplex_mode(values.get("delivery_note_duplex", "off"))
+        color_mode = _normalize_color_mode(values.get("delivery_note_color_mode", "color"))
         return {
             "printer": printer,
             "page_size": page_size,
@@ -5654,12 +5745,16 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_format", value=page_size),
+                t("print_test_line_scale_mode", value=t(f"print_scale_mode_{scale_mode}")),
+                t("print_test_line_duplex", value=t(f"delivery_note_duplex_{duplex_mode}")),
+                t("print_test_line_color_mode", value=t(f"delivery_note_color_mode_{color_mode}")),
                 t("print_test_line_type", value=t("print_test_type_delivery_note")),
             ],
         }
     if active_name == "shipping_label_printer":
         printer = (values.get("shipping_label_printer") or "").strip()
         page_size = _normalize_shipping_label_format(values.get("shipping_label_format", "A6"))
+        scale_mode = _normalize_scale_mode(values.get("shipping_label_scale_mode", "none"))
         return {
             "printer": printer,
             "page_size": page_size,
@@ -5667,19 +5762,26 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_format", value=page_size),
+                t("print_test_line_scale_mode", value=t(f"print_scale_mode_{scale_mode}")),
                 t("print_test_line_type", value=t("print_test_type_shipping_label_fallback")),
             ],
         }
-    if active_name in {"shipping_label_format", *shipping_printer_fields.keys(), *shipping_format_fields.keys()}:
-        carrier_code = shipping_printer_fields.get(active_name) or shipping_format_fields.get(active_name)
+    if active_name in {"shipping_label_format", *shipping_printer_fields.keys(), *shipping_format_fields.keys(), *shipping_scale_fields.keys()}:
+        carrier_code = (
+            shipping_printer_fields.get(active_name)
+            or shipping_format_fields.get(active_name)
+            or shipping_scale_fields.get(active_name)
+        )
         if not carrier_code:
             return None
         printer_field = _shipping_carrier_setting_field(carrier_code, "printer")
         format_field = _shipping_carrier_setting_field(carrier_code, "format")
+        scale_field = _shipping_carrier_setting_field(carrier_code, "scale")
         printer = (values.get(printer_field) or values.get("shipping_label_printer") or "").strip()
         page_size = _normalize_shipping_label_format(
             values.get(format_field) or values.get("shipping_label_format") or "A6"
         )
+        scale_mode = _normalize_scale_mode(values.get(scale_field) or values.get("shipping_label_scale_mode", "none"))
         return {
             "printer": printer,
             "page_size": page_size,
@@ -5687,13 +5789,23 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_format", value=page_size),
+                t("print_test_line_scale_mode", value=t(f"print_scale_mode_{scale_mode}")),
                 t("print_test_line_type", value=_shipping_carrier_label(carrier_code)),
             ],
         }
     return None
 
 
-def _settings_context_select(stdscr, active_name, values, shipping_printer_fields, shipping_format_fields, shipping_template_fields, shipping_tracking_mode_fields):
+def _settings_context_select(
+    stdscr,
+    active_name,
+    values,
+    shipping_printer_fields,
+    shipping_format_fields,
+    shipping_scale_fields,
+    shipping_template_fields,
+    shipping_tracking_mode_fields,
+):
     if active_name == "language":
         values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
     elif active_name == "shopify_location_mode":
@@ -5755,6 +5867,57 @@ def _settings_context_select(stdscr, active_name, values, shipping_printer_field
             values.get("delivery_note_printer", ""),
             values[active_name],
             f"{t('delivery_note_title')} {t('formats_title')}",
+        )
+    elif active_name == "shipping_label_scale_mode":
+        values[active_name] = choice_dialog(
+            stdscr,
+            t("pick_print_scale_mode"),
+            [
+                {"value": "none", "label": t("print_scale_mode_none")},
+                {"value": "fit", "label": t("print_scale_mode_fit")},
+            ],
+            _normalize_scale_mode(values.get(active_name, "none")),
+        )
+    elif active_name in shipping_scale_fields:
+        values[active_name] = choice_dialog(
+            stdscr,
+            t("pick_print_scale_mode"),
+            [
+                {"value": "none", "label": t("print_scale_mode_none")},
+                {"value": "fit", "label": t("print_scale_mode_fit")},
+            ],
+            _normalize_scale_mode(values.get(active_name, "none")),
+        )
+    elif active_name == "delivery_note_scale_mode":
+        values[active_name] = choice_dialog(
+            stdscr,
+            t("pick_print_scale_mode"),
+            [
+                {"value": "none", "label": t("print_scale_mode_none")},
+                {"value": "fit", "label": t("print_scale_mode_fit")},
+            ],
+            _normalize_scale_mode(values.get(active_name, "none")),
+        )
+    elif active_name == "delivery_note_duplex":
+        values[active_name] = choice_dialog(
+            stdscr,
+            t("pick_delivery_note_duplex"),
+            [
+                {"value": "off", "label": t("delivery_note_duplex_off")},
+                {"value": "long", "label": t("delivery_note_duplex_long")},
+                {"value": "short", "label": t("delivery_note_duplex_short")},
+            ],
+            _normalize_duplex_mode(values.get(active_name, "off")),
+        )
+    elif active_name == "delivery_note_color_mode":
+        values[active_name] = choice_dialog(
+            stdscr,
+            t("pick_delivery_note_color_mode"),
+            [
+                {"value": "color", "label": t("delivery_note_color_mode_color")},
+                {"value": "grayscale", "label": t("delivery_note_color_mode_grayscale")},
+            ],
+            _normalize_color_mode(values.get(active_name, "color")),
         )
     elif active_name in {"pdf_output_dir", "shipping_label_output_dir"}:
         values[active_name] = directory_dialog(stdscr, values.get(active_name, ""), t("directory_choose_title"))
@@ -5818,6 +5981,7 @@ def settings_dialog(stdscr):
 
     shipping_printer_fields = _shipping_printer_field_map()
     shipping_format_fields = _shipping_format_field_map()
+    shipping_scale_fields = _shipping_scale_field_map()
     shipping_template_fields = _shipping_template_field_map()
     shipping_tracking_mode_fields = _shipping_tracking_mode_field_map()
 
@@ -5845,6 +6009,15 @@ def settings_dialog(stdscr):
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
         "delivery_note_format": _normalize_shipping_label_format(
             SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))
+        ),
+        "delivery_note_scale_mode": _normalize_scale_mode(
+            SETTINGS.get("delivery_note_scale_mode", DEFAULT_SETTINGS.get("delivery_note_scale_mode", "none"))
+        ),
+        "delivery_note_duplex": _normalize_duplex_mode(
+            SETTINGS.get("delivery_note_duplex", DEFAULT_SETTINGS.get("delivery_note_duplex", "off"))
+        ),
+        "delivery_note_color_mode": _normalize_color_mode(
+            SETTINGS.get("delivery_note_color_mode", DEFAULT_SETTINGS.get("delivery_note_color_mode", "color"))
         ),
         "pdf_output_dir": SETTINGS["pdf_output_dir"],
         "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
@@ -6081,7 +6254,17 @@ def settings_dialog(stdscr):
         if not active_name:
             continue
 
-        if active_name in {"shipping_services_display", "shipping_active_carriers_display", "shopify_active_location_display", "shopify_location_mode"}:
+        if active_name in {
+            "shipping_services_display",
+            "shipping_active_carriers_display",
+            "shopify_active_location_display",
+            "shopify_location_mode",
+            "shipping_label_scale_mode",
+            "delivery_note_scale_mode",
+            "delivery_note_duplex",
+            "delivery_note_color_mode",
+            *shipping_scale_fields.keys(),
+        }:
             if key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_HOME, curses.KEY_END, curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b', curses.KEY_DC):
                 continue
 
@@ -6118,6 +6301,7 @@ def settings_dialog(stdscr):
                 values,
                 shipping_printer_fields,
                 shipping_format_fields,
+                shipping_scale_fields,
                 shipping_template_fields,
                 shipping_tracking_mode_fields,
             )
@@ -6125,9 +6309,23 @@ def settings_dialog(stdscr):
             continue
 
         if key == curses.KEY_F7:
-            context = _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields)
+            context = _settings_print_test_context(
+                active_name,
+                values,
+                shipping_printer_fields,
+                shipping_format_fields,
+                shipping_scale_fields,
+            )
             if context is None:
                 message_box(stdscr, t("printer_test_title"), t("test_page_unavailable"))
+                continue
+            summary = _fit(_print_test_summary_line(context), 36)
+            if not confirm_box(
+                stdscr,
+                t("printer_test_title"),
+                t("print_test_confirm", summary=summary),
+                default_yes=True,
+            ):
                 continue
             _print_test_page_to_printer(
                 stdscr,
@@ -6146,6 +6344,7 @@ def settings_dialog(stdscr):
                 values,
                 shipping_printer_fields,
                 shipping_format_fields,
+                shipping_scale_fields,
                 shipping_template_fields,
                 shipping_tracking_mode_fields,
             )
@@ -6154,11 +6353,16 @@ def settings_dialog(stdscr):
                 "shopify_location_mode",
                 "color_theme",
                 "delivery_note_format",
+                "shipping_label_scale_mode",
+                "delivery_note_scale_mode",
+                "delivery_note_duplex",
+                "delivery_note_color_mode",
                 "shipping_services_display",
                 "shipping_active_carriers_display",
                 "shopify_active_location_display",
                 *shipping_printer_fields.keys(),
                 *shipping_format_fields.keys(),
+                *shipping_scale_fields.keys(),
                 *shipping_template_fields.keys(),
                 *shipping_tracking_mode_fields.keys(),
                 "picklist_printer",
@@ -6178,7 +6382,17 @@ def settings_dialog(stdscr):
             continue
 
         if isinstance(key, str) and key.isprintable():
-            if active_name in {"shipping_services_display", "shipping_active_carriers_display", "shopify_active_location_display", "shopify_location_mode"}:
+            if active_name in {
+                "shipping_services_display",
+                "shipping_active_carriers_display",
+                "shopify_active_location_display",
+                "shopify_location_mode",
+                "shipping_label_scale_mode",
+                "delivery_note_scale_mode",
+                "delivery_note_duplex",
+                "delivery_note_color_mode",
+                *shipping_scale_fields.keys(),
+            }:
                 continue
             value = str(values.get(active_name, ""))
             pos = cursor_positions[active_name]
@@ -6207,6 +6421,9 @@ def settings_dialog(stdscr):
         "picklist_printer": values["picklist_printer"].strip(),
         "delivery_note_printer": values["delivery_note_printer"].strip(),
         "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
+        "delivery_note_scale_mode": _normalize_scale_mode(values.get("delivery_note_scale_mode", "none")),
+        "delivery_note_duplex": _normalize_duplex_mode(values.get("delivery_note_duplex", "off")),
+        "delivery_note_color_mode": _normalize_color_mode(values.get("delivery_note_color_mode", "color")),
         "shipping_active_carriers": _normalize_active_shipping_carriers(
             values.get("shipping_active_carriers", []),
             fallback_to_defaults=False,
@@ -6214,6 +6431,7 @@ def settings_dialog(stdscr):
         "shipping_label_printer": values["shipping_label_printer"].strip(),
         "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
+        "shipping_label_scale_mode": _normalize_scale_mode(values.get("shipping_label_scale_mode", "none")),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
         "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
@@ -6232,6 +6450,9 @@ def settings_dialog(stdscr):
         format_field = definition.get("format_field")
         if format_field:
             updated[format_field] = _normalize_shipping_label_format(values.get(format_field, "").strip())
+        scale_field = definition.get("scale_field")
+        if scale_field:
+            updated[scale_field] = _normalize_scale_mode(values.get(scale_field, "none"))
         tracking_mode_field = definition.get("tracking_mode_field")
         if tracking_mode_field:
             updated[tracking_mode_field] = values.get(tracking_mode_field, "").strip().lower()
@@ -6331,6 +6552,9 @@ def settings_dialog(stdscr):
         format_field = definition.get("format_field")
         if format_field and not updated.get(format_field):
             updated[format_field] = definition.get("default_format", "A6")
+        scale_field = definition.get("scale_field")
+        if scale_field and not updated.get(scale_field):
+            updated[scale_field] = "none"
     if not updated.get("shipping_label_format"):
         updated["shipping_label_format"] = "A6"
     for code in _configurable_shipping_carrier_codes():
@@ -7834,7 +8058,7 @@ def _print_delivery_note_pdf_path(order, pdf_path):
         raise RuntimeError(t("delivery_note_printer_missing"))
     queue_title = f"{t('delivery_note_title')} {order['order_name']}"
     cmd = ["lp", "-d", printer, "-t", queue_title]
-    cmd.extend(_cups_label_print_options(_delivery_note_format()))
+    cmd.extend(_cups_delivery_note_print_options(_delivery_note_format()))
     cmd.append(pdf_path)
     _run_lp_command(
         cmd,
@@ -7852,7 +8076,7 @@ def _print_merged_delivery_note_pdf(pdf_path, title=None):
         raise RuntimeError(t("delivery_note_printer_missing"))
     title = title or t("delivery_note_batch_title")
     cmd = ["lp", "-d", printer, "-t", title]
-    cmd.extend(_cups_label_print_options(_delivery_note_format()))
+    cmd.extend(_cups_delivery_note_print_options(_delivery_note_format()))
     cmd.append(pdf_path)
     _run_lp_command(
         cmd,
