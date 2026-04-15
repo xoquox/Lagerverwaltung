@@ -747,6 +747,7 @@ def db():
             dbname=SETTINGS["db_name"],
             user=SETTINGS["db_user"],
             password=SETTINGS["db_pass"],
+            connect_timeout=5,
             cursor_factory=psycopg2.extras.RealDictCursor
         )
     except psycopg2.OperationalError as exc:
@@ -958,6 +959,7 @@ def test_db_connection(settings):
         dbname=settings["db_name"],
         user=settings["db_user"],
         password=settings["db_pass"],
+        connect_timeout=5,
     )
     con.close()
 
