@@ -6,7 +6,8 @@ SCRIPT_VERSION="0.1.0"
 
 REPO_ARCHIVE_URL_DEFAULT="${LAGER_MC_ARCHIVE_URL:-https://github.com/xoquox/Lagerverwaltung/archive/refs/heads/main.tar.gz}"
 TARGET_DIR_DEFAULT="${LAGER_MC_TARGET_DIR:-${HOME}/Lagerverwaltung}"
-CONNECT_BASE_URL_DEFAULT="${SHOPIFY_CONNECT_BASE_URL:-https://sync-auth.lagerverwaltung.org}"
+SHOPIFY_APP_SCOPES_DEFAULT="${SHOPIFY_APP_SCOPES:-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_inventory,write_merchant_managed_fulfillment_orders}"
+SHOPIFY_APP_REDIRECT_URI_DEFAULT="${SHOPIFY_APP_REDIRECT_URI:-}"
 PRIVACY_URL_DEFAULT="${LAGER_MC_PRIVACY_URL:-https://lagerverwaltung.org/de/app-datenschutz.txt}"
 TERMS_URL_DEFAULT="${LAGER_MC_TERMS_URL:-https://lagerverwaltung.org/de/agb.txt}"
 DOC_URL_DEFAULT="${LAGER_MC_DOC_URL:-https://lagerverwaltung.org/doku.html}"
@@ -21,7 +22,8 @@ MODE="complete"
 MODE_SET_BY_ARG=0
 TARGET_DIR="${TARGET_DIR_DEFAULT}"
 ARCHIVE_URL="${REPO_ARCHIVE_URL_DEFAULT}"
-CONNECT_BASE_URL="${CONNECT_BASE_URL_DEFAULT}"
+SHOPIFY_APP_SCOPES="${SHOPIFY_APP_SCOPES_DEFAULT}"
+SHOPIFY_APP_REDIRECT_URI="${SHOPIFY_APP_REDIRECT_URI_DEFAULT}"
 PRIVACY_URL="${PRIVACY_URL_DEFAULT}"
 TERMS_URL="${TERMS_URL_DEFAULT}"
 DOC_URL="${DOC_URL_DEFAULT}"
@@ -61,7 +63,6 @@ Optionen:
   --mode <complete|app-only|workstation|update>
   --target <pfad>
   --archive-url <url>
-  --connect-base-url <url>
   --privacy-url <url>
   --terms-url <url>
   --doc-url <url>
@@ -86,10 +87,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --archive-url)
       ARCHIVE_URL="${2:-}"
-      shift 2
-      ;;
-    --connect-base-url)
-      CONNECT_BASE_URL="${2:-}"
       shift 2
       ;;
     --privacy-url)
@@ -941,7 +938,8 @@ configure_shopify_sync_env() {
   upsert_env_value "${sync_env}" "DB_NAME" "${DB_NAME_VALUE}"
   upsert_env_value "${sync_env}" "DB_USER" "${DB_USER_VALUE}"
   upsert_env_value "${sync_env}" "DB_PASS" "${DB_PASS_VALUE}"
-  upsert_env_value "${sync_env}" "SHOPIFY_CONNECT_BASE_URL" "${CONNECT_BASE_URL}"
+  upsert_env_value "${sync_env}" "SHOPIFY_APP_SCOPES" "${SHOPIFY_APP_SCOPES}"
+  upsert_env_value "${sync_env}" "SHOPIFY_APP_REDIRECT_URI" "${SHOPIFY_APP_REDIRECT_URI}"
 }
 
 load_shopify_locations_json() {
@@ -1050,6 +1048,10 @@ prompt_shopify_location_settings() {
 
 run_shopify_connect() {
   local shop_domain
+  local client_id
+  local client_secret
+  local scopes
+  local redirect_uri
   local output_path
   local connect_pid
   local attempts
@@ -1057,17 +1059,34 @@ run_shopify_connect() {
   local connect_mode_args=()
   shop_domain="$(ui_input "Shop-Verbindung" "Shop-Domain eingeben (z. B. beispiel.myshopify.com)." "")"
   [[ -n "${shop_domain}" ]] || die "Keine Shop-Domain angegeben."
-  if [[ "${CONNECT_BROWSER_MODE}" == "manual" ]]; then
-    connect_mode_args+=(--no-browser)
-    ui_message "Shop-Verbindung" "Die lokale Shopify-Verbindung wird jetzt vorbereitet. Der Install-Link wird im naechsten Schritt angezeigt. Bitte oeffne ihn in deinem normalen Browser, autorisiere die App und kehre danach zu diesem Installer zurueck."
-  else
-    ui_message "Shop-Verbindung" "Die lokale Shopify-Verbindung wird jetzt gestartet. Der Standardbrowser wird geoeffnet. Falls das fehlschlaegt, wird der Install-Link im naechsten Schritt angezeigt."
-  fi
+  client_id="$(ui_input "Shop-Verbindung" "Client ID der Shopify-App." "")"
+  [[ -n "${client_id}" ]] || die "Keine Client ID angegeben."
+  client_secret="$(ui_password "Shop-Verbindung" "Client Secret der Shopify-App.")"
+  [[ -n "${client_secret}" ]] || die "Kein Client Secret angegeben."
+  scopes="$(ui_input "Shop-Verbindung" "Shopify-Scopes (kommagetrennt)." "${SHOPIFY_APP_SCOPES}")"
+  [[ -n "${scopes}" ]] || die "Keine Shopify-Scopes angegeben."
+  redirect_uri="$(ui_input "Shop-Verbindung" "Redirect-URI der Shopify-App (z. B. https://install.lagerverwaltung.org/manual-oauth-callback.html)." "${SHOPIFY_APP_REDIRECT_URI}")"
+  [[ -n "${redirect_uri}" ]] || die "Keine Redirect-URI angegeben."
+  SHOPIFY_APP_SCOPES="${scopes}"
+  SHOPIFY_APP_REDIRECT_URI="${redirect_uri}"
+  local sync_env="${INSTALL_ROOT}/shopify-sync/.env"
+  upsert_env_value "${sync_env}" "SHOPIFY_APP_CLIENT_ID" "${client_id}"
+  upsert_env_value "${sync_env}" "SHOPIFY_APP_CLIENT_SECRET" "${client_secret}"
+  upsert_env_value "${sync_env}" "SHOPIFY_APP_SCOPES" "${scopes}"
+  upsert_env_value "${sync_env}" "SHOPIFY_APP_REDIRECT_URI" "${redirect_uri}"
+  connect_mode_args+=(--no-browser)
+  ui_message "Shop-Verbindung" "Die lokale Shopify-Verbindung wird jetzt vorbereitet. Der Autorisierungslink wird angezeigt und lokal auf Port 3459 empfangen."
 
   output_path="$(mktemp "${TMPDIR:-/tmp}/lager-mc-connect-XXXXXX.log")"
-  append_log_line "+ PYTHONUNBUFFERED=1 SHOPIFY_CONNECT_BASE_URL=${CONNECT_BASE_URL} ${VENV_DIR}/bin/python -u ${INSTALL_ROOT}/shopify-sync/shopify_sync.py connect --shop ${shop_domain} ${connect_mode_args[*]:-}"
-  PYTHONUNBUFFERED=1 SHOPIFY_CONNECT_BASE_URL="${CONNECT_BASE_URL}" \
-    "${VENV_DIR}/bin/python" -u "${INSTALL_ROOT}/shopify-sync/shopify_sync.py" connect --shop "${shop_domain}" "${connect_mode_args[@]}" \
+  append_log_line "+ PYTHONUNBUFFERED=1 ${VENV_DIR}/bin/python -u ${INSTALL_ROOT}/shopify-sync/shopify_sync.py manual-connect --shop ${shop_domain} --client-id [redacted] --client-secret [redacted] --scopes ${scopes} --redirect-uri ${redirect_uri} ${connect_mode_args[*]:-}"
+  PYTHONUNBUFFERED=1 \
+    "${VENV_DIR}/bin/python" -u "${INSTALL_ROOT}/shopify-sync/shopify_sync.py" manual-connect \
+    --shop "${shop_domain}" \
+    --client-id "${client_id}" \
+    --client-secret "${client_secret}" \
+    --scopes "${scopes}" \
+    --redirect-uri "${redirect_uri}" \
+    "${connect_mode_args[@]}" \
     >"${output_path}" 2>&1 &
   connect_pid=$!
 
@@ -1095,11 +1114,7 @@ run_shopify_connect() {
     die "Shopify-Verbindung konnte nicht initialisiert werden. Der Install-Link wurde nicht erzeugt."
   fi
 
-  if [[ "${CONNECT_BROWSER_MODE}" == "manual" ]]; then
-    ui_message "Shop-Verbindung" "Bitte diesen Install-Link jetzt in deinem normalen Browser oeffnen und die App autorisieren:\n\n${connect_url}\n\nNach erfolgreicher Autorisierung schreibt der lokale shopify-sync die Verbindungsdaten in die lokale Konfiguration."
-  else
-    ui_message "Shop-Verbindung" "Falls sich dein Browser nicht automatisch geoeffnet hat, oeffne bitte diesen Install-Link manuell und autorisiere die App:\n\n${connect_url}\n\nNach erfolgreicher Autorisierung schreibt der lokale shopify-sync die Verbindungsdaten in die lokale Konfiguration."
-  fi
+  ui_message "Shop-Verbindung" "Bitte diesen Autorisierungslink jetzt in deinem normalen Browser oeffnen und die App autorisieren:\n\n${connect_url}\n\nNach erfolgreicher Autorisierung schreibt der lokale shopify-sync die Verbindungsdaten in die lokale Konfiguration."
 
   if ! wait "${connect_pid}"; then
     cat "${output_path}" >> "${LOG_FILE}"

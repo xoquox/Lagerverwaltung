@@ -35,6 +35,7 @@ Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Ver
 
 - Bedienungsanleitung: [docs/bedienungsanleitung.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.md)
 - Versand-Integrationsdoku: [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md)
+- Shopify-Custom-App Installation: [docs/shopify-custom-app-installation.md](/home/chrisi/Lagerverwaltung/docs/shopify-custom-app-installation.md)
 - English README: [README.en.md](/home/chrisi/Lagerverwaltung/README.en.md)
 - English user manual: [docs/bedienungsanleitung.en.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.en.md)
 - English shipping integration notes: [docs/shipping-providers.en.md](/home/chrisi/Lagerverwaltung/docs/shipping-providers.en.md)

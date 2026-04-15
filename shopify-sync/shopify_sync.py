@@ -309,10 +309,25 @@ def _build_connect_url(shop, relay_base_url, state, return_to):
     return f"{base_url}/shopify/install?{params}"
 
 
+def _build_manual_auth_url(shop, client_id, scopes, redirect_uri, state):
+    normalized_shop = _normalize_shop_domain(shop)
+    query = urllib.parse.urlencode(
+        {
+            "client_id": (client_id or "").strip(),
+            "scope": (scopes or "").strip(),
+            "redirect_uri": (redirect_uri or "").strip(),
+            "state": state,
+        }
+    )
+    return f"https://{normalized_shop}/admin/oauth/authorize?{query}"
+
+
 def _location_gid(location_id=None):
     location_id = str(location_id if location_id is not None else SHOPIFY_LOCATION_ID or "").strip()
     if not location_id:
         raise RuntimeError("SHOPIFY_LOCATION_ID fehlt. shopify-sync/.env pruefen.")
+    if location_id.startswith("gid://"):
+        return location_id
     return f"gid://shopify/Location/{location_id}"
 
 
@@ -407,13 +422,27 @@ def _wait_for_local_oauth_callback(port, expected_state, timeout_seconds):
             else:
                 body = "Shopify-Verbindung gespeichert. Das Browserfenster kann geschlossen werden."
                 redirect_target = _build_connected_page_url(result["shop"], status="success")
+            quoted_redirect = urllib.parse.quote(redirect_target, safe=":/?&=%") if redirect_target else ""
+            refresh_meta = (
+                f'<meta http-equiv="refresh" content="2; url={quoted_redirect}">'
+                if quoted_redirect
+                else ""
+            )
+            redirect_html = (
+                (
+                    "<p class='meta'>Weiterleitung zur Statusseite ...<br>"
+                    f"<a href='{quoted_redirect}'>{quoted_redirect}</a></p>"
+                )
+                if quoted_redirect
+                else "<p class='meta'>Das Browserfenster kann jetzt geschlossen werden.</p>"
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             html_body = (
                 "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
                 "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                f"{f'<meta http-equiv=\"refresh\" content=\"2; url={urllib.parse.quote(redirect_target, safe=':/?&=%')}\\\">' if redirect_target else ''}"
+                f"{refresh_meta}"
                 "<title>Lager-MC Verbindung</title>"
                 "<style>body{margin:0;background:#f3f0e8;color:#1f1a15;font-family:Georgia,'Times New Roman',serif;display:grid;place-items:center;min-height:100vh}"
                 ".card{max-width:640px;margin:24px;padding:28px 30px;border:1px solid #d8cfc0;border-radius:24px;background:#fffdf8;box-shadow:0 20px 50px rgba(68,53,35,.12)}"
@@ -421,11 +450,7 @@ def _wait_for_local_oauth_callback(port, expected_state, timeout_seconds):
                 "a{color:#1e6a52}</style></head><body><main class='card'>"
                 "<h1>Lager-MC Verbindung</h1>"
                 f"<p class='lead'>{body}</p>"
-                + (
-                    f"<p class='meta'>Weiterleitung zur Statusseite ...<br><a href='{urllib.parse.quote(redirect_target, safe=':/?&=%')}'>{urllib.parse.quote(redirect_target, safe=':/?&=%')}</a></p>"
-                    if redirect_target
-                    else "<p class='meta'>Das Browserfenster kann jetzt geschlossen werden.</p>"
-                )
+                + redirect_html
                 + "</main></body></html>"
             )
             self.wfile.write(html_body.encode("utf-8"))
@@ -452,6 +477,97 @@ def _wait_for_local_oauth_callback(port, expected_state, timeout_seconds):
     return bundle
 
 
+def _wait_for_local_manual_oauth_callback(port, expected_state, timeout_seconds):
+    result = {"shop": None, "code": None, "state": None, "error": None}
+    done = threading.Event()
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return None
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            result["state"] = (params.get("state") or [""])[0]
+            result["shop"] = (params.get("shop") or [""])[0]
+            result["code"] = (params.get("code") or [""])[0]
+            result["error"] = (params.get("error") or [""])[0]
+
+            if parsed.path != "/callback":
+                self.send_response(404)
+                self.end_headers()
+                done.set()
+                return
+            if result["state"] != expected_state:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Ungueltiger state.")
+                result["error"] = result["error"] or "state_mismatch"
+                done.set()
+                return
+
+            if result["error"]:
+                body = "Shopify-Verbindung fehlgeschlagen. Das Browserfenster kann geschlossen werden."
+                redirect_target = _build_connected_page_url(result["shop"], status="error", error_message=result["error"])
+            else:
+                body = "Shopify-Verbindung gespeichert. Das Browserfenster kann geschlossen werden."
+                redirect_target = _build_connected_page_url(result["shop"], status="success")
+            quoted_redirect = urllib.parse.quote(redirect_target, safe=":/?&=%") if redirect_target else ""
+            refresh_meta = (
+                f'<meta http-equiv="refresh" content="2; url={quoted_redirect}">'
+                if quoted_redirect
+                else ""
+            )
+            redirect_html = (
+                (
+                    "<p class='meta'>Weiterleitung zur Statusseite ...<br>"
+                    f"<a href='{quoted_redirect}'>{quoted_redirect}</a></p>"
+                )
+                if quoted_redirect
+                else "<p class='meta'>Das Browserfenster kann jetzt geschlossen werden.</p>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            html_body = (
+                "<!doctype html><html lang='de'><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                f"{refresh_meta}"
+                "<title>Lager-MC Verbindung</title>"
+                "<style>body{margin:0;background:#f3f0e8;color:#1f1a15;font-family:Georgia,'Times New Roman',serif;display:grid;place-items:center;min-height:100vh}"
+                ".card{max-width:640px;margin:24px;padding:28px 30px;border:1px solid #d8cfc0;border-radius:24px;background:#fffdf8;box-shadow:0 20px 50px rgba(68,53,35,.12)}"
+                "h1{margin:0 0 10px;font-size:34px}.lead{margin:0;color:#6c6258;line-height:1.6}.meta{margin-top:16px;font-size:14px;color:#6c6258}"
+                "a{color:#1e6a52}</style></head><body><main class='card'>"
+                "<h1>Lager-MC Verbindung</h1>"
+                f"<p class='lead'>{body}</p>"
+                + redirect_html
+                + "</main></body></html>"
+            )
+            self.wfile.write(html_body.encode("utf-8"))
+            done.set()
+
+    server = ThreadingHTTPServer(("127.0.0.1", int(port)), CallbackHandler)
+    server.timeout = 0.5
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+    thread.start()
+    try:
+        if not done.wait(timeout=float(timeout_seconds)):
+            raise RuntimeError("Timeout beim Warten auf den Shopify-OAuth-Callback.")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    if result["error"]:
+        raise RuntimeError(f"Shopify-Verbindung fehlgeschlagen: {result['error']}")
+    if not result["shop"] or not result["code"]:
+        raise RuntimeError("Shopify-OAuth-Callback war unvollstaendig.")
+    if result["state"] != expected_state:
+        raise RuntimeError("Shopify-OAuth-Callback hatte einen ungueltigen state.")
+    return {"shop": _normalize_shop_domain(result["shop"]), "code": result["code"]}
+
+
 def run_connect_flow(shop, relay_base_url=None, port=3459, timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS, open_browser=True):
     normalized_shop = _normalize_shop_domain(shop)
     state = secrets.token_urlsafe(24)
@@ -474,6 +590,62 @@ def run_connect_flow(shop, relay_base_url=None, port=3459, timeout_seconds=DEFAU
     write_sync_env_values({"SHOP": callback_payload["shop"], **_env_updates_from_token_bundle(callback_payload)})
     _apply_token_bundle(callback_payload)
     return callback_payload
+
+
+def run_manual_connect_flow(
+    shop,
+    client_id,
+    client_secret,
+    scopes,
+    redirect_uri,
+    port=3459,
+    timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    open_browser=True,
+):
+    normalized_shop = _normalize_shop_domain(shop)
+    state = secrets.token_urlsafe(24)
+    auth_url = _build_manual_auth_url(
+        shop=normalized_shop,
+        client_id=client_id,
+        scopes=scopes,
+        redirect_uri=redirect_uri,
+        state=state,
+    )
+    print("Install-Link:")
+    print(auth_url)
+    if open_browser:
+        webbrowser.open(auth_url)
+    callback_payload = _wait_for_local_manual_oauth_callback(
+        port=port,
+        expected_state=state,
+        timeout_seconds=timeout_seconds,
+    )
+    response = requests.post(
+        f"https://{normalized_shop}/admin/oauth/access_token",
+        json={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": callback_payload["code"],
+        },
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Token-Request fehlgeschlagen status={response.status_code} body={shorten_text(response.text)}")
+    payload = response.json()
+    bundle = _token_bundle_from_payload(payload)
+    bundle["shop"] = callback_payload["shop"]
+    write_sync_env_values(
+        {
+            "SHOP": bundle["shop"],
+            "SHOPIFY_APP_CLIENT_ID": client_id,
+            "SHOPIFY_APP_CLIENT_SECRET": client_secret,
+            "SHOPIFY_APP_SCOPES": scopes,
+            "SHOPIFY_APP_REDIRECT_URI": redirect_uri,
+            **_env_updates_from_token_bundle(bundle),
+        }
+    )
+    _apply_token_bundle(bundle)
+    return bundle
 
 
 def summarize_orders(orders):
@@ -1365,7 +1537,7 @@ def sync_products():
 def get_all_orders():
     query = """
     query OrdersPage($after: String) {
-      orders(first: 50, after: $after, reverse: true, sortKey: CREATED_AT) {
+      orders(first: 20, after: $after, reverse: true, sortKey: CREATED_AT) {
         nodes {
           id
           name
@@ -1381,7 +1553,7 @@ def get_all_orders():
             country
             phone
           }
-          lineItems(first: 100) {
+          lineItems(first: 50) {
             nodes {
               id
               name
@@ -1390,7 +1562,7 @@ def get_all_orders():
               unfulfilledQuantity
             }
           }
-          fulfillmentOrders(first: 50) {
+          fulfillmentOrders(first: 20) {
             nodes {
               id
               status
@@ -1403,7 +1575,7 @@ def get_all_orders():
                   isActive
                 }
               }
-              lineItems(first: 100) {
+              lineItems(first: 50) {
                 nodes {
                   id
                   sku
@@ -1558,10 +1730,9 @@ def sync_orders():
 
     con = db()
     cur = con.cursor()
-    cur.execute("TRUNCATE TABLE shopify_fulfillment_order_items")
-    cur.execute("TRUNCATE TABLE shopify_fulfillment_orders")
-    cur.execute("TRUNCATE TABLE shopify_order_items")
-    cur.execute("TRUNCATE TABLE shopify_orders")
+    cur.execute(
+        "TRUNCATE TABLE shopify_fulfillment_order_items, shopify_fulfillment_orders, shopify_order_items, shopify_orders"
+    )
 
     for order in orders:
         shipping = order.get("shippingAddress") or {}
@@ -2124,6 +2295,15 @@ def main():
     connect_cmd.add_argument("--port", type=int, default=3459, help="Lokaler Callback-Port fuer den Browser-Redirect")
     connect_cmd.add_argument("--timeout", type=int, default=DEFAULT_CONNECT_TIMEOUT_SECONDS, help="Wartezeit fuer den OAuth-Callback in Sekunden")
     connect_cmd.add_argument("--no-browser", action="store_true", help="Browser nicht automatisch oeffnen")
+    manual_connect_cmd = sub.add_parser("manual-connect", help="Lokale Shopify-Verbindung ohne Relay einrichten")
+    manual_connect_cmd.add_argument("--shop", required=True, help="Shop-Domain, z. B. beispiel.myshopify.com")
+    manual_connect_cmd.add_argument("--client-id", required=True, help="Shopify App Client ID")
+    manual_connect_cmd.add_argument("--client-secret", required=True, help="Shopify App Client Secret")
+    manual_connect_cmd.add_argument("--scopes", required=True, help="Kommagetrennte Shopify-Scopes")
+    manual_connect_cmd.add_argument("--redirect-uri", required=True, help="Erlaubte Redirect-URI der Shopify-App")
+    manual_connect_cmd.add_argument("--port", type=int, default=3459, help="Lokaler Callback-Port fuer die Browser-Weiterleitung")
+    manual_connect_cmd.add_argument("--timeout", type=int, default=DEFAULT_CONNECT_TIMEOUT_SECONDS, help="Wartezeit fuer den OAuth-Callback in Sekunden")
+    manual_connect_cmd.add_argument("--no-browser", action="store_true", help="Browser nicht automatisch oeffnen")
     fulfill_cmd = sub.add_parser("fulfill", help="Fulfillment fuer Bestellung erzeugen")
     fulfill_cmd.add_argument("--order-id", required=True, help="Shopify Order GID")
     fulfill_cmd.add_argument("--tracking-number", required=True, help="Trackingnummer")
@@ -2148,6 +2328,19 @@ def main():
         result = run_connect_flow(
             shop=args.shop,
             relay_base_url=args.relay_base_url,
+            port=args.port,
+            timeout_seconds=args.timeout,
+            open_browser=not args.no_browser,
+        )
+        print(json.dumps({"shop": result["shop"], "connected": True}, ensure_ascii=False))
+        return
+    if args.command == "manual-connect":
+        result = run_manual_connect_flow(
+            shop=args.shop,
+            client_id=args.client_id,
+            client_secret=args.client_secret,
+            scopes=args.scopes,
+            redirect_uri=args.redirect_uri,
             port=args.port,
             timeout_seconds=args.timeout,
             open_browser=not args.no_browser,

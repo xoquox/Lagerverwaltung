@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import psycopg2
+from psycopg2 import sql
 
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
@@ -69,6 +70,47 @@ def ensure_database_exists():
     return False
 
 
+def _column_type(cur, table_name, column_name):
+    cur.execute(
+        """
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = %s
+          AND column_name = %s
+        """,
+        (table_name, column_name),
+    )
+    row = cur.fetchone()
+    return (row[0] or "").lower() if row else ""
+
+
+def apply_legacy_gid_type_fixes(cur):
+    """Altbestand: numerische Shopify-ID-Spalten auf text (GID) umstellen."""
+    targets = [
+        ("items", "shopify_product_id"),
+        ("items", "shopify_variant_id"),
+        ("items", "shopify_inventory_item_id"),
+    ]
+    changed = []
+    for table_name, column_name in targets:
+        data_type = _column_type(cur, table_name, column_name)
+        if not data_type or data_type == "text":
+            continue
+        cur.execute(
+            sql.SQL(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE text USING {}::text"
+            ).format(
+                sql.Identifier(table_name),
+                sql.Identifier(column_name),
+                sql.Identifier(column_name),
+            )
+        )
+        changed.append(f"{table_name}.{column_name}")
+    if changed:
+        print("Legacy-ID-Typfix angewendet:", ", ".join(changed))
+
+
 def main():
     load_dotenv()
     ensure_runtime_dependencies()
@@ -77,6 +119,7 @@ def main():
     cur = con.cursor()
     try:
         apply_app_schema(cur)
+        apply_legacy_gid_type_fixes(cur)
         con.commit()
         issues = collect_schema_issues(cur)
         if issues:
