@@ -1,4 +1,4 @@
-# Shopify-Custom-App Installation fuer Lager-MC
+# Shopify-Verbindung mit Lager-MC
 
 ## Voraussetzungen
 

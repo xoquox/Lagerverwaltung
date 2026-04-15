@@ -1,4 +1,4 @@
-# Shopify Custom App Installation for Lager-MC
+# Shopify connection with Lager-MC
 
 ## Requirements
 
