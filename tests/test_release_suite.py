@@ -612,11 +612,20 @@ class LagerMcLogicTests(unittest.TestCase):
                 break
 
     def test_normalize_regal_accepts_single_letter_only(self):
-        self.assertEqual(self.lager_mc.normalize_regal("A"), "A")
-        self.assertIsNone(self.lager_mc.normalize_regal(" a "))
-        self.assertEqual(self.lager_mc.normalize_regal(""), "")
-        self.assertIsNone(self.lager_mc.normalize_regal("AA"))
-        self.assertIsNone(self.lager_mc.normalize_regal("1"))
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "location_regex_regal": "^[A-Z]$",
+                "location_regex_ignore_case_regal": False,
+                "location_regex_normalize_case_regal": "none",
+            },
+            clear=False,
+        ):
+            self.assertEqual(self.lager_mc.normalize_regal("A"), "A")
+            self.assertIsNone(self.lager_mc.normalize_regal(" a "))
+            self.assertEqual(self.lager_mc.normalize_regal(""), "")
+            self.assertIsNone(self.lager_mc.normalize_regal("AA"))
+            self.assertIsNone(self.lager_mc.normalize_regal("1"))
 
     def test_translation_keys_match_across_languages(self):
         translations = self.lager_mc.TRANSLATIONS
@@ -651,12 +660,57 @@ class LagerMcLogicTests(unittest.TestCase):
             self.assertEqual(self.lager_mc.normalize_regal("A1"), "A1")
             self.assertIsNone(self.lager_mc.normalize_regal("A"))
 
+    def test_normalize_location_can_ignore_case_without_rewriting_value(self):
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "location_regex_regal": "^[A-Z0-9]{3}$",
+                "location_regex_ignore_case_regal": True,
+                "location_regex_normalize_case_regal": "none",
+            },
+            clear=False,
+        ):
+            self.assertEqual(self.lager_mc.normalize_regal("a1e"), "a1e")
+
+    def test_normalize_location_can_force_uppercase(self):
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "location_regex_regal": "^[A-Z0-9]{3}$",
+                "location_regex_ignore_case_regal": True,
+                "location_regex_normalize_case_regal": "upper",
+            },
+            clear=False,
+        ):
+            self.assertEqual(self.lager_mc.normalize_regal("a1e"), "A1E")
+
+    def test_location_field_normalizers_apply_configured_case_mode(self):
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {"location_regex_normalize_case_regal": "upper"},
+            clear=False,
+        ):
+            normalizers = self.lager_mc._location_field_normalizers()
+            self.assertEqual(normalizers["regal"]("a1e"), "A1E")
+
     def test_is_location_input_allowed_blocks_invalid_chars(self):
-        self.assertTrue(self.lager_mc.is_location_input_allowed("regal", "A"))
-        self.assertFalse(self.lager_mc.is_location_input_allowed("regal", "a"))
-        self.assertFalse(self.lager_mc.is_location_input_allowed("regal", "%"))
-        self.assertTrue(self.lager_mc.is_location_input_allowed("fach", "99"))
-        self.assertFalse(self.lager_mc.is_location_input_allowed("fach", "100"))
+        with mock.patch.dict(
+            self.lager_mc.SETTINGS,
+            {
+                "location_regex_regal": "^[A-Z]$",
+                "location_regex_ignore_case_regal": False,
+                "location_regex_normalize_case_regal": "none",
+                "location_regex_fach": "^([1-9][0-9]?)$",
+                "location_regex_ignore_case_fach": False,
+                "location_regex_normalize_case_fach": "none",
+            },
+            clear=False,
+        ):
+            self.assertTrue(self.lager_mc.is_location_input_allowed("regal", "A"))
+            self.assertFalse(self.lager_mc.is_location_input_allowed("regal", "a"))
+            self.assertFalse(self.lager_mc.is_location_input_allowed("regal", "%"))
+            self.assertTrue(self.lager_mc.is_location_input_allowed("fach", "99"))
+            self.assertFalse(self.lager_mc.is_location_input_allowed("fach", "100"))
 
     def test_build_location_rows_groups_and_sorts_locations(self):
         items = [
@@ -1161,6 +1215,8 @@ class LagerMcLogicTests(unittest.TestCase):
                 "-o",
                 "scaling=100",
                 "-o",
+                "sides=one-sided",
+                "-o",
                 "page-border=none",
                 "-o",
                 "number-up=1",
@@ -1200,6 +1256,7 @@ class LagerMcLogicTests(unittest.TestCase):
             values,
             self.lager_mc._shipping_printer_field_map(),
             self.lager_mc._shipping_format_field_map(),
+            self.lager_mc._shipping_scale_field_map(),
         )
 
         self.assertEqual(context["printer"], "GLS-Printer")
@@ -1368,12 +1425,32 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(rows[0]["available"], 6)
         self.assertTrue(rows[0]["dirty"])
 
+    def test_update_item_snapshot_quantity_updates_total_qty_when_present(self):
+        rows = [
+            {
+                "sku": "SKU-1",
+                "menge": 5,
+                "gesamt_menge": 12,
+                "unavailable": 1,
+                "committed": 2,
+                "available": 2,
+                "dirty": False,
+            },
+        ]
+
+        changed = self.lager_mc._update_item_snapshot_quantity(rows, "SKU-1", 9)
+
+        self.assertIs(changed, rows[0])
+        self.assertEqual(rows[0]["menge"], 9)
+        self.assertEqual(rows[0]["gesamt_menge"], 16)
+        self.assertEqual(rows[0]["available"], 6)
+
     def test_update_item_snapshot_quantity_returns_false_for_unknown_sku(self):
         rows = [{"sku": "SKU-1", "menge": 5, "unavailable": 0, "committed": 0, "available": 5, "dirty": False}]
 
         changed = self.lager_mc._update_item_snapshot_quantity(rows, "SKU-2", 9)
 
-        self.assertFalse(changed)
+        self.assertIsNone(changed)
 
     def test_update_item_snapshot_location_updates_row(self):
         rows = [
@@ -1393,7 +1470,7 @@ class LagerMcLogicTests(unittest.TestCase):
 
         changed = self.lager_mc._update_item_snapshot_location(rows, "SKU-2", "B", "2", "3")
 
-        self.assertFalse(changed)
+        self.assertIsNone(changed)
 
     def test_enqueue_item_write_state_merges_updates_for_same_sku(self):
         state_map = {}

@@ -3928,15 +3928,46 @@ def get_location_regex(field_name):
     return DEFAULT_SETTINGS[setting_key]
 
 
+def get_location_regex_ignore_case(field_name):
+    setting_key = f"location_regex_ignore_case_{field_name}"
+    return bool(SETTINGS.get(setting_key, DEFAULT_SETTINGS.get(setting_key, False)))
+
+
+def get_location_regex_flags(field_name):
+    flags = 0
+    if get_location_regex_ignore_case(field_name):
+        flags |= re.IGNORECASE
+    return flags
+
+
+def get_location_regex_normalize_case(field_name):
+    setting_key = f"location_regex_normalize_case_{field_name}"
+    mode = str(SETTINGS.get(setting_key, DEFAULT_SETTINGS.get(setting_key, "none")) or "none").strip().lower()
+    if mode not in {"none", "upper", "lower"}:
+        return "none"
+    return mode
+
+
+def apply_location_normalize_case(field_name, value):
+    mode = get_location_regex_normalize_case(field_name)
+    if mode == "upper":
+        return value.upper()
+    if mode == "lower":
+        return value.lower()
+    return value
+
+
 def normalize_location_value(field_name, value):
     value = (value or "").strip()
 
     if value == "":
         return ""
 
+    value = apply_location_normalize_case(field_name, value)
+
     pattern = get_location_regex(field_name)
     try:
-        if re.fullmatch(pattern, value):
+        if re.fullmatch(pattern, value, get_location_regex_flags(field_name)):
             return value
     except re.error:
         return None
@@ -3963,6 +3994,137 @@ def is_location_input_allowed(field_name, raw_value):
     if value == "":
         return True
     return normalize_location_value(field_name, value) is not None
+
+
+def _location_regex_field_label(field_name):
+    return {
+        "regal": t("field_regex_regal"),
+        "fach": t("field_regex_fach"),
+        "platz": t("field_regex_platz"),
+    }[field_name]
+
+
+def _location_field_normalizers():
+    return {
+        "regal": lambda value: apply_location_normalize_case("regal", value),
+        "fach": lambda value: apply_location_normalize_case("fach", value),
+        "platz": lambda value: apply_location_normalize_case("platz", value),
+    }
+
+
+def _location_regex_options_dialog(stdscr, field_name, values):
+    regex_key = f"location_regex_{field_name}"
+    ignore_case_key = f"location_regex_ignore_case_{field_name}"
+    normalize_case_key = f"location_regex_normalize_case_{field_name}"
+    pattern = str(values.get(regex_key, ""))
+    ignore_case = bool(values.get(ignore_case_key, False))
+    normalize_case = str(values.get(normalize_case_key, "none") or "none").strip().lower()
+    if normalize_case not in {"none", "upper", "lower"}:
+        normalize_case = "none"
+    active = 0
+
+    h, w = stdscr.getmaxyx()
+    width = min(78, w - 4)
+    height = 9
+    y = max(1, (h - height) // 2)
+    x = max(2, (w - width) // 2)
+
+    while True:
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, f" {t('regex_options_title', label=_location_regex_field_label(field_name))} ")
+
+        regex_label = t("field_regex_pattern")
+        ignore_label = t("field_regex_ignore_case")
+        normalize_label = t("field_regex_normalize_case")
+        field_x = max(len(regex_label), len(ignore_label), len(normalize_label)) + 4
+        field_width = max(1, width - field_x - 3)
+
+        win.addstr(2, 2, f"{regex_label}:")
+        regex_value = pattern[-field_width:]
+        if active == 0:
+            win.attrset(curses.color_pair(2))
+            win.addstr(2, field_x, regex_value.ljust(field_width))
+            win.attrset(curses.color_pair(1))
+        else:
+            win.addstr(2, field_x, regex_value.ljust(field_width))
+
+        win.addstr(3, 2, f"{ignore_label}:")
+        ignore_value = t("settings_value_yes") if ignore_case else t("settings_value_no")
+        if active == 1:
+            win.attrset(curses.color_pair(2))
+            win.addstr(3, field_x, ignore_value.ljust(field_width))
+            win.attrset(curses.color_pair(1))
+        else:
+            win.addstr(3, field_x, ignore_value.ljust(field_width))
+
+        win.addstr(4, 2, f"{normalize_label}:")
+        normalize_value = t(f"settings_value_{normalize_case}")
+        if active == 2:
+            win.attrset(curses.color_pair(2))
+            win.addstr(4, field_x, normalize_value.ljust(field_width))
+            win.attrset(curses.color_pair(1))
+        else:
+            win.addstr(4, field_x, normalize_value.ljust(field_width))
+
+        draw_footer_line(win, height - 2, 2, width - 4, t("regex_options_footer"))
+
+        if active == 0:
+            cursor_pos = min(len(pattern), field_width - 1)
+            win.move(2, field_x + cursor_pos)
+        elif active == 1:
+            win.move(3, field_x)
+        else:
+            win.move(4, field_x)
+        win.refresh()
+
+        key = win.get_wch()
+
+        if key in (27, curses.KEY_F9):
+            return values
+        if key == curses.KEY_F2:
+            values[regex_key] = pattern.strip()
+            values[ignore_case_key] = ignore_case
+            values[normalize_case_key] = normalize_case
+            return values
+        if key == curses.KEY_DOWN:
+            active = (active + 1) % 3
+            continue
+        if key == curses.KEY_UP:
+            active = (active - 1) % 3
+            continue
+
+        if active == 1:
+            if key in (" ", curses.KEY_LEFT, curses.KEY_RIGHT, 10, 13, "\n", "\r", curses.KEY_ENTER):
+                ignore_case = not ignore_case
+            continue
+        if active == 2:
+            if key in (" ", curses.KEY_RIGHT, 10, 13, "\n", "\r", curses.KEY_ENTER):
+                normalize_case = {
+                    "none": "upper",
+                    "upper": "lower",
+                    "lower": "none",
+                }[normalize_case]
+            elif key == curses.KEY_LEFT:
+                normalize_case = {
+                    "none": "lower",
+                    "upper": "none",
+                    "lower": "upper",
+                }[normalize_case]
+            continue
+
+        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+            active = 1
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
+            pattern = pattern[:-1]
+            continue
+        if isinstance(key, str) and key.isprintable():
+            pattern += key
 
 
 def validate_regal_or_error(stdscr, raw_value):
@@ -4728,17 +4890,26 @@ def poll_background_ui_events():
     return events
 
 
+def _apply_item_local_quantity(row, qty):
+    if row is None:
+        return None
+    old_qty = int(row.get("menge") or 0)
+    unavailable = int(row.get("unavailable") or 0)
+    committed = int(row.get("committed") or 0)
+    row["menge"] = qty
+    if "gesamt_menge" in row and row.get("gesamt_menge") is not None:
+        row["gesamt_menge"] = max(int(row.get("gesamt_menge") or 0) + (qty - old_qty), 0)
+    row["available"] = max(qty - unavailable - committed, 0)
+    row["dirty"] = True
+    return row
+
+
 def _update_item_snapshot_quantity(rows, sku, qty):
     for row in rows or []:
         if row.get("sku") != sku:
             continue
-        unavailable = int(row.get("unavailable") or 0)
-        committed = int(row.get("committed") or 0)
-        row["menge"] = qty
-        row["available"] = max(qty - unavailable - committed, 0)
-        row["dirty"] = True
-        return True
-    return False
+        return _apply_item_local_quantity(row, qty)
+    return None
 
 
 def pending_item_write_exit_dialog(stdscr):
@@ -4787,16 +4958,22 @@ def wait_for_pending_item_writes_dialog(stdscr):
         time.sleep(0.1)
 
 
+def _apply_item_local_location(row, regal, fach, platz):
+    if row is None:
+        return None
+    row["regal"] = regal
+    row["fach"] = fach
+    row["platz"] = platz
+    row["dirty"] = True
+    return row
+
+
 def _update_item_snapshot_location(rows, sku, regal, fach, platz):
     for row in rows or []:
         if row.get("sku") != sku:
             continue
-        row["regal"] = regal
-        row["fach"] = fach
-        row["platz"] = platz
-        row["dirty"] = True
-        return True
-    return False
+        return _apply_item_local_location(row, regal, fach, platz)
+    return None
 
 
 def message_box(stdscr, title, message):
@@ -4920,7 +5097,16 @@ def _save_settings_checked(updated):
     con.close()
     return save_settings(updated)
 
-def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra_actions=None, field_validators=None):
+def form_dialog(
+    stdscr,
+    title,
+    fields,
+    initial_active=0,
+    footer_text=None,
+    extra_actions=None,
+    field_validators=None,
+    field_normalizers=None,
+):
 
     h, w = stdscr.getmaxyx()
 
@@ -4945,6 +5131,7 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
     footer = footer_text or "Enter weiter/speichern  ↑↓ wechseln  F9 Abbrechen"
     extra_actions = extra_actions or []
     field_validators = field_validators or {}
+    field_normalizers = field_normalizers or {}
 
     def normalize_view(index, field_width):
         field_width = max(1, field_width)
@@ -5044,14 +5231,24 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
         if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
             pos = cursor_positions[active]
             if pos > 0:
-                values[active] = values[active][:pos - 1] + values[active][pos:]
+                field_name = fields[active]["name"]
+                candidate = values[active][:pos - 1] + values[active][pos:]
+                normalizer = field_normalizers.get(field_name)
+                if normalizer:
+                    candidate = normalizer(candidate)
+                values[active] = candidate
                 cursor_positions[active] = pos - 1
             continue
 
         if key == curses.KEY_DC:
             pos = cursor_positions[active]
             if pos < len(values[active]):
-                values[active] = values[active][:pos] + values[active][pos + 1:]
+                field_name = fields[active]["name"]
+                candidate = values[active][:pos] + values[active][pos + 1:]
+                normalizer = field_normalizers.get(field_name)
+                if normalizer:
+                    candidate = normalizer(candidate)
+                values[active] = candidate
             continue
 
         if key == curses.KEY_LEFT:
@@ -5077,6 +5274,9 @@ def form_dialog(stdscr, title, fields, initial_active=0, footer_text=None, extra
                 pos = cursor_positions[active]
                 candidate = values[active][:pos] + key + values[active][pos:]
                 field_name = fields[active]["name"]
+                normalizer = field_normalizers.get(field_name)
+                if normalizer:
+                    candidate = normalizer(candidate)
                 validator = field_validators.get(field_name)
                 if validator and not validator(candidate):
                     curses.beep()
@@ -5846,6 +6046,8 @@ def _settings_context_select(
             values["shopify_active_location_display"] = (selected_row.get("name") if selected_row else chosen) or chosen
     elif active_name == "color_theme":
         values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
+    elif active_name in {"location_regex_regal", "location_regex_fach", "location_regex_platz"}:
+        values = _location_regex_options_dialog(stdscr, active_name.rsplit("_", 1)[-1], values)
     elif active_name in {
         "picklist_printer",
         "delivery_note_printer",
@@ -6007,6 +6209,24 @@ def settings_dialog(stdscr):
         "location_regex_regal": SETTINGS.get("location_regex_regal", DEFAULT_SETTINGS["location_regex_regal"]),
         "location_regex_fach": SETTINGS.get("location_regex_fach", DEFAULT_SETTINGS["location_regex_fach"]),
         "location_regex_platz": SETTINGS.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
+        "location_regex_ignore_case_regal": bool(
+            SETTINGS.get("location_regex_ignore_case_regal", DEFAULT_SETTINGS["location_regex_ignore_case_regal"])
+        ),
+        "location_regex_ignore_case_fach": bool(
+            SETTINGS.get("location_regex_ignore_case_fach", DEFAULT_SETTINGS["location_regex_ignore_case_fach"])
+        ),
+        "location_regex_ignore_case_platz": bool(
+            SETTINGS.get("location_regex_ignore_case_platz", DEFAULT_SETTINGS["location_regex_ignore_case_platz"])
+        ),
+        "location_regex_normalize_case_regal": str(
+            SETTINGS.get("location_regex_normalize_case_regal", DEFAULT_SETTINGS["location_regex_normalize_case_regal"])
+        ),
+        "location_regex_normalize_case_fach": str(
+            SETTINGS.get("location_regex_normalize_case_fach", DEFAULT_SETTINGS["location_regex_normalize_case_fach"])
+        ),
+        "location_regex_normalize_case_platz": str(
+            SETTINGS.get("location_regex_normalize_case_platz", DEFAULT_SETTINGS["location_regex_normalize_case_platz"])
+        ),
         "picklist_printer": SETTINGS["picklist_printer"],
         "delivery_note_printer": SETTINGS["delivery_note_printer"],
         "delivery_note_format": _normalize_shipping_label_format(
@@ -6420,6 +6640,12 @@ def settings_dialog(stdscr):
         "location_regex_regal": values["location_regex_regal"].strip(),
         "location_regex_fach": values["location_regex_fach"].strip(),
         "location_regex_platz": values["location_regex_platz"].strip(),
+        "location_regex_ignore_case_regal": bool(values.get("location_regex_ignore_case_regal", False)),
+        "location_regex_ignore_case_fach": bool(values.get("location_regex_ignore_case_fach", False)),
+        "location_regex_ignore_case_platz": bool(values.get("location_regex_ignore_case_platz", False)),
+        "location_regex_normalize_case_regal": str(values.get("location_regex_normalize_case_regal", "none")).strip().lower(),
+        "location_regex_normalize_case_fach": str(values.get("location_regex_normalize_case_fach", "none")).strip().lower(),
+        "location_regex_normalize_case_platz": str(values.get("location_regex_normalize_case_platz", "none")).strip().lower(),
         "picklist_printer": values["picklist_printer"].strip(),
         "delivery_note_printer": values["delivery_note_printer"].strip(),
         "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
@@ -6643,6 +6869,7 @@ def add_item(stdscr):
             "fach": lambda value: is_location_input_allowed("fach", value),
             "platz": lambda value: is_location_input_allowed("platz", value),
         },
+        field_normalizers=_location_field_normalizers(),
     )
 
     if res is None:
@@ -6802,6 +7029,7 @@ def change_location(stdscr, item):
             "fach": lambda value: is_location_input_allowed("fach", value),
             "platz": lambda value: is_location_input_allowed("platz", value),
         },
+        field_normalizers=_location_field_normalizers(),
     )
 
     if res is None:
@@ -6848,6 +7076,7 @@ def edit_item(stdscr, item):
             "fach": lambda value: is_location_input_allowed("fach", value),
             "platz": lambda value: is_location_input_allowed("platz", value),
         },
+        field_normalizers=_location_field_normalizers(),
     )
 
     if res is None:
@@ -9454,13 +9683,21 @@ def main(stdscr):
             try:
                 new_location = change_location(stdscr, selected_item)
                 if new_location is not None:
-                    if _update_item_snapshot_location(
+                    updated_row = _update_item_snapshot_location(
                         items_snapshot,
                         selected_item["sku"],
                         new_location["regal"],
                         new_location["fach"],
                         new_location["platz"],
-                    ):
+                    )
+                    if updated_row is not None:
+                        if updated_row is not selected_item:
+                            _apply_item_local_location(
+                                selected_item,
+                                new_location["regal"],
+                                new_location["fach"],
+                                new_location["platz"],
+                            )
                         rebuild_items_view = True
                     transient_notice = t("item_write_pending_location", sku=_display_sku_value(selected_item))
                     transient_notice_until = time.monotonic() + 3.0
@@ -9473,7 +9710,10 @@ def main(stdscr):
             try:
                 new_qty = change_qty(stdscr, selected_item)
                 if new_qty is not None:
-                    if _update_item_snapshot_quantity(items_snapshot, selected_item["sku"], new_qty):
+                    updated_row = _update_item_snapshot_quantity(items_snapshot, selected_item["sku"], new_qty)
+                    if updated_row is not None:
+                        if updated_row is not selected_item:
+                            _apply_item_local_quantity(selected_item, new_qty)
                         rebuild_items_view = True
                     transient_notice = t("item_write_pending_qty", sku=_display_sku_value(selected_item))
                     transient_notice_until = time.monotonic() + 3.0
