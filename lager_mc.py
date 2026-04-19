@@ -4380,6 +4380,16 @@ def clamp_top_index(selected, top_index, visible_rows):
     return top_index
 
 
+def item_panel_visible_rows(screen_height):
+    panel_height = max(6, int(screen_height) - 4)
+    return max(1, panel_height - 5)
+
+
+def location_panel_visible_rows(screen_height):
+    panel_height = max(6, int(screen_height) - 4)
+    return max(1, panel_height - 4)
+
+
 def draw_shadow(stdscr, y, x, h, w):
     max_y, max_x = stdscr.getmaxyx()
     if y + h + 1 >= max_y or x + w + 2 >= max_x:
@@ -9542,8 +9552,8 @@ def main(stdscr):
             right_selected = 0
 
         h, _ = stdscr.getmaxyx()
-        left_visible_rows = max(1, h - 5)
-        right_visible_rows = max(1, h - 4)
+        left_visible_rows = item_panel_visible_rows(h)
+        right_visible_rows = location_panel_visible_rows(h)
 
         left_top_index = clamp_top_index(left_selected, left_top_index, left_visible_rows)
         right_top_index = clamp_top_index(right_selected, right_top_index, right_visible_rows)

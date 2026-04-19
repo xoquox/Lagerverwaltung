@@ -735,6 +735,10 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(self.lager_mc.clamp_top_index(5, 1, 10), 1)
         self.assertEqual(self.lager_mc.clamp_top_index(11, 1, 10), 2)
 
+    def test_panel_visible_rows_follow_real_panel_height(self):
+        self.assertEqual(self.lager_mc.item_panel_visible_rows(20), 11)
+        self.assertEqual(self.lager_mc.location_panel_visible_rows(20), 12)
+
     def test_sort_order_items_for_picklist_excludes_external_and_sorts_by_location(self):
         rows = [
             {"sku": "B", "title": "Beta", "quantity": 1, "regal": "A", "fach": "2", "platz": "5", "external_fulfillment": False},
