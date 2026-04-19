@@ -4369,6 +4369,17 @@ def get_selected_location_item(rows, selected):
     return rows[selected]["item"]
 
 
+def clamp_top_index(selected, top_index, visible_rows):
+    visible_rows = max(1, int(visible_rows))
+    selected = max(0, int(selected))
+    top_index = max(0, int(top_index))
+    if selected < top_index:
+        return selected
+    if selected >= top_index + visible_rows:
+        return max(0, selected - visible_rows + 1)
+    return top_index
+
+
 def draw_shadow(stdscr, y, x, h, w):
     max_y, max_x = stdscr.getmaxyx()
     if y + h + 1 >= max_y or x + w + 2 >= max_x:
@@ -9531,19 +9542,11 @@ def main(stdscr):
             right_selected = 0
 
         h, _ = stdscr.getmaxyx()
-        page = max(1, h - 8)
+        left_visible_rows = max(1, h - 5)
+        right_visible_rows = max(1, h - 4)
 
-        if left_selected + 1 < left_top_index:
-            left_top_index = left_selected + 1
-
-        if left_selected + 1 >= left_top_index + page:
-            left_top_index = left_selected - page + 2
-
-        if right_selected < right_top_index:
-            right_top_index = right_selected
-
-        if right_selected >= right_top_index + page:
-            right_top_index = right_selected - page + 1
+        left_top_index = clamp_top_index(left_selected, left_top_index, left_visible_rows)
+        right_top_index = clamp_top_index(right_selected, right_top_index, right_visible_rows)
 
         draw(
             stdscr,
@@ -9597,15 +9600,15 @@ def main(stdscr):
 
         elif key == curses.KEY_NPAGE:
             if active_pane == "left":
-                left_selected = move_selection(items, left_selected, page)
+                left_selected = move_selection(items, left_selected, left_visible_rows)
             else:
-                right_selected = move_selection(location_rows, right_selected, page)
+                right_selected = move_selection(location_rows, right_selected, right_visible_rows)
 
         elif key == curses.KEY_PPAGE:
             if active_pane == "left":
-                left_selected = move_selection(items, left_selected, -page)
+                left_selected = move_selection(items, left_selected, -left_visible_rows)
             else:
-                right_selected = move_selection(location_rows, right_selected, -page)
+                right_selected = move_selection(location_rows, right_selected, -right_visible_rows)
 
         elif key == curses.KEY_F1:
             if sort_mode == "location":

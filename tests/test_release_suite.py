@@ -730,6 +730,11 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(rows[2]["item"]["sku"], "SKU-1")
         self.assertEqual(rows[4]["item"]["sku"], "SKU-2")
 
+    def test_clamp_top_index_keeps_first_item_visible_when_scrolling_up(self):
+        self.assertEqual(self.lager_mc.clamp_top_index(0, 1, 10), 0)
+        self.assertEqual(self.lager_mc.clamp_top_index(5, 1, 10), 1)
+        self.assertEqual(self.lager_mc.clamp_top_index(11, 1, 10), 2)
+
     def test_sort_order_items_for_picklist_excludes_external_and_sorts_by_location(self):
         rows = [
             {"sku": "B", "title": "Beta", "quantity": 1, "regal": "A", "fach": "2", "platz": "5", "external_fulfillment": False},
