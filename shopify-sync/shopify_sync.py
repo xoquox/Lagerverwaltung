@@ -1175,9 +1175,10 @@ def push_inventory_changes():
         if not inventory_item_gid:
             log_error("Shopify Inventory-Sync uebersprungen: fehlende inventory item id fuer sku=%s", display_sku or sku)
             continue
+        idempotency_key = secrets.token_hex(16)
         mutation = """
         mutation InventorySet($input: InventorySetQuantitiesInput!) {
-          inventorySetQuantities(input: $input) {
+          inventorySetQuantities(input: $input) @idempotent(key: "%s") {
             inventoryAdjustmentGroup {
               createdAt
             }
@@ -1188,7 +1189,7 @@ def push_inventory_changes():
             }
           }
         }
-        """
+        """ % idempotency_key
         variables = {
             "input": {
                 "name": "available",

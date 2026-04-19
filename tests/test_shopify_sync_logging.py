@@ -419,6 +419,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertIn("inventorySetQuantities", graphql_mock.call_args.args[0])
+        self.assertIn("@idempotent(key:", graphql_mock.call_args.args[0])
         variables = graphql_mock.call_args.args[1]
         self.assertEqual(variables["input"]["name"], "available")
         self.assertEqual(variables["input"]["quantities"][0]["inventoryItemId"], "gid://shopify/InventoryItem/12345")
