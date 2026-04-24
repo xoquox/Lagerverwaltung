@@ -33,6 +33,15 @@ def build_delivery_note_rows(order_items):
     return [row for row in order_items if not row.get("external_fulfillment")]
 
 
+def format_delivery_note_location(row):
+    regal = str(row.get("regal") or "").strip()
+    fach = str(row.get("fach") or "").strip()
+    platz = str(row.get("platz") or "").strip()
+    if not regal and not fach and not platz:
+        return ""
+    return f"{regal or '-'}-{fach or '-'}-{platz or '-'}"
+
+
 def format_delivery_address_lines(order):
     lines = []
 
@@ -109,11 +118,15 @@ def _build_order_rows_html(rows):
     for index, row in enumerate(rows, start=1):
         title = escape(row.get("title") or "-")
         sku = escape(row.get("sku") or "-")
+        location = escape(format_delivery_note_location(row))
         qty = escape(str(row.get("quantity") or 0))
+        detail_html = f"<br><span class='sku'>{sku}</span>"
+        if location:
+            detail_html += f"<br><span class='sku'>{location}</span>"
         html_rows.append(
             "<tr>"
             f"<td>{index}</td>"
-            f"<td>{title}<br><span class='sku'>{sku}</span></td>"
+            f"<td>{title}{detail_html}</td>"
             f"<td class='qty'>{qty}</td>"
             "</tr>"
         )
@@ -409,10 +422,13 @@ def build_delivery_note_content_stream(order, rows, page_number=1, page_count=1,
         row_y = base_y - ((index - 1) * row_step)
         title = _truncate_text(row.get("title") or "-", 56)
         sku = _truncate_text(row.get("sku") or "-", 32)
+        location = _truncate_text(format_delivery_note_location(row), 32)
         qty = str(row.get("quantity") or 0)
         commands.append(_text_cmd(65.000, row_y, "F3", 10.5, str(position_offset + index)))
         commands.append(_text_cmd(137.535, row_y + 6.722, "F3", 10.5, title))
         commands.append(_text_cmd(137.535, row_y - 6.722, "F3", 10.5, sku))
+        if location:
+            commands.append(_text_cmd(137.535, row_y - 18.500, "F3", 9.0, location))
         commands.append(_text_cmd(538.602, row_y, "F3", 10.5, qty))
 
     commands.append(_text_cmd(60.000, 156.073, "F3", 10.5, "Vielen Dank für Ihre Bestellung!"))

@@ -637,13 +637,19 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(self.lager_mc.SUPPORTED_LANGUAGES, set(self.lager_mc.TRANSLATIONS.keys()))
 
     def test_resolve_post_product_selection_uses_base_and_options(self):
-        product = self.lager_mc._resolve_post_product_selection(
-            {"scope": "domestic", "base_key": "maxibrief", "option_codes": ["einschreiben_einwurf"]}
+        product = self.lager_mc._post_module_resolve_product_selection(
+            {"scope": "domestic", "base_key": "maxibrief", "option_codes": ["einschreiben_einwurf"]},
+            self.lager_mc.t,
+            find_post_product=self.lager_mc.find_post_product,
+            list_post_base_products=self.lager_mc.list_post_base_products,
         )
         self.assertEqual(product["product_code"], "1032")
 
-        base_product = self.lager_mc._resolve_post_product_selection(
-            {"scope": "domestic", "base_key": "warensendung", "option_codes": []}
+        base_product = self.lager_mc._post_module_resolve_product_selection(
+            {"scope": "domestic", "base_key": "warensendung", "option_codes": []},
+            self.lager_mc.t,
+            find_post_product=self.lager_mc.find_post_product,
+            list_post_base_products=self.lager_mc.list_post_base_products,
         )
         self.assertEqual(base_product["product_code"], "290")
 
@@ -876,6 +882,18 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["sku"], "A")
 
+    def test_format_delivery_note_location_uses_regal_fach_platz(self):
+        import delivery_note
+
+        self.assertEqual(
+            delivery_note.format_delivery_note_location({"regal": "F", "fach": "2", "platz": "3"}),
+            "F-2-3",
+        )
+        self.assertEqual(
+            delivery_note.format_delivery_note_location({"regal": "", "fach": "", "platz": ""}),
+            "",
+        )
+
     def test_create_delivery_note_pdf_uses_template_and_omits_gls_line(self):
         import delivery_note
 
@@ -889,7 +907,7 @@ class LagerMcLogicTests(unittest.TestCase):
             "shipping_country": "Deutschland",
         }
         order_items = [
-            {"sku": "A-1", "title": "Alpha Teil", "quantity": 2, "external_fulfillment": False},
+            {"sku": "A-1", "title": "Alpha Teil", "quantity": 2, "regal": "F", "fach": "2", "platz": "3", "external_fulfillment": False},
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -908,6 +926,7 @@ class LagerMcLogicTests(unittest.TestCase):
             stream = zlib.decompress(objects[7][stream_start:stream_end]).decode("cp1252")
             self.assertIn("Bestellung: #2001", stream)
             self.assertIn("Jörg Märtens", stream)
+            self.assertIn("F-2-3", stream)
             self.assertIn("Vielen Dank für Ihre Bestellung!", stream)
 
     def test_create_delivery_note_pdf_uses_configured_output_dir(self):
@@ -1661,9 +1680,11 @@ class LagerMcLogicTests(unittest.TestCase):
     def test_apply_shopify_customer_to_manual_state_fills_address(self):
         state = {
             "name": "",
+            "address_extra": "",
             "street": "",
             "zip": "",
             "city": "",
+            "email": "",
             "reference": "",
             "weight_grams": "400",
         }
@@ -1674,6 +1695,7 @@ class LagerMcLogicTests(unittest.TestCase):
             "default_zip": "12345",
             "default_city": "Berlin",
             "default_country": "Germany",
+            "email": "max@example.com",
         }
 
         updated, country = self.lager_mc._apply_shopify_customer_to_manual_state(state, customer, "DE")
@@ -1682,7 +1704,39 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(updated["street"], "Musterstr. 1")
         self.assertEqual(updated["zip"], "12345")
         self.assertEqual(updated["city"], "Berlin")
+        self.assertEqual(updated["email"], "max@example.com")
         self.assertEqual(country, "DE")
+
+    def test_manual_label_base_fields_include_generic_address_and_email_inputs(self):
+        state = {
+            "name": "Max Mustermann",
+            "address_extra": "c/o Werkstatt",
+            "street": "Ring 5",
+            "zip": "80331",
+            "city": "Muenchen",
+            "email": "max@example.com",
+            "reference": "REF-1",
+            "weight_grams": "500",
+        }
+
+        fields = self.lager_mc._manual_label_base_fields(state, "DE")
+
+        self.assertEqual([field["name"] for field in fields[:6]], ["name", "address_extra", "street", "zip", "city", "email"])
+        country_field = next(field for field in fields if field["name"] == "country_display")
+        self.assertTrue(country_field["read_only"])
+        self.assertEqual(country_field["action"], "country")
+
+    def test_manual_label_carrier_fields_come_from_module(self):
+        ctx = self.lager_mc._shipping_runtime_context()
+        gls_fields = self.lager_mc._shipping_carrier_module("gls").manual_fields(ctx, {"selected_services": ["service_flexdelivery"]})
+        post_fields = self.lager_mc._shipping_carrier_module("post").manual_fields(ctx, {"post_selection": {"name": "Paket", "price_eur": "4.99"}})
+        free_fields = self.lager_mc.free.manual_fields(ctx, {})
+
+        self.assertEqual(gls_fields[0]["name"], "services_display")
+        self.assertEqual(gls_fields[0]["action"], "carrier_options")
+        self.assertEqual(post_fields[0]["name"], "post_product")
+        self.assertEqual(post_fields[0]["action"], "carrier_options")
+        self.assertEqual(free_fields, [])
 
     def test_handle_delivery_note_output_routes_by_mode(self):
         order = {"order_name": "#1001", "order_id": "OID-1"}
@@ -1760,11 +1814,14 @@ class LagerMcLogicTests(unittest.TestCase):
             "shipping_country": "DE",
         }
 
-        with mock.patch.object(self.lager_mc, "free_create_label", return_value={"ok": True}) as handler:
+        runtime = self.lager_mc.ShippingCarrierRuntime(create_label=mock.Mock(return_value={"ok": True}))
+        with mock.patch.object(self.lager_mc, "_shipping_carrier_runtime", return_value=runtime) as runtime_mock:
             result = self.lager_mc.create_shipping_label(order, weight_kg=1.2, carrier="free")
 
         self.assertEqual(result, {"ok": True})
-        handler.assert_called_once_with(
+        runtime_mock.assert_called_once_with("free")
+        runtime.create_label.assert_called_once_with(
+            self.lager_mc._shipping_runtime_context(),
             order,
             weight_kg=1.2,
             shipment_reference=None,
@@ -1790,10 +1847,10 @@ class LagerMcLogicTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.lager_mc, "build_address_label_pdf", side_effect=fake_build),
-            mock.patch.object(self.lager_mc, "_save_shipping_label_pdf", return_value="/tmp/free.pdf") as save_mock,
+            mock.patch.object(self.lager_mc.free, "save_shipping_label_pdf", return_value="/tmp/free.pdf") as save_mock,
             mock.patch.object(self.lager_mc, "insert_shipping_label_history", return_value=77) as insert_mock,
         ):
-            result = self.lager_mc.free_create_label(order, weight_kg=0.4, shipment_reference="ADR-1")
+            result = self.lager_mc.free.create_label(self.lager_mc._shipping_runtime_context(), order, weight_kg=0.4, shipment_reference="ADR-1")
 
         self.assertEqual(result["label_id"], 77)
         self.assertEqual(result["label_path"], "/tmp/free.pdf")
@@ -1865,71 +1922,61 @@ class LagerMcLogicTests(unittest.TestCase):
         ]
 
         with (
-            mock.patch.object(self.lager_mc, "load_gls_credentials", return_value={"api_url": "https://example.test/api"}) as creds_mock,
-            mock.patch.object(self.lager_mc, "_gls_api_json_request", side_effect=responses) as api_mock,
-            mock.patch.object(self.lager_mc, "_save_shipping_label_pdf", return_value="/tmp/reprint.pdf") as save_mock,
+            mock.patch.object(self.lager_mc._shipping_carrier_module("gls"), "load_credentials", return_value={"api_url": "https://example.test/api"}) as creds_mock,
+            mock.patch.object(self.lager_mc._shipping_carrier_module("gls"), "api_json_request", side_effect=responses) as api_mock,
+            mock.patch.object(self.lager_mc._shipping_carrier_module("gls"), "save_shipping_label_pdf", return_value="/tmp/reprint.pdf") as save_mock,
             mock.patch.object(self.lager_mc, "update_shipping_label_reprint") as update_mock,
         ):
-            result = self.lager_mc.gls_reprint_label(label_row)
+            result = self.lager_mc._shipping_carrier_module("gls").reprint_label(self.lager_mc._shipping_runtime_context(), label_row)
 
         self.assertEqual(result, "/tmp/reprint.pdf")
-        creds_mock.assert_called_once_with()
+        creds_mock.assert_called_once()
         api_mock.assert_called_once()
         self.assertTrue(api_mock.call_args.args[0].endswith("/reprint/1234567890"))
         save_mock.assert_called_once()
         update_mock.assert_called_once_with(9, "/tmp/reprint.pdf")
 
-    def test_gls_sporadic_collection_url_uses_backend_base(self):
-        creds = {"api_url": "https://example.invalid/backend/rs/shipments"}
-        self.assertEqual(
-            self.lager_mc._gls_sporadic_collection_url(creds),
-            "https://example.invalid/backend/rs/sporadiccollection",
-        )
+    def test_gls_create_label_sends_email_and_second_address_line(self):
+        order = {
+            "order_id": "manual-1",
+            "order_name": "MANUAL-1",
+            "shipping_name": "Max Mustermann",
+            "shipping_address1": "Musterstr. 1",
+            "shipping_address2": "c/o Werkstatt",
+            "shipping_zip": "12345",
+            "shipping_city": "Berlin",
+            "shipping_country": "DE",
+            "shipping_email": "max@example.com",
+        }
+        api_response = {
+            "CreatedShipment": {
+                "ParcelData": [{"ParcelNumber": "1234567890", "TrackID": "TRACK-1"}],
+            },
+        }
 
-    def test_gls_order_sporadic_collection_builds_expected_payload(self):
         with (
             mock.patch.object(
-                self.lager_mc,
-                "load_gls_credentials",
-                return_value={
-                    "api_url": "https://example.invalid/backend/rs/shipments",
-                    "user": "u",
-                    "password": "p",
-                    "contact_id": "CID123",
-                },
+                self.lager_mc._shipping_carrier_module("gls"),
+                "load_credentials",
+                return_value={"api_url": "https://example.invalid/backend/rs/shipments", "contact_id": "CID123"},
             ),
-            mock.patch.object(
-                self.lager_mc,
-                "_gls_api_json_request",
-                return_value=(200, {"EstimatedPickUpDate": "2026-03-31"}, b""),
-            ) as api_mock,
+            mock.patch.object(self.lager_mc._shipping_carrier_module("gls"), "api_json_request", return_value=(200, api_response, b"%PDF-1.4 gls")) as api_mock,
+            mock.patch.object(self.lager_mc._shipping_carrier_module("gls"), "save_shipping_label_pdf", return_value="/tmp/gls.pdf"),
+            mock.patch.object(self.lager_mc, "insert_shipping_label_history", return_value=11),
         ):
-            result = self.lager_mc.gls_order_sporadic_collection(
-                preferred_pickup_date="2026-03-30",
-                number_of_parcels="2",
-                product="PARCEL",
-                expected_total_weight="12.5",
-                contains_haz_goods=True,
-                additional_information="Rampe hinten",
+            self.lager_mc._shipping_carrier_module("gls").create_label(
+                self.lager_mc._shipping_runtime_context(),
+                order,
+                weight_kg=1.25,
+                shipment_reference="MANUAL-1",
+                service_codes=[],
             )
 
-        self.assertEqual(result["estimated_date"], "2026-03-31")
-        self.assertEqual(
-            api_mock.call_args.args[0],
-            "https://example.invalid/backend/rs/sporadiccollection",
-        )
-        self.assertEqual(
-            api_mock.call_args.args[2],
-            {
-                "ContactID": "CID123",
-                "PreferredPickUpDate": "2026-03-30",
-                "NumberOfParcels": 2,
-                "Product": "PARCEL",
-                "ExpectedTotalWeight": 12.5,
-                "ContainsHazGoods": True,
-                "AdditionalInformation": "Rampe hinten",
-            },
-        )
+        payload = api_mock.call_args.args[2]
+        consignee = payload["Shipment"]["Consignee"]["Address"]
+        self.assertEqual(consignee["Name2"], "c/o Werkstatt")
+        self.assertEqual(consignee["eMail"], "max@example.com")
+
 
     def test_format_shopify_sync_status_label_prefers_pull_and_push_times(self):
         row = {

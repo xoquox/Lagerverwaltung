@@ -22,6 +22,7 @@ class ShippingCarrierDefinition:
     tracking_mode_field: str | None = None
     tracking_url_field: str | None = None
     extra_settings_fields: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    manual_option_field_label_key: str | None = None
 
     def get(self, key, default=None):
         return getattr(self, key, default)
@@ -50,6 +51,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         scale_field_label_key="field_shipping_scale_mode_gls",
         tracking_mode_field="shopify_tracking_mode_gls",
         tracking_url_field="shopify_tracking_url_gls",
+        manual_option_field_label_key="manual_label_field_services",
         extra_settings_fields=(
             ("shipping_services_display", "field_shipping_services"),
             ("gls_api_url", "field_gls_api_url"),
@@ -73,6 +75,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         scale_field_label_key="field_shipping_scale_mode_post",
         tracking_mode_field="shopify_tracking_mode_post",
         tracking_url_field="shopify_tracking_url_post",
+        manual_option_field_label_key="manual_label_field_post_product",
         extra_settings_fields=(
             ("post_api_url", "field_post_api_url"),
             ("post_api_key", "field_post_api_key"),
