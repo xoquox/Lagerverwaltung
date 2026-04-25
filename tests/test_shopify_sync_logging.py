@@ -431,8 +431,16 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         executed = []
 
         class FakeCursor:
+            def __init__(self):
+                self._rows = []
+
             def execute(self, query, params=None):
                 executed.append((" ".join(query.split()), params))
+                if "SELECT sku, dirty, menge, available" in query:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
 
         class FakeConnection:
             def cursor(self):
@@ -483,6 +491,134 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(insert_params[16], "12.50")
         self.assertEqual(insert_params[17], "EUR")
         self.assertEqual(insert_params[18], 250)
+
+    def test_sync_products_reconciles_existing_variant_row_before_upsert(self):
+        executed = []
+
+        class FakeCursor:
+            def __init__(self):
+                self._rows = []
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                executed.append((compact, params))
+                if "SELECT sku, dirty, menge, available" in compact:
+                    self._rows = [
+                        ("__shopify_variant__11", False, 5, 5, 0, 0, 0, "", "", ""),
+                    ]
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        variants = [
+            {
+                "id": "gid://shopify/ProductVariant/11",
+                "sku": "SKU-11",
+                "barcode": "BAR-11",
+                "price": "19.99",
+                "compareAtPrice": "24.99",
+                "inventoryQuantity": 5,
+                "product": {
+                    "id": "gid://shopify/Product/9",
+                    "title": "Produkt A",
+                    "status": "ACTIVE",
+                    "descriptionHtml": "<p>Beschreibung</p>",
+                },
+                "inventoryItem": {
+                    "id": "gid://shopify/InventoryItem/77",
+                    "sku": "SKU-11",
+                    "unitCost": {"amount": "12.50", "currencyCode": "EUR"},
+                    "measurement": {"weight": {"unit": "KILOGRAMS", "value": 0.25}},
+                },
+            }
+        ]
+
+        with mock.patch.object(self.shopify_sync, "get_all_product_variants", return_value=variants):
+            with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+                count = self.shopify_sync.sync_products()
+
+        self.assertEqual(count, 1)
+        self.assertTrue(any("UPDATE items SET sku = %s" in query for query, _ in executed))
+        update_query, update_params = next((q, p) for q, p in executed if "UPDATE items SET sku = %s" in q)
+        self.assertEqual(update_params, ("SKU-11", "__shopify_variant__11"))
+        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO items(" in q)
+        self.assertEqual(insert_params[0], "SKU-11")
+
+    def test_sync_products_merges_duplicate_identity_rows_into_target_sku(self):
+        executed = []
+
+        class FakeCursor:
+            def __init__(self):
+                self._rows = []
+
+            def execute(self, query, params=None):
+                compact = " ".join(query.split())
+                executed.append((compact, params))
+                if "SELECT sku, dirty, menge, available" in compact:
+                    self._rows = [
+                        ("SKU-11", False, 5, 5, 0, 0, 0, "", "", ""),
+                        ("__shopify_variant__11", True, 7, 7, 0, 0, 0, "F", "2", "3"),
+                    ]
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        variants = [
+            {
+                "id": "gid://shopify/ProductVariant/11",
+                "sku": "SKU-11",
+                "barcode": "BAR-11",
+                "price": "19.99",
+                "compareAtPrice": "24.99",
+                "inventoryQuantity": 5,
+                "product": {
+                    "id": "gid://shopify/Product/9",
+                    "title": "Produkt A",
+                    "status": "ACTIVE",
+                    "descriptionHtml": "<p>Beschreibung</p>",
+                },
+                "inventoryItem": {
+                    "id": "gid://shopify/InventoryItem/77",
+                    "sku": "SKU-11",
+                    "unitCost": {"amount": "12.50", "currencyCode": "EUR"},
+                    "measurement": {"weight": {"unit": "KILOGRAMS", "value": 0.25}},
+                },
+            }
+        ]
+
+        with mock.patch.object(self.shopify_sync, "get_all_product_variants", return_value=variants):
+            with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+                count = self.shopify_sync.sync_products()
+
+        self.assertEqual(count, 1)
+        self.assertTrue(any("UPDATE item_location_inventory AS dest" in query for query, _ in executed))
+        self.assertTrue(any("DELETE FROM items WHERE sku = %s" in query for query, _ in executed))
+        delete_query, delete_params = next((q, p) for q, p in executed if "DELETE FROM items WHERE sku = %s" in q)
+        self.assertEqual(delete_params, ("__shopify_variant__11",))
 
     def test_upsert_shopify_shipment_writes_shipping_labels_table(self):
         executed = []

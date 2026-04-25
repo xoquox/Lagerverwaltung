@@ -357,6 +357,228 @@ def _storage_sku_for_variant(variant, inventory_item):
     return f"__shopify_variant__{tail}"
 
 
+def _fetch_item_identity_rows(cur, sku, variant_id, inventory_item_id):
+    clauses = []
+    params = []
+    if sku:
+        clauses.append("sku = %s")
+        params.append(sku)
+    if variant_id:
+        clauses.append("shopify_variant_id = %s")
+        params.append(variant_id)
+    if inventory_item_id:
+        clauses.append("shopify_inventory_item_id = %s")
+        params.append(inventory_item_id)
+    if not clauses:
+        return []
+    cur.execute(
+        f"""
+        SELECT
+            sku,
+            dirty,
+            menge,
+            available,
+            unavailable,
+            committed,
+            reserved,
+            regal,
+            fach,
+            platz
+        FROM items
+        WHERE {" OR ".join(clauses)}
+        ORDER BY sku
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall() or []
+    normalized = []
+    for row in rows:
+        if isinstance(row, dict):
+            normalized.append(row)
+            continue
+        normalized.append(
+            {
+                "sku": row[0],
+                "dirty": row[1],
+                "menge": row[2],
+                "available": row[3],
+                "unavailable": row[4],
+                "committed": row[5],
+                "reserved": row[6],
+                "regal": row[7],
+                "fach": row[8],
+                "platz": row[9],
+            }
+        )
+    return normalized
+
+
+def _update_item_sku_references(cur, source_sku, target_sku):
+    if source_sku == target_sku:
+        return
+    cur.execute(
+        """
+        UPDATE shopify_order_items
+        SET sku = %s
+        WHERE sku = %s
+        """,
+        (target_sku, source_sku),
+    )
+    cur.execute(
+        """
+        UPDATE inventory_lines
+        SET sku = %s
+        WHERE sku = %s
+        """,
+        (target_sku, source_sku),
+    )
+    cur.execute(
+        """
+        UPDATE item_location_inventory AS dest
+        SET menge = CASE
+                WHEN dest.dirty = TRUE THEN dest.menge
+                ELSE src.menge
+            END,
+            available = CASE
+                WHEN dest.dirty = TRUE THEN dest.available
+                ELSE src.available
+            END,
+            reserved = CASE
+                WHEN dest.dirty = TRUE THEN dest.reserved
+                ELSE src.reserved
+            END,
+            committed = CASE
+                WHEN dest.dirty = TRUE THEN dest.committed
+                ELSE src.committed
+            END,
+            unavailable = CASE
+                WHEN dest.dirty = TRUE THEN dest.unavailable
+                ELSE src.unavailable
+            END,
+            dirty = dest.dirty OR src.dirty,
+            updated_at = NOW()
+        FROM item_location_inventory AS src
+        WHERE src.sku = %s
+          AND dest.sku = %s
+          AND dest.location_id = src.location_id
+        """,
+        (source_sku, target_sku),
+    )
+    cur.execute(
+        """
+        UPDATE item_location_inventory
+        SET sku = %s
+        WHERE sku = %s
+          AND location_id NOT IN (
+              SELECT location_id
+              FROM item_location_inventory
+              WHERE sku = %s
+          )
+        """,
+        (target_sku, source_sku, target_sku),
+    )
+    cur.execute(
+        """
+        DELETE FROM item_location_inventory
+        WHERE sku = %s
+        """,
+        (source_sku,),
+    )
+
+
+def _merge_item_row_into_sku(cur, source_row, target_sku):
+    source_sku = (source_row.get("sku") or "").strip()
+    if not source_sku or source_sku == target_sku:
+        return
+    _update_item_sku_references(cur, source_sku, target_sku)
+    if source_row.get("dirty"):
+        cur.execute(
+            """
+            UPDATE items
+            SET menge = %s,
+                available = %s,
+                unavailable = %s,
+                committed = %s,
+                reserved = %s,
+                dirty = TRUE,
+                regal = COALESCE(NULLIF(%s, ''), regal),
+                fach = COALESCE(NULLIF(%s, ''), fach),
+                platz = COALESCE(NULLIF(%s, ''), platz),
+                updated_at = NOW()
+            WHERE sku = %s
+            """,
+            (
+                source_row.get("menge"),
+                source_row.get("available"),
+                source_row.get("unavailable"),
+                source_row.get("committed"),
+                source_row.get("reserved"),
+                source_row.get("regal"),
+                source_row.get("fach"),
+                source_row.get("platz"),
+                target_sku,
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE items
+            SET regal = COALESCE(NULLIF(regal, ''), NULLIF(%s, ''), regal),
+                fach = COALESCE(NULLIF(fach, ''), NULLIF(%s, ''), fach),
+                platz = COALESCE(NULLIF(platz, ''), NULLIF(%s, ''), platz),
+                updated_at = NOW()
+            WHERE sku = %s
+            """,
+            (
+                source_row.get("regal"),
+                source_row.get("fach"),
+                source_row.get("platz"),
+                target_sku,
+            ),
+        )
+    cur.execute(
+        """
+        DELETE FROM items
+        WHERE sku = %s
+        """,
+        (source_sku,),
+    )
+
+
+def _reconcile_item_identity(cur, sku, variant_id, inventory_item_id):
+    rows = _fetch_item_identity_rows(cur, sku, variant_id, inventory_item_id)
+    if not rows:
+        return sku
+    target_sku = sku
+    seen = set()
+    unique_rows = []
+    for row in rows:
+        row_sku = (row.get("sku") or "").strip()
+        if not row_sku or row_sku in seen:
+            continue
+        seen.add(row_sku)
+        unique_rows.append(row)
+    if not any((row.get("sku") or "").strip() == target_sku for row in unique_rows):
+        source_row = unique_rows[0]
+        source_sku = (source_row.get("sku") or "").strip()
+        _update_item_sku_references(cur, source_sku, target_sku)
+        cur.execute(
+            """
+            UPDATE items
+            SET sku = %s,
+                updated_at = NOW()
+            WHERE sku = %s
+            """,
+            (target_sku, source_sku),
+        )
+        unique_rows[0] = dict(source_row, sku=target_sku)
+    for row in unique_rows:
+        row_sku = (row.get("sku") or "").strip()
+        if row_sku and row_sku != target_sku:
+            _merge_item_row_into_sku(cur, row, target_sku)
+    return target_sku
+
+
 def _upsert_env_lines(lines, updates):
     normalized_updates = {key: str(value) for key, value in updates.items() if value is not None}
     seen = set()
@@ -1432,6 +1654,7 @@ def sync_products():
 
         variant_id = variant.get("id")
         inventory_item_id = _canonical_inventory_item_id(inventory_item.get("id"))
+        sku = _reconcile_item_identity(cur, sku, variant_id, inventory_item_id)
         barcode = variant.get("barcode")
         price = variant.get("price")
         compare_at_price = variant.get("compareAtPrice")
