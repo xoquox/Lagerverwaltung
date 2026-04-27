@@ -1,13 +1,53 @@
 """GLS carrier runtime."""
 
 import base64
-import json
-import ssl
 import datetime
+import json
+import re
+import ssl
+import subprocess
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .base import extract_first_pdf_blob, label_identifiers, normalize_country_code, sanitize_order_reference, save_shipping_label_pdf, validate_shipping_address
+
+
+def _gls_login_pdf_dir():
+    return Path(__file__).resolve().parent.parent / "gls"
+
+
+def _extract_login_pdf_credentials(pdf_text):
+    patterns = {
+        "user": r"Login/User:\s*([^\n]+)",
+        "password": r"Passwort:\s*([^\n]+)",
+        "contact_id": r"Kontakt ID:\s*([^\n]+)",
+        "api_url": r"(https://[^\s]+/backend/rs/shipments)",
+    }
+    creds = {}
+    for field, pattern in patterns.items():
+        match = re.search(pattern, pdf_text, flags=re.IGNORECASE)
+        if match:
+            creds[field] = match.group(1).strip()
+    return creds
+
+
+def _load_credentials_from_login_pdf():
+    pdf_dir = _gls_login_pdf_dir()
+    pdf_files = sorted(pdf_dir.glob("*.pdf"))
+    if not pdf_files:
+        return {}
+    pdf_path = pdf_files[0]
+    try:
+        result = subprocess.run(
+            ["pdftotext", str(pdf_path), "-"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return _extract_login_pdf_credentials(result.stdout or "")
 
 
 def load_credentials(settings, t):
@@ -17,6 +57,11 @@ def load_credentials(settings, t):
         "password": settings.get("gls_password", "").strip(),
         "contact_id": settings.get("gls_contact_id", "").strip(),
     }
+    if any(not value for value in creds.values()):
+        pdf_creds = _load_credentials_from_login_pdf()
+        for field, value in pdf_creds.items():
+            if field in creds and not creds[field]:
+                creds[field] = value
     missing = [name for name, value in creds.items() if not value]
     if missing:
         raise RuntimeError(t("gls_missing_data", fields=", ".join(missing)))

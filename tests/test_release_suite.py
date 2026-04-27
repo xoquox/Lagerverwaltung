@@ -1977,6 +1977,36 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(consignee["Name2"], "c/o Werkstatt")
         self.assertEqual(consignee["eMail"], "max@example.com")
 
+    def test_gls_load_credentials_falls_back_to_login_pdf(self):
+        gls_module = self.lager_mc._shipping_carrier_module("gls")
+        pdf_text = """
+Login/User:
+
+2760346584
+
+Passwort:
+
+Rryp7JeNkwgGbXwh
+
+Kontakt ID:
+
+276a45fBjg
+
+https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments
+"""
+
+        with mock.patch.object(
+            gls_module,
+            "_load_credentials_from_login_pdf",
+            return_value=gls_module._extract_login_pdf_credentials(pdf_text),
+        ):
+            creds = gls_module.load_credentials({}, self.lager_mc.t)
+
+        self.assertEqual(creds["user"], "2760346584")
+        self.assertEqual(creds["password"], "Rryp7JeNkwgGbXwh")
+        self.assertEqual(creds["contact_id"], "276a45fBjg")
+        self.assertEqual(creds["api_url"], "https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments")
+
 
     def test_format_shopify_sync_status_label_prefers_pull_and_push_times(self):
         row = {
