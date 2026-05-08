@@ -331,6 +331,11 @@ def _location_gid(location_id=None):
     return f"gid://shopify/Location/{location_id}"
 
 
+def _inventory_reference_document_uri(sku):
+    encoded_sku = urllib.parse.quote(str(sku or "unknown"), safe="")
+    return f"gid://lager-mc/InventorySync/{encoded_sku}"
+
+
 def _canonical_inventory_item_id(value):
     text = (value or "").strip()
     if not text:
@@ -1416,7 +1421,7 @@ def push_inventory_changes():
             "input": {
                 "name": "available",
                 "reason": "correction",
-                "referenceDocumentUri": f"gid://lagerverwaltung/InventorySync/{sku}",
+                "referenceDocumentUri": _inventory_reference_document_uri(sku),
                 "quantities": [
                     {
                         "inventoryItemId": inventory_item_gid,

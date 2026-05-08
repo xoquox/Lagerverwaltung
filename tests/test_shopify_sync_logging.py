@@ -394,7 +394,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
                 executed.append((" ".join(query.split()), params))
 
             def fetchall(self):
-                return [("SKU-1", 7, "12345")]
+                return [("SKU 1", "SKU 1", "gid://shopify/Location/67402989753", 7, "12345")]
 
         class FakeConnection:
             def cursor(self):
@@ -422,8 +422,9 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertIn("@idempotent(key:", graphql_mock.call_args.args[0])
         variables = graphql_mock.call_args.args[1]
         self.assertEqual(variables["input"]["name"], "available")
+        self.assertEqual(variables["input"]["referenceDocumentUri"], "gid://lager-mc/InventorySync/SKU%201")
         self.assertEqual(variables["input"]["quantities"][0]["inventoryItemId"], "gid://shopify/InventoryItem/12345")
-        self.assertEqual(variables["input"]["quantities"][0]["locationId"], self.shopify_sync._location_gid())
+        self.assertEqual(variables["input"]["quantities"][0]["locationId"], "gid://shopify/Location/67402989753")
         self.assertEqual(variables["input"]["quantities"][0]["quantity"], 7)
         self.assertTrue(any("UPDATE item_location_inventory SET dirty = FALSE" in query for query, _ in executed))
 
