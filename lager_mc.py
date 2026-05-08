@@ -740,6 +740,14 @@ def database_connection_dialog(stdscr, error_text):
             return False
 
 
+def _db_connect_timeout(settings):
+    try:
+        value = int(settings.get("db_connect_timeout", DEFAULT_SETTINGS.get("db_connect_timeout", 5)))
+    except (TypeError, ValueError):
+        value = int(DEFAULT_SETTINGS.get("db_connect_timeout", 5))
+    return max(1, value)
+
+
 def db():
     try:
         return psycopg2.connect(
@@ -748,7 +756,7 @@ def db():
             dbname=SETTINGS["db_name"],
             user=SETTINGS["db_user"],
             password=SETTINGS["db_pass"],
-            connect_timeout=5,
+            connect_timeout=_db_connect_timeout(SETTINGS),
             cursor_factory=psycopg2.extras.RealDictCursor
         )
     except psycopg2.OperationalError as exc:
@@ -960,7 +968,7 @@ def test_db_connection(settings):
         dbname=settings["db_name"],
         user=settings["db_user"],
         password=settings["db_pass"],
-        connect_timeout=5,
+        connect_timeout=_db_connect_timeout(settings),
     )
     con.close()
 

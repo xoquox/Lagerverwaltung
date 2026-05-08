@@ -9,6 +9,7 @@ LOCAL_SETTINGS_PATH = Path(__file__).resolve().parent / "settings.local.json"
 DEFAULT_SETTINGS = {
     "db_host": "localhost",
     "db_port": 5432,
+    "db_connect_timeout": 5,
     "db_name": "lagerdb",
     "db_user": "lager",
     "db_pass": "",

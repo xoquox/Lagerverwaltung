@@ -119,6 +119,7 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(loaded["color_theme_file"], app_settings.DEFAULT_SETTINGS["color_theme_file"])
             self.assertEqual(loaded["label_font_regular"], app_settings.DEFAULT_SETTINGS["label_font_regular"])
             self.assertEqual(loaded["label_font_condensed"], app_settings.DEFAULT_SETTINGS["label_font_condensed"])
+            self.assertEqual(loaded["db_connect_timeout"], app_settings.DEFAULT_SETTINGS["db_connect_timeout"])
 
             self.assertFalse(local_settings_path.exists())
 
@@ -626,6 +627,12 @@ class LagerMcLogicTests(unittest.TestCase):
             self.assertEqual(self.lager_mc.normalize_regal(""), "")
             self.assertIsNone(self.lager_mc.normalize_regal("AA"))
             self.assertIsNone(self.lager_mc.normalize_regal("1"))
+
+    def test_db_connect_timeout_uses_setting_with_safe_fallback(self):
+        self.assertEqual(self.lager_mc._db_connect_timeout({"db_connect_timeout": 15}), 15)
+        self.assertEqual(self.lager_mc._db_connect_timeout({"db_connect_timeout": "20"}), 20)
+        self.assertEqual(self.lager_mc._db_connect_timeout({"db_connect_timeout": "abc"}), 5)
+        self.assertEqual(self.lager_mc._db_connect_timeout({"db_connect_timeout": 0}), 1)
 
     def test_translation_keys_match_across_languages(self):
         translations = self.lager_mc.TRANSLATIONS
