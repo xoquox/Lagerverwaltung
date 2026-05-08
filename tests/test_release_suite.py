@@ -1278,6 +1278,13 @@ class LagerMcLogicTests(unittest.TestCase):
 
         self.lager_mc._safe_addstr(TightWindow(), 0, 2, "Titel")
 
+    def test_draw_shadow_is_disabled_for_consistent_dialogs(self):
+        stdscr = mock.Mock()
+
+        self.lager_mc.draw_shadow(stdscr, 1, 2, 3, 4)
+
+        stdscr.getmaxyx.assert_not_called()
+
     def test_settings_print_test_context_for_carrier_printer_uses_selected_values(self):
         values = {
             "shipping_label_printer": "Fallback",
@@ -1399,6 +1406,38 @@ class LagerMcLogicTests(unittest.TestCase):
         queue_mock.assert_not_called()
         message_mock.assert_called_once()
         self.assertIn("OK:", message_mock.call_args.args[2])
+
+    def test_bulk_execution_prints_successful_labels_when_one_order_fails(self):
+        orders = [
+            {"order_id": "OID-1", "order_name": "#1001"},
+            {"order_id": "OID-2", "order_name": "#1002"},
+        ]
+        created = {
+            "label_id": 55,
+            "label_path": "/tmp/free.pdf",
+            "shipment_reference": "ADR-1",
+        }
+
+        with (
+            mock.patch.object(self.lager_mc, "_execution_carrier_dialog", return_value="free"),
+            mock.patch.object(self.lager_mc, "_select_shipping_carrier_options", return_value=[]),
+            mock.patch.object(self.lager_mc, "_bulk_print_mode_dialog", return_value="label"),
+            mock.patch.object(self.lager_mc, "calculate_order_shipping_weight", return_value=(0.5, 500)),
+            mock.patch.object(self.lager_mc, "create_shipping_label", side_effect=[created, RuntimeError("kaputt")]),
+            mock.patch.object(self.lager_mc, "_merge_pdf_files") as merge_mock,
+            mock.patch.object(self.lager_mc, "_print_pdf_via_lp", return_value=True) as print_mock,
+            mock.patch.object(self.lager_mc, "update_shipping_label_status") as status_mock,
+            mock.patch.object(self.lager_mc, "message_box") as message_mock,
+        ):
+            self.lager_mc.run_bulk_execution(None, orders, {"OID-1": [], "OID-2": []}, {"OID-1", "OID-2"})
+
+        merge_mock.assert_called_once()
+        self.assertEqual(merge_mock.call_args.args[0], ["/tmp/free.pdf"])
+        print_mock.assert_called_once()
+        status_mock.assert_called_once_with(55, "PRINTED")
+        message_mock.assert_called_once()
+        self.assertIn("OK:1", message_mock.call_args.args[2])
+        self.assertIn("Err:1", message_mock.call_args.args[2])
 
     def test_get_shopify_customers_snapshot_queries_local_table_and_caches_rows(self):
         fake_rows = [[{"customer_id": "gid://shopify/Customer/1", "display_name": "Max Mustermann"}]]
@@ -1733,6 +1772,73 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertTrue(country_field["read_only"])
         self.assertEqual(country_field["action"], "country")
 
+    def test_parse_manual_address_text_fills_common_fields(self):
+        parsed = self.lager_mc._parse_manual_address_text(
+            "Mario Rossi\nFermo Posta Olia Speciosa snc\nVia Olia Speciosa\n09040 Castiadas CA\nItalia\nmario@example.com",
+            default_country="DE",
+        )
+
+        self.assertEqual(parsed["name"], "Mario Rossi")
+        self.assertEqual(parsed["address_extra"], "Fermo Posta Olia Speciosa snc")
+        self.assertEqual(parsed["street"], "Via Olia Speciosa")
+        self.assertEqual(parsed["zip"], "09040")
+        self.assertEqual(parsed["city"], "Castiadas CA")
+        self.assertEqual(parsed["country"], "IT")
+        self.assertEqual(parsed["email"], "mario@example.com")
+
+    def test_parse_manual_address_text_uses_default_country_when_missing(self):
+        parsed = self.lager_mc._parse_manual_address_text(
+            "Max Mustermann, Musterstr. 1, 12345 Berlin",
+            default_country="DE",
+        )
+
+        self.assertEqual(parsed["name"], "Max Mustermann")
+        self.assertEqual(parsed["street"], "Musterstr. 1")
+        self.assertEqual(parsed["zip"], "12345")
+        self.assertEqual(parsed["city"], "Berlin")
+        self.assertEqual(parsed["country"], "DE")
+
+    def test_parse_manual_address_text_keeps_country_empty_without_default(self):
+        parsed = self.lager_mc._parse_manual_address_text(
+            "Max Mustermann\nMusterstr. 1\n12345 Berlin",
+            default_country="",
+        )
+
+        self.assertEqual(parsed["country"], "")
+
+    def test_apply_parsed_address_to_manual_state_overwrites_detected_fields(self):
+        state = {
+            "name": "",
+            "address_extra": "",
+            "street": "",
+            "zip": "",
+            "city": "",
+            "email": "",
+            "reference": "REF-1",
+            "weight_grams": "500",
+        }
+        parsed = {
+            "name": "Max Mustermann",
+            "address_extra": "Firma",
+            "street": "Musterstr. 1",
+            "zip": "12345",
+            "city": "Berlin",
+            "email": "max@example.com",
+            "country": "DE",
+        }
+
+        updated, country = self.lager_mc._apply_parsed_address_to_manual_state(state, parsed, "")
+
+        self.assertEqual(updated["name"], "Max Mustermann")
+        self.assertEqual(updated["address_extra"], "Firma")
+        self.assertEqual(updated["street"], "Musterstr. 1")
+        self.assertEqual(updated["zip"], "12345")
+        self.assertEqual(updated["city"], "Berlin")
+        self.assertEqual(updated["email"], "max@example.com")
+        self.assertEqual(updated["reference"], "REF-1")
+        self.assertEqual(updated["weight_grams"], "500")
+        self.assertEqual(country, "DE")
+
     def test_manual_label_carrier_fields_come_from_module(self):
         ctx = self.lager_mc._shipping_runtime_context()
         gls_fields = self.lager_mc._shipping_carrier_module("gls").manual_fields(ctx, {"selected_services": ["service_flexdelivery"]})
@@ -1766,7 +1872,7 @@ class LagerMcLogicTests(unittest.TestCase):
                         self.lager_mc.handle_delivery_note_output(None, order, items)
         create_mock.assert_called_once_with(order, items)
         print_path_mock.assert_called_once_with(order, "/tmp/note.pdf")
-        message_mock.assert_called_once()
+        message_mock.assert_not_called()
 
     def test_handle_delivery_note_output_loads_missing_items_from_cache(self):
         order = {"order_name": "#1001", "order_id": "OID-1"}

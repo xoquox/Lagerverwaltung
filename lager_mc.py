@@ -20,6 +20,7 @@ import tempfile
 import textwrap
 import time
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -104,6 +105,19 @@ MANUAL_LABEL_COUNTRY_OPTIONS = [
 ]
 
 COUNTRY_NAME_DE = COUNTRY_NAMES["de"]
+
+COUNTRY_INPUT_ALIASES = {
+    "italia": "IT",
+    "espana": "ES",
+    "españa": "ES",
+    "nederland": "NL",
+    "belgie": "BE",
+    "belgië": "BE",
+    "suisse": "CH",
+    "svizzera": "CH",
+    "francia": "FR",
+    "france": "FR",
+}
 
 COUNTRY_ALPHA3 = {
     "AD": "AND",
@@ -289,6 +303,23 @@ def t(key, **kwargs):
         except Exception:
             return value
     return value
+
+
+@contextmanager
+def visible_cursor():
+    previous_cursor = None
+    try:
+        previous_cursor = curses.curs_set(1)
+    except curses.error:
+        previous_cursor = None
+    try:
+        yield
+    finally:
+        if previous_cursor is not None:
+            try:
+                curses.curs_set(previous_cursor)
+            except curses.error:
+                pass
 
 
 def get_active_theme_name():
@@ -1259,7 +1290,7 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
-            COALESCE(fo_stats.total_internal_qty, order_stats.local_internal_qty, 0) AS local_internal_qty,
+            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
             COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
             COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
             COALESCE(fo_stats.location_count, 0) AS shopify_location_count
@@ -1279,33 +1310,50 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
         ) AS order_stats ON order_stats.order_id = so.order_id
         LEFT JOIN (
             SELECT
-                foi.order_id,
-                SUM(
-                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                    THEN foi.quantity
-                    ELSE 0
-                    END
-                ) AS total_internal_qty,
+                grouped.order_id,
                 SUM(
                     CASE
-                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                         AND foi.assigned_location_id = %s
-                        THEN foi.quantity
+                        WHEN grouped.external_fulfillment = FALSE
+                         AND grouped.assigned_location_id = %s
+                        THEN grouped.quantity
                         ELSE 0
                     END
                 ) AS active_location_internal_qty,
                 SUM(
                     CASE
-                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                         AND foi.assigned_location_id = %s
-                        THEN foi.remaining_quantity
+                        WHEN grouped.external_fulfillment = FALSE
+                         AND grouped.assigned_location_id = %s
+                        THEN grouped.remaining_quantity
                         ELSE 0
                     END
                 ) AS active_location_remaining_qty,
-                COUNT(DISTINCT NULLIF(foi.assigned_location_id, '')) AS location_count
-            FROM shopify_fulfillment_order_items foi
-            LEFT JOIN items i ON i.sku = foi.sku
-            GROUP BY foi.order_id
+                COUNT(DISTINCT NULLIF(grouped.assigned_location_id, '')) AS location_count
+            FROM (
+                SELECT
+                    foi.order_id,
+                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id) AS line_key,
+                    foi.assigned_location_id,
+                    COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
+                    LEAST(
+                        SUM(COALESCE(foi.quantity, 0)),
+                        COALESCE(MAX(oi.quantity), SUM(COALESCE(foi.quantity, 0)))
+                    ) AS quantity,
+                    LEAST(
+                        SUM(COALESCE(foi.remaining_quantity, 0)),
+                        COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
+                    ) AS remaining_quantity
+                FROM shopify_fulfillment_order_items foi
+                LEFT JOIN shopify_order_items oi
+                    ON oi.order_id = foi.order_id
+                   AND oi.order_line_item_id = foi.order_line_item_id
+                LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
+                GROUP BY
+                    foi.order_id,
+                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id),
+                    foi.assigned_location_id,
+                    COALESCE(i.external_fulfillment, FALSE)
+            ) AS grouped
+            GROUP BY grouped.order_id
         ) AS fo_stats ON fo_stats.order_id = so.order_id
         {where}
         ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
@@ -1338,7 +1386,7 @@ def _load_orders_snapshot():
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
-            COALESCE(fo_stats.total_internal_qty, order_stats.local_internal_qty, 0) AS local_internal_qty,
+            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
             COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
             COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
             COALESCE(fo_stats.location_count, 0) AS shopify_location_count
@@ -1358,33 +1406,50 @@ def _load_orders_snapshot():
         ) AS order_stats ON order_stats.order_id = so.order_id
         LEFT JOIN (
             SELECT
-                foi.order_id,
-                SUM(
-                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                    THEN foi.quantity
-                    ELSE 0
-                    END
-                ) AS total_internal_qty,
+                grouped.order_id,
                 SUM(
                     CASE
-                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                         AND foi.assigned_location_id = %s
-                        THEN foi.quantity
+                        WHEN grouped.external_fulfillment = FALSE
+                         AND grouped.assigned_location_id = %s
+                        THEN grouped.quantity
                         ELSE 0
                     END
                 ) AS active_location_internal_qty,
                 SUM(
                     CASE
-                        WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                         AND foi.assigned_location_id = %s
-                        THEN foi.remaining_quantity
+                        WHEN grouped.external_fulfillment = FALSE
+                         AND grouped.assigned_location_id = %s
+                        THEN grouped.remaining_quantity
                         ELSE 0
                     END
                 ) AS active_location_remaining_qty,
-                COUNT(DISTINCT NULLIF(foi.assigned_location_id, '')) AS location_count
-            FROM shopify_fulfillment_order_items foi
-            LEFT JOIN items i ON i.sku = foi.sku
-            GROUP BY foi.order_id
+                COUNT(DISTINCT NULLIF(grouped.assigned_location_id, '')) AS location_count
+            FROM (
+                SELECT
+                    foi.order_id,
+                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id) AS line_key,
+                    foi.assigned_location_id,
+                    COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
+                    LEAST(
+                        SUM(COALESCE(foi.quantity, 0)),
+                        COALESCE(MAX(oi.quantity), SUM(COALESCE(foi.quantity, 0)))
+                    ) AS quantity,
+                    LEAST(
+                        SUM(COALESCE(foi.remaining_quantity, 0)),
+                        COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
+                    ) AS remaining_quantity
+                FROM shopify_fulfillment_order_items foi
+                LEFT JOIN shopify_order_items oi
+                    ON oi.order_id = foi.order_id
+                   AND oi.order_line_item_id = foi.order_line_item_id
+                LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
+                GROUP BY
+                    foi.order_id,
+                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id),
+                    foi.assigned_location_id,
+                    COALESCE(i.external_fulfillment, FALSE)
+            ) AS grouped
+            GROUP BY grouped.order_id
         ) AS fo_stats ON fo_stats.order_id = so.order_id
         ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
         """,
@@ -1477,10 +1542,16 @@ def get_order_items(order_id):
                 COALESCE(foi.order_line_item_id, oi.order_line_item_id) AS order_line_item_id,
                 COALESCE(foi.sku, oi.sku) AS sku,
                 COALESCE(MAX(foi.title), MAX(oi.title), '-') AS title,
-                SUM(COALESCE(foi.quantity, 0)) AS quantity,
-                GREATEST(
-                    SUM(COALESCE(foi.quantity, 0)) - SUM(COALESCE(foi.remaining_quantity, 0)),
-                    0
+                LEAST(
+                    SUM(COALESCE(foi.quantity, 0)),
+                    COALESCE(MAX(oi.quantity), SUM(COALESCE(foi.quantity, 0)))
+                ) AS quantity,
+                COALESCE(
+                    MAX(oi.fulfilled_quantity),
+                    GREATEST(
+                        SUM(COALESCE(foi.quantity, 0)) - SUM(COALESCE(foi.remaining_quantity, 0)),
+                        0
+                    )
                 ) AS fulfilled_quantity,
                 COALESCE(ili.regal, i.regal) AS regal,
                 COALESCE(ili.fach, i.fach) AS fach,
@@ -2142,6 +2213,34 @@ def _manual_label_country_display(country_code):
     return _localized_country_display(normalized)
 
 
+def _manual_label_default_country_display(country_code):
+    normalized = _shipping_country_code(country_code)
+    if not normalized:
+        return t("manual_label_default_country_empty")
+    return _localized_country_display(normalized)
+
+
+def _manual_label_default_country():
+    return _shipping_country_code(SETTINGS.get("manual_label_default_country", DEFAULT_SETTINGS.get("manual_label_default_country", "DE")))
+
+
+def _manual_country_code_from_text(country_value):
+    normalized = _shipping_country_code(country_value)
+    if normalized:
+        return normalized
+    raw = (country_value or "").strip().lower()
+    if not raw:
+        return ""
+    alias = COUNTRY_INPUT_ALIASES.get(raw)
+    if alias:
+        return alias
+    for names in COUNTRY_NAMES.values():
+        for code, name in names.items():
+            if raw == str(name).strip().lower():
+                return code
+    return ""
+
+
 def _normalized_country_code_for_display(country_value):
     raw = (country_value or "").strip()
     if not raw:
@@ -2258,6 +2357,16 @@ def manual_country_dialog(stdscr, current_country):
     return choice_dialog(stdscr, t("manual_country_title"), options, normalized)
 
 
+def manual_default_country_dialog(stdscr, current_country):
+    normalized = _shipping_country_code(current_country)
+    options = [{"value": "", "label": t("manual_label_default_country_empty")}]
+    options.extend(
+        {"value": option["value"], "label": f"{_localized_country_name_by_code(option['value'])} ({option['value']})"}
+        for option in MANUAL_LABEL_COUNTRY_OPTIONS
+    )
+    return choice_dialog(stdscr, t("manual_label_default_country_title"), options, normalized)
+
+
 def manual_label_print_mode_dialog(stdscr, current_mode):
     return choice_dialog(
         stdscr,
@@ -2299,6 +2408,177 @@ def _manual_label_output_field(print_mode):
         "read_only": True,
         "action": "print_mode",
     }
+
+
+def _split_address_text(raw_text):
+    parts = re.split(r"[\r\n,;]+", raw_text or "")
+    return [part.strip() for part in parts if part and part.strip()]
+
+
+def _parse_manual_address_text(raw_text, default_country=""):
+    lines = _split_address_text(raw_text)
+    result = {
+        "name": "",
+        "address_extra": "",
+        "street": "",
+        "zip": "",
+        "city": "",
+        "email": "",
+        "country": "",
+    }
+    remaining = []
+    for line in lines:
+        email_match = re.search(r"[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+\.[A-Za-z]{2,}", line)
+        if email_match and not result["email"]:
+            result["email"] = email_match.group(0)
+            line = (line[:email_match.start()] + " " + line[email_match.end():]).strip()
+            if not line:
+                continue
+        country = _manual_country_code_from_text(line)
+        if country and not result["country"]:
+            result["country"] = country
+            continue
+        remaining.append(line)
+
+    for line in list(remaining):
+        match = re.search(r"\b([A-Z]{1,2}-?)?(\d{4,6})\b\s+(.+)", line, flags=re.IGNORECASE)
+        if match and not result["zip"]:
+            result["zip"] = match.group(2)
+            result["city"] = match.group(3).strip()
+            remaining.remove(line)
+            break
+
+    street_words = (
+        "strasse", "str.", "straße", "weg", "platz", "allee", "ring", "gasse",
+        "via", "viale", "corso", "rue", "road", "street", "st.", "lane",
+    )
+    for line in list(remaining):
+        normalized = line.lower()
+        has_house_number = bool(re.search(r"\d+[A-Za-z]?\b", line))
+        if has_house_number or any(word in normalized for word in street_words):
+            result["street"] = line
+            remaining.remove(line)
+            break
+
+    if not result["country"]:
+        result["country"] = _manual_country_code_from_text(default_country)
+    if remaining:
+        result["name"] = remaining.pop(0)
+    if remaining:
+        result["address_extra"] = remaining.pop(0)
+    if remaining and not result["street"]:
+        result["street"] = remaining.pop(0)
+    if remaining and not result["city"]:
+        city_line = remaining.pop(0)
+        match = re.search(r"\b(\d{4,6})\b\s+(.+)", city_line)
+        if match:
+            result["zip"] = result["zip"] or match.group(1)
+            result["city"] = match.group(2).strip()
+        else:
+            result["city"] = city_line
+    return result
+
+
+def _apply_parsed_address_to_manual_state(state, parsed, current_country):
+    updated = dict(state)
+    for source_key, state_key in [
+        ("name", "name"),
+        ("address_extra", "address_extra"),
+        ("street", "street"),
+        ("zip", "zip"),
+        ("city", "city"),
+        ("email", "email"),
+    ]:
+        value = (parsed.get(source_key) or "").strip()
+        if value:
+            updated[state_key] = value
+    country = (parsed.get("country") or "").strip().upper() or current_country
+    return updated, country
+
+
+def manual_address_text_dialog(stdscr):
+    h, w = stdscr.getmaxyx()
+    width = min(max(72, int(w * 0.72)), w - 4)
+    height = min(max(14, int(h * 0.55)), h - 2)
+    y = max(1, (h - height) // 2)
+    x = max(2, (w - width) // 2)
+    text = ""
+    cursor = 0
+
+    draw_shadow(stdscr, y, x, height, width)
+    win = curses.newwin(height, width, y, x)
+    win.keypad(True)
+    win.timeout(300)
+    win.bkgd(" ", curses.color_pair(1))
+
+    try:
+        with visible_cursor():
+            while True:
+                win.erase()
+                win.box()
+                win.addstr(0, 2, f" {t('manual_address_paste_title')} ")
+                content_width = width - 4
+                content_height = height - 4
+                lines = text.split("\n")
+                flat_pos = 0
+                cursor_row = 0
+                cursor_col = 0
+                for idx, line in enumerate(lines):
+                    next_pos = flat_pos + len(line)
+                    if flat_pos <= cursor <= next_pos:
+                        cursor_row = idx
+                        cursor_col = cursor - flat_pos
+                        break
+                    flat_pos = next_pos + 1
+                top = max(0, cursor_row - content_height + 1)
+                for row_index, line in enumerate(lines[top:top + content_height]):
+                    win.addstr(2 + row_index, 2, _fit(line, content_width))
+                footer = t("manual_address_paste_footer")
+                draw_footer_line(win, height - 1, 1, width - 2, footer)
+                win.move(2 + min(cursor_row - top, content_height - 1), 2 + min(cursor_col, content_width - 1))
+                win.refresh()
+                try:
+                    key = win.get_wch()
+                except curses.error:
+                    continue
+                if key in (27, curses.KEY_F9):
+                    return None
+                if key == curses.KEY_F2:
+                    return text
+                if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\b"):
+                    if cursor > 0:
+                        text = text[:cursor - 1] + text[cursor:]
+                        cursor -= 1
+                    continue
+                if key == curses.KEY_DC:
+                    if cursor < len(text):
+                        text = text[:cursor] + text[cursor + 1:]
+                    continue
+                if key == curses.KEY_LEFT:
+                    cursor = max(0, cursor - 1)
+                    continue
+                if key == curses.KEY_RIGHT:
+                    cursor = min(len(text), cursor + 1)
+                    continue
+                if key == curses.KEY_HOME:
+                    before = text.rfind("\n", 0, cursor)
+                    cursor = 0 if before < 0 else before + 1
+                    continue
+                if key == curses.KEY_END:
+                    after = text.find("\n", cursor)
+                    cursor = len(text) if after < 0 else after
+                    continue
+                if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+                    text = text[:cursor] + "\n" + text[cursor:]
+                    cursor += 1
+                    continue
+                if isinstance(key, str) and key.isprintable():
+                    text = text[:cursor] + key + text[cursor:]
+                    cursor += len(key)
+    finally:
+        win.timeout(-1)
+
+
 def _merge_pdf_files(pdf_paths, output_path):
     valid_paths = [str(Path(path)) for path in pdf_paths if path and os.path.isfile(path)]
     if not valid_paths:
@@ -3517,13 +3797,7 @@ def location_panel_visible_rows(screen_height):
 
 
 def draw_shadow(stdscr, y, x, h, w):
-    max_y, max_x = stdscr.getmaxyx()
-    if y + h + 1 >= max_y or x + w + 2 >= max_x:
-        return
-    shadow = curses.newwin(h, w, y + 1, x + 2)
-    shadow.bkgd(" ", curses.color_pair(3))
-    shadow.erase()
-    shadow.refresh()
+    return
 
 
 def _scrolling_footer_slice(text, width):
@@ -4255,19 +4529,14 @@ def form_dialog(
     field_normalizers=None,
     submit_keys=None,
 ):
-
     h, w = stdscr.getmaxyx()
-
     longest_label = max((len(field["label"]) for field in fields), default=10)
     preferred_width = longest_label + 68
     width = min(max(70, preferred_width), w - 4)
     height = len(fields) + 6
-
     y = max(1, (h - height) // 2)
     x = max(2, (w - width) // 2)
-
     draw_shadow(stdscr, y, x, height, width)
-
     win = curses.newwin(height, width, y, x)
     win.keypad(True)
     win.bkgd(" ", curses.color_pair(1))
@@ -4297,175 +4566,164 @@ def form_dialog(
             scroll = cursor - field_width + 1
         scroll_offsets[index] = max(0, min(scroll, max_scroll))
 
-    while True:
+    with visible_cursor():
+        while True:
+            win.erase()
+            win.box()
+            win.addstr(0, 2, f" {title} ")
 
-        win.erase()
-        win.box()
-        win.addstr(0, 2, f" {title} ")
+            for i, field in enumerate(fields):
+                row = 2 + i
+                label = field["label"]
+                val = values[i]
+                is_active = i == active
+                if is_active:
+                    win.attrset(curses.color_pair(2))
+                else:
+                    win.attrset(curses.color_pair(1))
+                win.addstr(row, 2, f"{label}: ")
 
-        for i, field in enumerate(fields):
+                xpos = len(label) + 4
 
-            row = 2 + i
-            label = field["label"]
-            val = values[i]
-            is_active = i == active
-            if is_active:
-                win.attrset(curses.color_pair(2))
-            else:
+                if is_active:
+                    field_width = max(1, width - xpos - 2)
+                    normalize_view(i, field_width)
+                    visible = val[scroll_offsets[i]: scroll_offsets[i] + field_width]
+                else:
+                    visible = val[-(width - xpos - 2):]
+
+                win.addstr(row, xpos, visible.ljust(width - xpos - 2))
                 win.attrset(curses.color_pair(1))
-            win.addstr(row, 2, f"{label}: ")
 
+            draw_footer_line(win, height - 2, 2, width - 4, footer)
+            cursor_y = 2 + active
+            label = fields[active]["label"]
             xpos = len(label) + 4
+            field_width = max(1, width - xpos - 2)
+            normalize_view(active, field_width)
+            cursor_x = xpos + min(max(0, cursor_positions[active] - scroll_offsets[active]), field_width - 1)
+            win.move(cursor_y, cursor_x)
+            win.refresh()
 
-            if is_active:
-                field_width = max(1, width - xpos - 2)
-                normalize_view(i, field_width)
-                visible = val[scroll_offsets[i]: scroll_offsets[i] + field_width]
-            else:
-                visible = val[-(width - xpos - 2):]
-
-            win.addstr(row, xpos, visible.ljust(width - xpos - 2))
-            win.attrset(curses.color_pair(1))
-
-        draw_footer_line(win, height - 2, 2, width - 4, footer)
-        
-        cursor_y = 2 + active
-
-        label = fields[active]["label"]
-        val = values[active]
-
-        xpos = len(label) + 4
-        field_width = max(1, width - xpos - 2)
-        normalize_view(active, field_width)
-        cursor_x = xpos + min(max(0, cursor_positions[active] - scroll_offsets[active]), field_width - 1)
-
-        win.move(cursor_y, cursor_x)
-
-        win.refresh()
-
-
-        win.timeout(200)
-        try:
-            key = win.get_wch()
-        except curses.error:
-            continue
-        finally:
-            win.timeout(-1)
-
-        if key in (27, curses.KEY_F9):
-            return None
-
-        for action in extra_actions:
-            if key in action["keys"]:
-                return {
-                    "__action__": action["name"],
-                    "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
-                    "__active__": active,
-                }
-
-        if key in submit_keys:
-            active_field = fields[active]
-            action_name = active_field.get("action")
-            if action_name:
-                return {
-                    "__action__": action_name,
-                    "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
-                    "__active__": active,
-                }
-            if submit_keys == {10, 13, "\n", "\r", curses.KEY_ENTER} and active >= len(fields) - 1:
-                return {fields[i]["name"]: values[i] for i in range(len(fields))}
-            active = (active + 1) % len(fields)
-            continue
-
-        if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
-            active_field = fields[active]
-            action_name = active_field.get("action")
-            if action_name:
-                return {
-                    "__action__": action_name,
-                    "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
-                    "__active__": active,
-                }
-            active = (active + 1) % len(fields)
-            continue
-
-        if key == curses.KEY_DOWN:
-            active = (active + 1) % len(fields)
-            continue
-
-        if key == curses.KEY_UP:
-            active = (active - 1) % len(fields)
-            continue
-
-        if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
-            if fields[active].get("read_only"):
-                curses.beep()
+            win.timeout(200)
+            try:
+                key = win.get_wch()
+            except curses.error:
                 continue
-            pos = cursor_positions[active]
-            if pos > 0:
-                field_name = fields[active]["name"]
-                candidate = values[active][:pos - 1] + values[active][pos:]
-                normalizer = field_normalizers.get(field_name)
-                if normalizer:
-                    candidate = normalizer(candidate)
-                values[active] = candidate
-                cursor_positions[active] = pos - 1
-            continue
+            finally:
+                win.timeout(-1)
 
-        if key == curses.KEY_DC:
-            if fields[active].get("read_only"):
-                curses.beep()
+            if key in (27, curses.KEY_F9):
+                return None
+
+            for action in extra_actions:
+                if key in action["keys"]:
+                    return {
+                        "__action__": action["name"],
+                        "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
+                        "__active__": active,
+                    }
+
+            if key in submit_keys:
+                active_field = fields[active]
+                action_name = active_field.get("action")
+                if action_name:
+                    return {
+                        "__action__": action_name,
+                        "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
+                        "__active__": active,
+                    }
+                if submit_keys == {10, 13, "\n", "\r", curses.KEY_ENTER} and active >= len(fields) - 1:
+                    return {fields[i]["name"]: values[i] for i in range(len(fields))}
+                active = (active + 1) % len(fields)
                 continue
-            pos = cursor_positions[active]
-            if pos < len(values[active]):
-                field_name = fields[active]["name"]
-                candidate = values[active][:pos] + values[active][pos + 1:]
-                normalizer = field_normalizers.get(field_name)
-                if normalizer:
-                    candidate = normalizer(candidate)
-                values[active] = candidate
-            continue
 
-        if key == curses.KEY_LEFT:
-            if cursor_positions[active] > 0:
-                cursor_positions[active] -= 1
-            continue
+            if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+                active_field = fields[active]
+                action_name = active_field.get("action")
+                if action_name:
+                    return {
+                        "__action__": action_name,
+                        "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
+                        "__active__": active,
+                    }
+                active = (active + 1) % len(fields)
+                continue
 
-        if key == curses.KEY_RIGHT:
-            if cursor_positions[active] < len(values[active]):
-                cursor_positions[active] += 1
-            continue
+            if key == curses.KEY_DOWN:
+                active = (active + 1) % len(fields)
+                continue
 
-        if key == curses.KEY_HOME:
-            cursor_positions[active] = 0
-            continue
+            if key == curses.KEY_UP:
+                active = (active - 1) % len(fields)
+                continue
 
-        if key == curses.KEY_END:
-            cursor_positions[active] = len(values[active])
-            continue
-
-        elif isinstance(key, str):
-            if key.isprintable():
+            if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
                 if fields[active].get("read_only"):
                     curses.beep()
                     continue
                 pos = cursor_positions[active]
-                candidate = values[active][:pos] + key + values[active][pos:]
-                field_name = fields[active]["name"]
-                normalizer = field_normalizers.get(field_name)
-                if normalizer:
-                    candidate = normalizer(candidate)
-                validator = field_validators.get(field_name)
-                if validator and not validator(candidate):
+                if pos > 0:
+                    field_name = fields[active]["name"]
+                    candidate = values[active][:pos - 1] + values[active][pos:]
+                    normalizer = field_normalizers.get(field_name)
+                    if normalizer:
+                        candidate = normalizer(candidate)
+                    values[active] = candidate
+                    cursor_positions[active] = pos - 1
+                continue
+
+            if key == curses.KEY_DC:
+                if fields[active].get("read_only"):
                     curses.beep()
                     continue
-                values[active] = candidate
-                cursor_positions[active] = pos + 1
+                pos = cursor_positions[active]
+                if pos < len(values[active]):
+                    field_name = fields[active]["name"]
+                    candidate = values[active][:pos] + values[active][pos + 1:]
+                    normalizer = field_normalizers.get(field_name)
+                    if normalizer:
+                        candidate = normalizer(candidate)
+                    values[active] = candidate
+                continue
+
+            if key == curses.KEY_LEFT:
+                if cursor_positions[active] > 0:
+                    cursor_positions[active] -= 1
+                continue
+
+            if key == curses.KEY_RIGHT:
+                if cursor_positions[active] < len(values[active]):
+                    cursor_positions[active] += 1
+                continue
+
+            if key == curses.KEY_HOME:
+                cursor_positions[active] = 0
+                continue
+
+            if key == curses.KEY_END:
+                cursor_positions[active] = len(values[active])
+                continue
+
+            elif isinstance(key, str):
+                if key.isprintable():
+                    if fields[active].get("read_only"):
+                        curses.beep()
+                        continue
+                    pos = cursor_positions[active]
+                    candidate = values[active][:pos] + key + values[active][pos:]
+                    field_name = fields[active]["name"]
+                    normalizer = field_normalizers.get(field_name)
+                    if normalizer:
+                        candidate = normalizer(candidate)
+                    validator = field_validators.get(field_name)
+                    if validator and not validator(candidate):
+                        curses.beep()
+                        continue
+                    values[active] = candidate
+                    cursor_positions[active] = pos + 1
 
 def search_dialog(stdscr, initial):
-
-    curses.curs_set(1)
-
     h, w = stdscr.getmaxyx()
 
     width = 60
@@ -4482,46 +4740,47 @@ def search_dialog(stdscr, initial):
 
     value = initial or ""
 
-    while True:
+    with visible_cursor():
+        while True:
 
-        win.erase()
-        win.box()
+            win.erase()
+            win.box()
 
-        win.addstr(0, 2, f" {t('search')} ")
+            win.addstr(0, 2, f" {t('search')} ")
 
-        win.addstr(2, 2, f"{t('search')}:")
+            win.addstr(2, 2, f"{t('search')}:")
 
-        win.attron(curses.color_pair(2))
+            win.attron(curses.color_pair(2))
 
-        field_width = width - 12
+            field_width = width - 12
 
-        field = value[-field_width:]
-        win.addstr(2, 10, field[:field_width].ljust(field_width))
-        
-        win.attroff(curses.color_pair(2))
+            field = value[-field_width:]
+            win.addstr(2, 10, field[:field_width].ljust(field_width))
+            
+            win.attroff(curses.color_pair(2))
 
-        win.addstr(height-1, 2, t("search_footer"))
+            win.addstr(height-1, 2, t("search_footer"))
 
-        cursor_pos = min(len(value), field_width - 1)
-        win.move(2, 10 + cursor_pos)
+            cursor_pos = min(len(value), field_width - 1)
+            win.move(2, 10 + cursor_pos)
 
-        win.refresh()
+            win.refresh()
 
-        key = win.get_wch()
+            key = win.get_wch()
 
-        if key in (10, 13, '\n', '\r', curses.KEY_ENTER):
-            return value.strip()
+            if key in (10, 13, '\n', '\r', curses.KEY_ENTER):
+                return value.strip()
 
-        if key in (27, curses.KEY_F9):
-            return initial
+            if key in (27, curses.KEY_F9):
+                return initial
 
-        if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
-            value = value[:-1]
-            continue
+            if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
+                value = value[:-1]
+                continue
 
-        elif isinstance(key, str):
-            if key not in ('\n', '\r', '\t'):
-                value += key
+            elif isinstance(key, str):
+                if key not in ('\n', '\r', '\t'):
+                    value += key
 
 
 def order_jump_dialog(stdscr, initial):
@@ -5024,6 +5283,7 @@ def _shipping_settings_tab_fields():
     fields = [
         ("shipping_label_output_dir", "field_shipping_label_output_dir"),
         ("shipping_packaging_weight_grams", "field_shipping_packaging_weight"),
+        ("manual_label_default_country_display", "field_manual_label_default_country"),
         ("shipping_active_carriers_display", "field_shipping_active_carriers"),
     ]
     for code in _configurable_shipping_carrier_codes():
@@ -5064,6 +5324,8 @@ def _shipping_settings_initial_values():
         "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
         "shipping_services": _normalize_shipping_services(SETTINGS.get("shipping_services", [])),
         "shipping_services_display": _shipping_services_summary(SETTINGS.get("shipping_services", [])),
+        "manual_label_default_country": _manual_label_default_country(),
+        "manual_label_default_country_display": _manual_label_default_country_display(_manual_label_default_country()),
         "shipping_packaging_weight_grams": str(
             SETTINGS.get("shipping_packaging_weight_grams", DEFAULT_SETTINGS.get("shipping_packaging_weight_grams", 400))
         ),
@@ -5342,6 +5604,9 @@ def _settings_context_select(
     elif active_name == "shipping_services_display":
         values["shipping_services"] = shipping_services_dialog(stdscr, values.get("shipping_services", []))
         values["shipping_services_display"] = _shipping_services_summary(values["shipping_services"])
+    elif active_name == "manual_label_default_country_display":
+        values["manual_label_default_country"] = manual_default_country_dialog(stdscr, values.get("manual_label_default_country", ""))
+        values["manual_label_default_country_display"] = _manual_label_default_country_display(values["manual_label_default_country"])
     elif active_name == "shipping_active_carriers_display":
         chosen = toggle_choice_dialog(
             stdscr,
@@ -5363,6 +5628,10 @@ def _settings_context_select(
 
 def settings_dialog(stdscr):
     global SETTINGS
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
 
     shipping_printer_fields = _shipping_printer_field_map()
     shipping_format_fields = _shipping_format_field_map()
@@ -5373,6 +5642,7 @@ def settings_dialog(stdscr):
     values = {
         "db_host": SETTINGS["db_host"],
         "db_port": str(SETTINGS.get("db_port", DEFAULT_SETTINGS["db_port"])),
+        "db_connect_timeout": str(_db_connect_timeout(SETTINGS)),
         "db_name": SETTINGS["db_name"],
         "db_user": SETTINGS["db_user"],
         "db_pass": SETTINGS["db_pass"],
@@ -5437,6 +5707,7 @@ def settings_dialog(stdscr):
             "fields": [
                 ("db_host", "field_db_host"),
                 ("db_port", "field_db_port"),
+                ("db_connect_timeout", "field_db_connect_timeout"),
                 ("db_name", "field_db_name"),
                 ("db_user", "field_db_user"),
                 ("db_pass", "field_db_pass"),
@@ -5659,6 +5930,7 @@ def settings_dialog(stdscr):
 
         if active_name in {
             "shipping_services_display",
+            "manual_label_default_country_display",
             "shipping_active_carriers_display",
             "shopify_active_location_display",
             "shopify_location_mode",
@@ -5761,6 +6033,7 @@ def settings_dialog(stdscr):
                 "delivery_note_duplex",
                 "delivery_note_color_mode",
                 "shipping_services_display",
+                "manual_label_default_country_display",
                 "shipping_active_carriers_display",
                 "shopify_active_location_display",
                 *shipping_printer_fields.keys(),
@@ -5787,6 +6060,7 @@ def settings_dialog(stdscr):
         if isinstance(key, str) and key.isprintable():
             if active_name in {
                 "shipping_services_display",
+                "manual_label_default_country_display",
                 "shipping_active_carriers_display",
                 "shopify_active_location_display",
                 "shopify_location_mode",
@@ -5805,6 +6079,7 @@ def settings_dialog(stdscr):
     updated = {
         "db_host": values["db_host"].strip(),
         "db_port": int((values.get("db_port") or str(DEFAULT_SETTINGS["db_port"])).strip()),
+        "db_connect_timeout": _db_connect_timeout(values),
         "db_name": values["db_name"].strip(),
         "db_user": values["db_user"].strip(),
         "db_pass": values["db_pass"],
@@ -5842,6 +6117,7 @@ def settings_dialog(stdscr):
         "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
         "shipping_label_scale_mode": _normalize_scale_mode(values.get("shipping_label_scale_mode", "none")),
         "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
+        "manual_label_default_country": _shipping_country_code(values.get("manual_label_default_country", "")),
         "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
         "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
         "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
@@ -6103,9 +6379,6 @@ def add_item(stdscr):
     run_background_action_dialog(stdscr, t("add_item_title"), action, detail=t("item_save_detail"))
 
 def change_qty(stdscr, item):
-
-    curses.curs_set(1)
-
     current_qty = int(item["menge"])
     qty = current_qty
 
@@ -6125,73 +6398,74 @@ def change_qty(stdscr, item):
 
     typed = None
 
-    while True:
+    with visible_cursor():
+        while True:
 
-        win.erase()
-        win.box()
+            win.erase()
+            win.box()
 
-        win.addstr(0, 2, t("qty_dialog_title"))
+            win.addstr(0, 2, t("qty_dialog_title"))
 
-        win.addstr(2, 2, t("qty_current_label", value=current_qty))
-
-        if typed is None:
-            qty_str = str(qty)
-        else:
-            qty_str = typed
-        win.addstr(3, 2, t("qty_new_label"))
-
-        field_x = 12
-        field_width = width - field_x - 2
-
-        visible = qty_str[-field_width:]
-        win.addstr(3, field_x, visible.ljust(field_width))
-
-        win.addstr(5, 2, t("qty_input_hint"))
-        win.addstr(6, 2, t("qty_change_footer"))
-
-        cursor_pos = min(len(qty_str), field_width - 1)
-        win.move(3, field_x + cursor_pos)
-        
-        win.refresh()
-
-        key = win.get_wch()
-
-        if key in (27, curses.KEY_F9):
-            return
-
-        if key in (curses.KEY_F2, 10, 13, "\n", "\r", curses.KEY_ENTER):
-            queue_item_write(item["sku"], qty=qty, location_id=_active_shopify_location_id())
-            return qty
-
-        elif key == '+':
-            qty += 1
-            typed = None
-
-        elif key == '-':
-            if qty > 0:
-                qty -= 1
-            typed = None
-
-        elif key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
-
-            if typed is not None:
-
-                typed = typed[:-1]
-
-                if typed == "":
-                    typed = None
-                    qty = current_qty
-                else:
-                    qty = int(typed)
-
-        elif isinstance(key, str) and key.isdigit():
+            win.addstr(2, 2, t("qty_current_label", value=current_qty))
 
             if typed is None:
-                typed = key
+                qty_str = str(qty)
             else:
-                typed += key
+                qty_str = typed
+            win.addstr(3, 2, t("qty_new_label"))
 
-            qty = int(typed)
+            field_x = 12
+            field_width = width - field_x - 2
+
+            visible = qty_str[-field_width:]
+            win.addstr(3, field_x, visible.ljust(field_width))
+
+            win.addstr(5, 2, t("qty_input_hint"))
+            win.addstr(6, 2, t("qty_change_footer"))
+
+            cursor_pos = min(len(qty_str), field_width - 1)
+            win.move(3, field_x + cursor_pos)
+            
+            win.refresh()
+
+            key = win.get_wch()
+
+            if key in (27, curses.KEY_F9):
+                return
+
+            if key in (curses.KEY_F2, 10, 13, "\n", "\r", curses.KEY_ENTER):
+                queue_item_write(item["sku"], qty=qty, location_id=_active_shopify_location_id())
+                return qty
+
+            elif key == '+':
+                qty += 1
+                typed = None
+
+            elif key == '-':
+                if qty > 0:
+                    qty -= 1
+                typed = None
+
+            elif key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
+
+                if typed is not None:
+
+                    typed = typed[:-1]
+
+                    if typed == "":
+                        typed = None
+                        qty = current_qty
+                    else:
+                        qty = int(typed)
+
+            elif isinstance(key, str) and key.isdigit():
+
+                if typed is None:
+                    typed = key
+                else:
+                    typed += key
+
+                qty = int(typed)
 
     return None
             
@@ -6920,7 +7194,6 @@ def handle_delivery_note_output(stdscr, order, order_items=None, order_items_cac
             len(rows),
             output_path,
         )
-        message_box(stdscr, t("delivery_note_title"), output_path[-56:])
 
 
 def print_delivery_note(stdscr, order, order_items):
@@ -6956,7 +7229,6 @@ def print_delivery_note(stdscr, order, order_items):
         message_box(stdscr, t("print_error_title"), t("delivery_note_failed_with_log", log=PRINT_LOG_PATH.name)[:56])
     else:
         PRINT_LOGGER.info("Lieferschein erfolgreich gedruckt order=%s printer=%s", order["order_name"], printer)
-        message_box(stdscr, t("print_title"), t("delivery_note_sent"))
 
 
 def inventory_session_summary(lines):
@@ -7538,6 +7810,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     last_failure_summary = ""
     label_paths_to_print = []
     note_paths_to_print = []
+    note_titles_to_print = []
     printed_label_ids = []
 
     try:
@@ -7561,6 +7834,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     if print_mode in {"both", "note"}:
                         note_path, _rows = create_delivery_note_pdf(order, order_items, output_dir=temp_dir)
                         note_paths_to_print.append(note_path)
+                        note_titles_to_print.append(f"Lieferschein {order['order_name']}")
 
                     if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
                         labels_for_order = ensure_order_shipments_loaded(order["order_id"])
@@ -7598,15 +7872,6 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     PRINT_LOGGER.exception("Bulk-Ausfuehrung fehlgeschlagen order=%s", order.get("order_name"))
                     PRINT_LOGGER.error("Bulk Fehler order=%s detail=%s", order.get("order_name"), short_error[:500])
 
-            if failure_count and last_failure_summary:
-                selected_order_ids.clear()
-                message_box(
-                    stdscr,
-                    "Bulk",
-                    f"OK:{success_count} Err:{failure_count} {last_failure_summary[:28]} {MAIN_LOG_PATH.name}"[:56],
-                )
-                return
-
             if label_paths_to_print:
                 merged_label_pdf = os.path.join(temp_dir, f"shipping_labels_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
                 _merge_pdf_files(label_paths_to_print, merged_label_pdf)
@@ -7616,7 +7881,8 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                         update_shipping_label_status(label_id, "PRINTED")
             if note_paths_to_print:
                 if len(note_paths_to_print) == 1:
-                    _print_merged_delivery_note_pdf(note_paths_to_print[0], title=f"Lieferschein {selected_orders[0]['order_name']}")
+                    note_title = note_titles_to_print[0] if note_titles_to_print else None
+                    _print_merged_delivery_note_pdf(note_paths_to_print[0], title=note_title)
                 else:
                     merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
                     _merge_pdf_files(note_paths_to_print, merged_note_pdf)
@@ -7632,7 +7898,12 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     message_box(
         stdscr,
         t("bulk_title"),
-        t("bulk_finished", ok=success_count, err=failure_count, queued=queued_count, queue_err=queue_failed_count)[:56],
+        (
+            f"{t('bulk_finished', ok=success_count, err=failure_count, queued=queued_count, queue_err=queue_failed_count)} "
+            f"{last_failure_summary[:28]} {MAIN_LOG_PATH.name}"
+            if failure_count and last_failure_summary
+            else t("bulk_finished", ok=success_count, err=failure_count, queued=queued_count, queue_err=queue_failed_count)
+        )[:56],
     )
 
 
@@ -7694,7 +7965,7 @@ def create_manual_shipping_label(stdscr):
     }
     carrier_state = carrier_module.manual_state_defaults(carrier_ctx) if carrier_module and hasattr(carrier_module, "manual_state_defaults") else {}
     active = 0
-    country_code = "DE"
+    country_code = _manual_label_default_country()
     print_mode = "print"
 
     while True:
@@ -7711,6 +7982,7 @@ def create_manual_shipping_label(stdscr):
             footer_text=footer_text,
             extra_actions=[
                 {"name": "customer", "keys": {curses.KEY_F6}},
+                {"name": "paste_address", "keys": {curses.KEY_F7}},
             ],
             submit_keys={curses.KEY_F2},
         )
@@ -7733,6 +8005,11 @@ def create_manual_shipping_label(stdscr):
                 chosen_customer = shopify_customer_dialog(stdscr)
                 if chosen_customer:
                     state, country_code = _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code)
+            elif result["__action__"] == "paste_address":
+                pasted_address = manual_address_text_dialog(stdscr)
+                if pasted_address is not None:
+                    parsed = _parse_manual_address_text(pasted_address, SETTINGS.get("manual_label_default_country", ""))
+                    state, country_code = _apply_parsed_address_to_manual_state(state, parsed, country_code)
             continue
         state.update(result)
         break

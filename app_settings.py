@@ -58,6 +58,7 @@ DEFAULT_SETTINGS = {
     "shipping_label_printer_free": "",
     "shipping_label_printer_post": "",
     "shipping_services": ["service_flexdelivery"],
+    "manual_label_default_country": "DE",
     "shipping_packaging_weight_grams": 400,
     "shopify_location_mode": "single",
     "shopify_tracking_mode_gls": "company",
