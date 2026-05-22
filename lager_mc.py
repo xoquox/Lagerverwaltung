@@ -68,6 +68,13 @@ from shipping.post import (
 from shipping.runtime import carrier_module as _shipping_carrier_module, carrier_runtime as _shipping_carrier_runtime
 from shipping import free
 from shipping.schema import apply_app_schema, collect_schema_issues
+from ui_orders import (
+    OrdersDialogState,
+    build_order_detail_lines,
+    build_order_list_lines,
+    build_orders_footer,
+)
+from ui_settings import TextInputState, collect_editable_field_names, resolve_active_field
 
 locale.setlocale(locale.LC_ALL, "")
 
@@ -90,6 +97,8 @@ _PENDING_ITEM_WRITES_LOCK = threading.Lock()
 _UNSET = object()
 _ACTIVE_SHOPIFY_LOCATION_ID = (SETTINGS.get("shopify_active_location_id") or "").strip() or None
 _ACTIVE_SHOPIFY_LOCATION_NAME = ""
+CUSTOM_ORDER_SOURCE = "custom"
+CUSTOM_ORDER_ID_PREFIX = "custom-"
 
 SHIPPING_SERVICE_OPTIONS = [
     {"code": "service_flexdelivery", "label_key": "shipping_service_flexdelivery", "locked": False},
@@ -799,6 +808,21 @@ def _display_sku_value(row):
     return value or "-/-"
 
 
+def _is_custom_order_id(order_id):
+    return str(order_id or "").strip().startswith(CUSTOM_ORDER_ID_PREFIX)
+
+
+def _order_is_custom(order):
+    return bool(order) and (
+        str(order.get("source") or "").strip().lower() == CUSTOM_ORDER_SOURCE
+        or _is_custom_order_id(order.get("order_id"))
+    )
+
+
+def _order_allows_shopify_fulfillment(order):
+    return not _order_is_custom(order)
+
+
 def _active_shopify_location_id():
     return _ACTIVE_SHOPIFY_LOCATION_ID
 
@@ -1283,6 +1307,7 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
             so.created_at,
             so.shipping_name,
             so.shipping_address1,
+            so.shipping_address2,
             so.shipping_zip,
             so.shipping_city,
             so.shipping_country,
@@ -1290,6 +1315,7 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
+            COALESCE(so.source, 'shopify') AS source,
             COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
             COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
             COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
@@ -1379,6 +1405,7 @@ def _load_orders_snapshot():
             so.created_at,
             so.shipping_name,
             so.shipping_address1,
+            so.shipping_address2,
             so.shipping_zip,
             so.shipping_city,
             so.shipping_country,
@@ -1386,6 +1413,7 @@ def _load_orders_snapshot():
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
+            COALESCE(so.source, 'shopify') AS source,
             COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
             COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
             COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
@@ -1646,6 +1674,689 @@ def ensure_order_shipments_loaded(order_id, order_shipments_cache=None):
     return rows
 
 
+def _custom_order_year_prefix(now=None):
+    current = now or datetime.datetime.now()
+    return f"30{current.year % 100:02d}"
+
+
+def _next_custom_order_name(cur, now=None):
+    prefix = _custom_order_year_prefix(now)
+    cur.execute(
+        """
+        SELECT order_name
+        FROM shopify_orders
+        WHERE COALESCE(source, 'shopify') = %s
+          AND order_name LIKE %s
+        ORDER BY order_name DESC
+        LIMIT 1
+        """,
+        (CUSTOM_ORDER_SOURCE, f"{prefix}-%"),
+    )
+    row = cur.fetchone()
+    if not row:
+        return f"{prefix}-0000"
+    match = re.search(r"-(\d+)$", row.get("order_name") or "")
+    next_number = int(match.group(1)) + 1 if match else 0
+    return f"{prefix}-{next_number:04d}"
+
+
+def _default_custom_order_country():
+    return _shipping_country_code(SETTINGS.get("manual_label_default_country", DEFAULT_SETTINGS.get("manual_label_default_country", "DE")))
+
+
+def _custom_order_address_fields(state, country_code):
+    return [
+        {"name": "name", "label": t("manual_label_field_name"), "value": state["name"]},
+        {"name": "address_extra", "label": t("manual_label_field_address_extra"), "value": state["address_extra"]},
+        {"name": "street", "label": t("manual_label_field_street"), "value": state["street"]},
+        {"name": "zip", "label": t("manual_label_field_zip"), "value": state["zip"]},
+        {"name": "city", "label": t("manual_label_field_city"), "value": state["city"]},
+        {"name": "email", "label": t("manual_label_field_email"), "value": state["email"]},
+        {"name": "phone", "label": t("custom_order_field_phone"), "value": state["phone"]},
+        {
+            "name": "country_display",
+            "label": t("manual_label_field_country"),
+            "value": _manual_label_country_display(country_code),
+            "read_only": True,
+            "action": "country",
+        },
+    ]
+
+
+def custom_order_address_dialog(stdscr, initial=None):
+    state = {
+        "name": "",
+        "address_extra": "",
+        "street": "",
+        "zip": "",
+        "city": "",
+        "email": "",
+        "phone": "",
+    }
+    if initial:
+        state.update(
+            {
+                "name": initial.get("shipping_name") or "",
+                "address_extra": initial.get("shipping_address2") or "",
+                "street": initial.get("shipping_address1") or "",
+                "zip": initial.get("shipping_zip") or "",
+                "city": initial.get("shipping_city") or "",
+                "email": initial.get("shipping_email") or "",
+                "phone": initial.get("shipping_phone") or "",
+            }
+        )
+    country_code = _shipping_country_code((initial or {}).get("shipping_country") or _default_custom_order_country())
+    active = 0
+    while True:
+        result = form_dialog(
+            stdscr,
+            t("custom_order_address_title"),
+            _custom_order_address_fields(state, country_code),
+            initial_active=active,
+            footer_text=t("custom_order_address_footer"),
+            extra_actions=[
+                {"keys": {curses.KEY_F6}, "name": "customer"},
+                {"keys": {curses.KEY_F7}, "name": "paste_address"},
+            ],
+            submit_keys={curses.KEY_F2},
+        )
+        if result is None:
+            return None
+        if isinstance(result, dict) and "__action__" in result:
+            state.update({key: value for key, value in (result.get("__values__") or {}).items() if key in state})
+            active = int(result.get("__active__") or 0)
+            action = result.get("__action__")
+            if action == "country":
+                selected_country = manual_country_dialog(stdscr, country_code)
+                if selected_country:
+                    country_code = selected_country
+                continue
+            if action == "customer":
+                customer = shopify_customer_dialog(stdscr, state.get("name", ""))
+                state, country_code = _apply_shopify_customer_to_manual_state(state, customer, country_code)
+                continue
+            if action == "paste_address":
+                raw_text = manual_address_text_dialog(stdscr)
+                if raw_text:
+                    parsed = _parse_manual_address_text(raw_text, country_code)
+                    state, country_code = _apply_parsed_address_to_manual_state(state, parsed, country_code)
+                continue
+        state.update({key: value for key, value in result.items() if key in state})
+        for field in ["name", "street", "zip", "city"]:
+            if not state.get(field, "").strip():
+                message_box(stdscr, t("custom_order_title"), t("field_required", field=t(f"custom_order_required_{field}")))
+                break
+        else:
+            state["country"] = country_code
+            return state
+
+
+def _custom_order_product_line(row, qty, width):
+    sku = _display_sku_value(row)
+    title = row.get("name") or "-"
+    available = int(row.get("available") or 0)
+    location = f"{row.get('regal') or '-'}/{row.get('fach') or '-'}/{row.get('platz') or '-'}"
+    return _fit(f"{qty:>3}  {available:>4}  {sku:<18} {title:<42} {location}", width)
+
+
+def custom_order_quantity_dialog(stdscr, row, current_qty):
+    result = form_dialog(
+        stdscr,
+        t("custom_order_qty_title"),
+        [{"name": "qty", "label": t("field_menge_short"), "value": str(max(0, int(current_qty or 0)))}],
+        footer_text=t("custom_order_qty_footer"),
+        submit_keys={curses.KEY_F2, 10, 13, "\n", "\r", curses.KEY_ENTER},
+    )
+    if result is None:
+        return None
+    try:
+        qty = int((result.get("qty") or "0").strip())
+    except ValueError:
+        message_box(stdscr, t("custom_order_title"), t("qty_integer"))
+        return current_qty
+    return max(0, qty)
+
+
+def custom_order_items_dialog(stdscr, initial_items=None):
+    active_location_id = _active_shopify_location_id()
+    rows = _filter_items_snapshot(_load_items_snapshot(active_location_id), sort_mode="sku", external_mode="hide")
+    selected_qty = {row["sku"]: int(row.get("quantity") or 0) for row in (initial_items or []) if row.get("sku")}
+    query = ""
+    selected = 0
+    top_index = 0
+    cursor_pos = 0
+
+    while True:
+        filtered = [row for row in rows if _match_item_filter(row, query)]
+        if selected >= len(filtered):
+            selected = max(0, len(filtered) - 1)
+        h, w = stdscr.getmaxyx()
+        width = min(max(92, int(w * 0.88)), w - 4)
+        height = min(max(18, int(h * 0.78)), h - 2)
+        y = max(1, (h - height) // 2)
+        x = max(2, (w - width) // 2)
+        draw_shadow(stdscr, y, x, height, width)
+        win = curses.newwin(height, width, y, x)
+        win.keypad(True)
+        win.bkgd(" ", curses.color_pair(1))
+        win.erase()
+        win.box()
+        win.addstr(0, 2, t("custom_order_items_title"))
+        prompt = t("search_prompt")
+        input_width = max(1, width - len(prompt) - 4)
+        win.addstr(1, 2, prompt)
+        win.attrset(curses.color_pair(2))
+        win.addstr(1, 2 + len(prompt), query[-input_width:].ljust(input_width))
+        win.attrset(curses.color_pair(1))
+
+        visible_rows = max(1, height - 5)
+        if selected < top_index:
+            top_index = selected
+        if selected >= top_index + visible_rows:
+            top_index = selected - visible_rows + 1
+        if not filtered:
+            win.addstr(3, 2, _fit(t("items_none"), width - 4))
+        else:
+            for row_index, row in enumerate(filtered[top_index:top_index + visible_rows]):
+                real_index = top_index + row_index
+                qty = selected_qty.get(row["sku"], 0)
+                line = _custom_order_product_line(row, qty, width - 4)
+                if real_index == selected:
+                    win.attrset(curses.color_pair(2))
+                    win.addstr(3 + row_index, 2, line.ljust(width - 4))
+                    win.attrset(curses.color_pair(1))
+                else:
+                    win.addstr(3 + row_index, 2, line.ljust(width - 4))
+        footer = t("custom_order_items_footer", count=sum(1 for qty in selected_qty.values() if qty > 0))
+        win.attrset(curses.color_pair(3))
+        draw_footer_line(win, height - 1, 1, width - 2, footer)
+        win.attrset(curses.color_pair(1))
+        cursor_x = 2 + len(prompt) + min(cursor_pos, input_width - 1)
+        win.move(1, min(width - 2, cursor_x))
+        win.refresh()
+
+        key = win.get_wch()
+        if key in (27, curses.KEY_F9):
+            return None
+        if key == curses.KEY_F2:
+            picked = []
+            by_sku = {row["sku"]: row for row in rows}
+            for sku, qty in selected_qty.items():
+                if qty <= 0 or sku not in by_sku:
+                    continue
+                item = dict(by_sku[sku])
+                item["quantity"] = qty
+                picked.append(item)
+            if not picked:
+                message_box(stdscr, t("custom_order_title"), t("custom_order_no_items"))
+                continue
+            return picked
+        if key == curses.KEY_DOWN:
+            selected = move_selection(filtered, selected, 1)
+            continue
+        if key == curses.KEY_UP:
+            selected = move_selection(filtered, selected, -1)
+            continue
+        if key == curses.KEY_NPAGE:
+            selected = move_selection(filtered, selected, max(1, visible_rows - 1))
+            continue
+        if key == curses.KEY_PPAGE:
+            selected = move_selection(filtered, selected, -max(1, visible_rows - 1))
+            continue
+        if filtered and key in (10, 13, "\n", "\r", curses.KEY_ENTER, "+", " "):
+            sku = filtered[selected]["sku"]
+            selected_qty[sku] = selected_qty.get(sku, 0) + 1
+            continue
+        if filtered and key == "-":
+            sku = filtered[selected]["sku"]
+            selected_qty[sku] = max(0, selected_qty.get(sku, 0) - 1)
+            continue
+        if filtered and key == curses.KEY_F6:
+            sku = filtered[selected]["sku"]
+            qty = custom_order_quantity_dialog(stdscr, filtered[selected], selected_qty.get(sku, 0))
+            if qty is not None:
+                selected_qty[sku] = qty
+            continue
+        if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\b"):
+            if query:
+                query = query[:-1]
+                cursor_pos = len(query)
+                selected = 0
+                top_index = 0
+            continue
+        if isinstance(key, str) and key.isprintable():
+            query += key
+            cursor_pos = len(query)
+            selected = 0
+            top_index = 0
+
+
+def _load_custom_order_for_edit(order_id):
+    con = db()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT *
+            FROM shopify_orders
+            WHERE order_id = %s
+              AND COALESCE(source, 'shopify') = %s
+            """,
+            (order_id, CUSTOM_ORDER_SOURCE),
+        )
+        order = cur.fetchone()
+    finally:
+        cur.close()
+        con.close()
+    if not order:
+        return None, []
+    return order, get_order_items(order_id)
+
+
+def _ensure_location_inventory_row(cur, sku, location_id):
+    cur.execute(
+        """
+        INSERT INTO item_location_inventory (
+            sku, location_id, regal, fach, platz, menge, available,
+            reserved, committed, unavailable, dirty, updated_at
+        )
+        SELECT
+            sku, %s, regal, fach, platz, COALESCE(menge, 0), COALESCE(available, menge, 0),
+            COALESCE(reserved, 0), COALESCE(committed, 0),
+            COALESCE(unavailable, COALESCE(reserved, 0)), dirty, NOW()
+        FROM items
+        WHERE sku = %s
+        ON CONFLICT (sku, location_id) DO NOTHING
+        """,
+        (location_id, sku),
+    )
+
+
+def _adjust_custom_order_reservation(cur, sku, location_id, delta_qty):
+    if not sku or not location_id or not delta_qty:
+        return
+    _ensure_location_inventory_row(cur, sku, location_id)
+    cur.execute(
+        """
+        UPDATE item_location_inventory
+        SET reserved = GREATEST(COALESCE(reserved, 0) + %s, 0),
+            unavailable = GREATEST(COALESCE(unavailable, COALESCE(reserved, 0)) + %s, 0),
+            available = GREATEST(
+                COALESCE(menge, 0)
+                - GREATEST(COALESCE(unavailable, COALESCE(reserved, 0)) + %s, 0)
+                - COALESCE(committed, 0),
+                0
+            ),
+            dirty = TRUE,
+            updated_at = NOW()
+        WHERE sku = %s
+          AND location_id = %s
+        """,
+        (delta_qty, delta_qty, delta_qty, sku, location_id),
+    )
+    _refresh_single_item_totals(cur, sku)
+
+
+def save_custom_order(address, selected_items, existing_order_id=None):
+    active_location_id = _active_shopify_location_id()
+    if not active_location_id:
+        raise RuntimeError(t("custom_order_location_missing"))
+    active_location_name = _ACTIVE_SHOPIFY_LOCATION_NAME or active_location_id.rsplit("/", 1)[-1]
+    normalized_items = []
+    for item in selected_items or []:
+        qty = int(item.get("quantity") or 0)
+        if qty <= 0:
+            continue
+        normalized_items.append({"sku": item["sku"], "title": item.get("name") or item.get("title") or item["sku"], "quantity": qty})
+    if not normalized_items:
+        raise RuntimeError(t("custom_order_no_items"))
+
+    con = db()
+    cur = con.cursor()
+    try:
+        if existing_order_id:
+            cur.execute(
+                """
+                SELECT order_id, order_name
+                FROM shopify_orders
+                WHERE order_id = %s AND COALESCE(source, 'shopify') = %s
+                FOR UPDATE
+                """,
+                (existing_order_id, CUSTOM_ORDER_SOURCE),
+            )
+            existing = cur.fetchone()
+            if not existing:
+                raise RuntimeError(t("custom_order_not_found"))
+            order_id = existing["order_id"]
+            order_name = existing["order_name"]
+            cur.execute(
+                """
+                SELECT sku, assigned_location_id, SUM(COALESCE(remaining_quantity, 0)) AS quantity
+                FROM shopify_fulfillment_order_items
+                WHERE order_id = %s
+                GROUP BY sku, assigned_location_id
+                """,
+                (order_id,),
+            )
+            for row in cur.fetchall():
+                _adjust_custom_order_reservation(cur, row.get("sku"), row.get("assigned_location_id"), -int(row.get("quantity") or 0))
+            cur.execute("DELETE FROM shopify_fulfillment_orders WHERE order_id = %s", (order_id,))
+            cur.execute("DELETE FROM shopify_order_items WHERE order_id = %s", (order_id,))
+        else:
+            order_name = _next_custom_order_name(cur)
+            order_id = f"{CUSTOM_ORDER_ID_PREFIX}{order_name}"
+
+        cur.execute(
+            """
+            INSERT INTO shopify_orders (
+                order_id, order_name, created_at, shipping_name, shipping_address1,
+                shipping_address2, shipping_zip, shipping_city, shipping_country,
+                shipping_email, shipping_phone, fulfillment_status, payment_status,
+                source, updated_at
+            )
+            VALUES (%s, %s, COALESCE((SELECT created_at FROM shopify_orders WHERE order_id = %s), NOW()),
+                    %s, %s, %s, %s, %s, %s, %s, %s, 'unfulfilled', 'manual', %s, NOW())
+            ON CONFLICT (order_id) DO UPDATE SET
+                shipping_name = EXCLUDED.shipping_name,
+                shipping_address1 = EXCLUDED.shipping_address1,
+                shipping_address2 = EXCLUDED.shipping_address2,
+                shipping_zip = EXCLUDED.shipping_zip,
+                shipping_city = EXCLUDED.shipping_city,
+                shipping_country = EXCLUDED.shipping_country,
+                shipping_email = EXCLUDED.shipping_email,
+                shipping_phone = EXCLUDED.shipping_phone,
+                fulfillment_status = EXCLUDED.fulfillment_status,
+                payment_status = EXCLUDED.payment_status,
+                source = EXCLUDED.source,
+                updated_at = NOW()
+            """,
+            (
+                order_id,
+                order_name,
+                order_id,
+                address.get("name", "").strip(),
+                address.get("street", "").strip(),
+                address.get("address_extra", "").strip(),
+                address.get("zip", "").strip(),
+                address.get("city", "").strip(),
+                _shipping_country_code(address.get("country") or ""),
+                address.get("email", "").strip(),
+                address.get("phone", "").strip(),
+                CUSTOM_ORDER_SOURCE,
+            ),
+        )
+        fulfillment_order_id = f"custom-fo-{order_name}"
+        cur.execute(
+            """
+            INSERT INTO shopify_fulfillment_orders (
+                fulfillment_order_id, order_id, assigned_location_id,
+                assigned_location_name, status, request_status, updated_at
+            )
+            VALUES (%s, %s, %s, %s, 'open', 'unsubmitted', NOW())
+            """,
+            (fulfillment_order_id, order_id, active_location_id, active_location_name),
+        )
+        for index, item in enumerate(normalized_items, start=1):
+            order_line_item_id = f"custom-line-{order_name}-{index}"
+            fulfillment_item_id = f"custom-foi-{order_name}-{index}"
+            cur.execute(
+                """
+                INSERT INTO shopify_order_items (
+                    order_id, line_index, order_line_item_id, sku, title, quantity, fulfilled_quantity
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 0)
+                """,
+                (order_id, index, order_line_item_id, item["sku"], item["title"], item["quantity"]),
+            )
+            cur.execute(
+                """
+                INSERT INTO shopify_fulfillment_order_items (
+                    fulfillment_order_line_item_id, fulfillment_order_id, order_id,
+                    order_line_item_id, sku, title, quantity, remaining_quantity,
+                    assigned_location_id, assigned_location_name, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                """,
+                (
+                    fulfillment_item_id,
+                    fulfillment_order_id,
+                    order_id,
+                    order_line_item_id,
+                    item["sku"],
+                    item["title"],
+                    item["quantity"],
+                    item["quantity"],
+                    active_location_id,
+                    active_location_name,
+                ),
+            )
+            _adjust_custom_order_reservation(cur, item["sku"], active_location_id, item["quantity"])
+        con.commit()
+        return {"order_id": order_id, "order_name": order_name}
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        cur.close()
+        con.close()
+
+
+def _custom_order_execution_rows(order_items):
+    rows = []
+    for item in order_items or []:
+        line_item_id = (item.get("order_line_item_id") or "").strip()
+        sku = (item.get("sku") or "").strip()
+        location_id = (item.get("assigned_location_id") or _active_shopify_location_id() or "").strip()
+        if not line_item_id or not sku or not location_id:
+            continue
+        if "selected_quantity" in item:
+            qty = int(item.get("selected_quantity") or 0)
+        else:
+            qty = max(0, int(item.get("quantity") or 0) - int(item.get("fulfilled_quantity") or 0))
+        if qty > 0:
+            rows.append({"order_line_item_id": line_item_id, "sku": sku, "location_id": location_id, "quantity": qty})
+    return rows
+
+
+def _apply_custom_order_stock_deduction(cur, sku, location_id, quantity):
+    if not sku or not location_id or quantity <= 0:
+        return
+    _ensure_location_inventory_row(cur, sku, location_id)
+    cur.execute(
+        """
+        UPDATE item_location_inventory
+        SET menge = GREATEST(COALESCE(menge, 0) - %s, 0),
+            reserved = GREATEST(COALESCE(reserved, 0) - %s, 0),
+            unavailable = GREATEST(COALESCE(unavailable, COALESCE(reserved, 0)) - %s, 0),
+            available = GREATEST(
+                GREATEST(COALESCE(menge, 0) - %s, 0)
+                - GREATEST(COALESCE(unavailable, COALESCE(reserved, 0)) - %s, 0)
+                - COALESCE(committed, 0),
+                0
+            ),
+            dirty = TRUE,
+            updated_at = NOW()
+        WHERE sku = %s
+          AND location_id = %s
+        """,
+        (quantity, quantity, quantity, quantity, quantity, sku, location_id),
+    )
+    _refresh_single_item_totals(cur, sku)
+
+
+def apply_custom_order_execution(order, order_items):
+    if not _order_is_custom(order):
+        return False
+    rows = _custom_order_execution_rows(order_items)
+    if not rows:
+        return False
+    order_id = order.get("order_id")
+    con = db()
+    cur = con.cursor()
+    try:
+        for row in rows:
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(remaining_quantity), 0) AS remaining
+                FROM shopify_fulfillment_order_items
+                WHERE order_id = %s
+                  AND order_line_item_id = %s
+                """,
+                (order_id, row["order_line_item_id"]),
+            )
+            remaining = int((cur.fetchone() or {}).get("remaining") or 0)
+            qty = min(row["quantity"], remaining)
+            if qty <= 0:
+                continue
+            _apply_custom_order_stock_deduction(cur, row["sku"], row["location_id"], qty)
+            cur.execute(
+                """
+                UPDATE shopify_order_items
+                SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + %s)
+                WHERE order_id = %s
+                  AND order_line_item_id = %s
+                """,
+                (qty, order_id, row["order_line_item_id"]),
+            )
+            cur.execute(
+                """
+                UPDATE shopify_fulfillment_order_items
+                SET remaining_quantity = GREATEST(COALESCE(remaining_quantity, 0) - %s, 0),
+                    updated_at = NOW()
+                WHERE order_id = %s
+                  AND order_line_item_id = %s
+                """,
+                (qty, order_id, row["order_line_item_id"]),
+            )
+        cur.execute(
+            """
+            SELECT
+                COALESCE(SUM(quantity), 0) AS quantity,
+                COALESCE(SUM(remaining_quantity), 0) AS remaining
+            FROM shopify_fulfillment_order_items
+            WHERE order_id = %s
+            """,
+            (order_id,),
+        )
+        totals = cur.fetchone() or {}
+        total_qty = int(totals.get("quantity") or 0)
+        remaining_qty = int(totals.get("remaining") or 0)
+        if total_qty > 0 and remaining_qty <= 0:
+            status = "fulfilled"
+        elif total_qty > 0 and remaining_qty < total_qty:
+            status = "partial"
+        else:
+            status = "unfulfilled"
+        cur.execute(
+            """
+            UPDATE shopify_orders
+            SET fulfillment_status = %s,
+                updated_at = NOW()
+            WHERE order_id = %s
+              AND COALESCE(source, 'shopify') = %s
+            """,
+            (status, order_id, CUSTOM_ORDER_SOURCE),
+        )
+        con.commit()
+        return True
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        cur.close()
+        con.close()
+
+
+def delete_custom_order(order_id):
+    normalized_order_id = (order_id or "").strip()
+    if not normalized_order_id:
+        raise RuntimeError(t("custom_order_not_found"))
+    con = db()
+    cur = con.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT order_id
+            FROM shopify_orders
+            WHERE order_id = %s
+              AND COALESCE(source, 'shopify') = %s
+            FOR UPDATE
+            """,
+            (normalized_order_id, CUSTOM_ORDER_SOURCE),
+        )
+        if not cur.fetchone():
+            raise RuntimeError(t("custom_order_not_found"))
+        cur.execute(
+            """
+            SELECT sku, assigned_location_id, SUM(COALESCE(remaining_quantity, 0)) AS quantity
+            FROM shopify_fulfillment_order_items
+            WHERE order_id = %s
+            GROUP BY sku, assigned_location_id
+            """,
+            (normalized_order_id,),
+        )
+        for row in cur.fetchall():
+            _adjust_custom_order_reservation(cur, row.get("sku"), row.get("assigned_location_id"), -int(row.get("quantity") or 0))
+        cur.execute(
+            """
+            DELETE FROM shopify_orders
+            WHERE order_id = %s
+              AND COALESCE(source, 'shopify') = %s
+            """,
+            (normalized_order_id, CUSTOM_ORDER_SOURCE),
+        )
+        con.commit()
+        return True
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        cur.close()
+        con.close()
+
+
+def delete_custom_order_dialog(stdscr, order):
+    if not _order_is_custom(order):
+        message_box(stdscr, t("custom_order_title"), t("custom_order_only_delete"))
+        return False
+    if not confirm_box(
+        stdscr,
+        t("custom_order_delete_title"),
+        t("custom_order_delete_confirm", order=order.get("order_name") or order.get("order_id") or "-"),
+    ):
+        return False
+    run_background_action_dialog(
+        stdscr,
+        t("custom_order_delete_title"),
+        lambda: delete_custom_order(order.get("order_id")),
+        detail=t("custom_order_delete_detail"),
+    )
+    return True
+
+
+def custom_order_dialog(stdscr, existing_order_id=None):
+    existing_order = None
+    existing_items = []
+    if existing_order_id:
+        existing_order, existing_items = _load_custom_order_for_edit(existing_order_id)
+        if not existing_order:
+            message_box(stdscr, t("custom_order_title"), t("custom_order_not_found"))
+            return None
+
+    address = custom_order_address_dialog(stdscr, existing_order)
+    if address is None:
+        return None
+    items = custom_order_items_dialog(stdscr, existing_items)
+    if items is None:
+        return None
+    return run_background_action_dialog(
+        stdscr,
+        t("custom_order_title"),
+        lambda: save_custom_order(address, items, existing_order_id=existing_order_id),
+        detail=t("custom_order_save_detail"),
+    )
+
+
 def get_local_fulfilled_quantities_for_order(order_id):
     if not order_id:
         return {}
@@ -1886,6 +2597,11 @@ def _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code
     updated["zip"] = (chosen_customer.get("default_zip") or "").strip()
     updated["city"] = (chosen_customer.get("default_city") or "").strip()
     updated["email"] = (chosen_customer.get("email") or "").strip()
+    if "phone" in updated:
+        updated["phone"] = (
+            (chosen_customer.get("default_phone") or "").strip()
+            or (chosen_customer.get("phone") or "").strip()
+        )
     customer_country = _normalized_country_code_for_display(chosen_customer.get("default_country"))
     return updated, (customer_country or country_code)
 
@@ -2022,6 +2738,8 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
         raise RuntimeError(t("test_and_free_no_shopify"))
     if not order_id:
         raise RuntimeError(t("order_id_missing"))
+    if _is_custom_order_id(order_id):
+        raise RuntimeError(t("custom_order_no_shopify"))
     if not tracking_number:
         raise RuntimeError(t("track_id_missing"))
 
@@ -2054,6 +2772,8 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
         raise RuntimeError(t("label_id_missing"))
     if not order_id:
         raise RuntimeError(t("order_id_missing"))
+    if _is_custom_order_id(order_id):
+        raise RuntimeError(t("custom_order_no_shopify"))
     if not tracking_number:
         raise RuntimeError(t("tracking_number_missing"))
 
@@ -4518,6 +5238,24 @@ def _save_settings_checked(updated):
     con.close()
     return save_settings(updated)
 
+def _form_dialog_values(fields, values):
+    return {fields[i]["name"]: values[i] for i in range(len(fields))}
+
+
+def _form_dialog_submit_result(fields, values, active, submit_keys, default_submit_keys):
+    active_field = fields[active]
+    action_name = active_field.get("action")
+    if action_name and submit_keys == default_submit_keys:
+        return {
+            "__action__": action_name,
+            "__values__": _form_dialog_values(fields, values),
+            "__active__": active,
+        }
+    if submit_keys != default_submit_keys or active >= len(fields) - 1:
+        return _form_dialog_values(fields, values)
+    return None
+
+
 def form_dialog(
     stdscr,
     title,
@@ -4549,7 +5287,8 @@ def form_dialog(
     extra_actions = extra_actions or []
     field_validators = field_validators or {}
     field_normalizers = field_normalizers or {}
-    submit_keys = set(submit_keys) if submit_keys is not None else {10, 13, "\n", "\r", curses.KEY_ENTER}
+    default_submit_keys = {10, 13, "\n", "\r", curses.KEY_ENTER}
+    submit_keys = set(submit_keys) if submit_keys is not None else default_submit_keys
 
     def normalize_view(index, field_width):
         field_width = max(1, field_width)
@@ -4620,21 +5359,14 @@ def form_dialog(
                 if key in action["keys"]:
                     return {
                         "__action__": action["name"],
-                        "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
+                        "__values__": _form_dialog_values(fields, values),
                         "__active__": active,
                     }
 
             if key in submit_keys:
-                active_field = fields[active]
-                action_name = active_field.get("action")
-                if action_name:
-                    return {
-                        "__action__": action_name,
-                        "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
-                        "__active__": active,
-                    }
-                if submit_keys == {10, 13, "\n", "\r", curses.KEY_ENTER} and active >= len(fields) - 1:
-                    return {fields[i]["name"]: values[i] for i in range(len(fields))}
+                submit_result = _form_dialog_submit_result(fields, values, active, submit_keys, default_submit_keys)
+                if submit_result is not None:
+                    return submit_result
                 active = (active + 1) % len(fields)
                 continue
 
@@ -4644,7 +5376,7 @@ def form_dialog(
                 if action_name:
                     return {
                         "__action__": action_name,
-                        "__values__": {fields[i]["name"]: values[i] for i in range(len(fields))},
+                        "__values__": _form_dialog_values(fields, values),
                         "__active__": active,
                     }
                 active = (active + 1) % len(fields)
@@ -5626,82 +6358,54 @@ def _settings_context_select(
     return values
 
 
-def settings_dialog(stdscr):
-    global SETTINGS
-    try:
-        curses.curs_set(1)
-    except curses.error:
-        pass
-
-    shipping_printer_fields = _shipping_printer_field_map()
-    shipping_format_fields = _shipping_format_field_map()
-    shipping_scale_fields = _shipping_scale_field_map()
-    shipping_template_fields = _shipping_template_field_map()
-    shipping_tracking_mode_fields = _shipping_tracking_mode_field_map()
-
+def _settings_dialog_initial_values(settings):
     values = {
-        "db_host": SETTINGS["db_host"],
-        "db_port": str(SETTINGS.get("db_port", DEFAULT_SETTINGS["db_port"])),
-        "db_connect_timeout": str(_db_connect_timeout(SETTINGS)),
-        "db_name": SETTINGS["db_name"],
-        "db_user": SETTINGS["db_user"],
-        "db_pass": SETTINGS["db_pass"],
-        "language": (SETTINGS.get("language") or DEFAULT_SETTINGS["language"]).strip().lower(),
-        "shopify_location_mode": (SETTINGS.get("shopify_location_mode") or DEFAULT_SETTINGS["shopify_location_mode"]).strip().lower(),
-        "shopify_active_location_id": (SETTINGS.get("shopify_active_location_id") or "").strip(),
-        "shopify_active_location_display": (SETTINGS.get("shopify_active_location_id") or "").strip() or "-",
-        "color_theme": (SETTINGS.get("color_theme") or DEFAULT_SETTINGS["color_theme"]).strip().lower(),
-        "color_theme_file": SETTINGS.get("color_theme_file", ""),
-        "printer_uri": SETTINGS["printer_uri"],
-        "printer_model": SETTINGS["printer_model"],
-        "label_size": SETTINGS["label_size"],
-        "label_font_regular": SETTINGS.get("label_font_regular", ""),
-        "label_font_condensed": SETTINGS.get("label_font_condensed", ""),
-        "location_regex_regal": SETTINGS.get("location_regex_regal", DEFAULT_SETTINGS["location_regex_regal"]),
-        "location_regex_fach": SETTINGS.get("location_regex_fach", DEFAULT_SETTINGS["location_regex_fach"]),
-        "location_regex_platz": SETTINGS.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
-        "location_regex_ignore_case_regal": bool(
-            SETTINGS.get("location_regex_ignore_case_regal", DEFAULT_SETTINGS["location_regex_ignore_case_regal"])
-        ),
-        "location_regex_ignore_case_fach": bool(
-            SETTINGS.get("location_regex_ignore_case_fach", DEFAULT_SETTINGS["location_regex_ignore_case_fach"])
-        ),
-        "location_regex_ignore_case_platz": bool(
-            SETTINGS.get("location_regex_ignore_case_platz", DEFAULT_SETTINGS["location_regex_ignore_case_platz"])
-        ),
-        "location_regex_normalize_case_regal": str(
-            SETTINGS.get("location_regex_normalize_case_regal", DEFAULT_SETTINGS["location_regex_normalize_case_regal"])
-        ),
-        "location_regex_normalize_case_fach": str(
-            SETTINGS.get("location_regex_normalize_case_fach", DEFAULT_SETTINGS["location_regex_normalize_case_fach"])
-        ),
-        "location_regex_normalize_case_platz": str(
-            SETTINGS.get("location_regex_normalize_case_platz", DEFAULT_SETTINGS["location_regex_normalize_case_platz"])
-        ),
-        "picklist_printer": SETTINGS["picklist_printer"],
-        "delivery_note_printer": SETTINGS["delivery_note_printer"],
-        "delivery_note_format": _normalize_shipping_label_format(
-            SETTINGS.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))
-        ),
-        "delivery_note_scale_mode": _normalize_scale_mode(
-            SETTINGS.get("delivery_note_scale_mode", DEFAULT_SETTINGS.get("delivery_note_scale_mode", "none"))
-        ),
-        "delivery_note_duplex": _normalize_duplex_mode(
-            SETTINGS.get("delivery_note_duplex", DEFAULT_SETTINGS.get("delivery_note_duplex", "off"))
-        ),
-        "delivery_note_color_mode": _normalize_color_mode(
-            SETTINGS.get("delivery_note_color_mode", DEFAULT_SETTINGS.get("delivery_note_color_mode", "color"))
-        ),
-        "pdf_output_dir": SETTINGS["pdf_output_dir"],
-        "delivery_note_template_path": SETTINGS.get("delivery_note_template_path", ""),
-        "delivery_note_logo_source": SETTINGS.get("delivery_note_logo_source", ""),
-        "delivery_note_sender_name": SETTINGS["delivery_note_sender_name"],
-        "delivery_note_sender_street": SETTINGS["delivery_note_sender_street"],
-        "delivery_note_sender_city": SETTINGS["delivery_note_sender_city"],
-        "delivery_note_sender_email": SETTINGS["delivery_note_sender_email"],
+        "db_host": settings["db_host"],
+        "db_port": str(settings.get("db_port", DEFAULT_SETTINGS["db_port"])),
+        "db_connect_timeout": str(_db_connect_timeout(settings)),
+        "db_name": settings["db_name"],
+        "db_user": settings["db_user"],
+        "db_pass": settings["db_pass"],
+        "language": (settings.get("language") or DEFAULT_SETTINGS["language"]).strip().lower(),
+        "shopify_location_mode": (settings.get("shopify_location_mode") or DEFAULT_SETTINGS["shopify_location_mode"]).strip().lower(),
+        "shopify_active_location_id": (settings.get("shopify_active_location_id") or "").strip(),
+        "shopify_active_location_display": (settings.get("shopify_active_location_id") or "").strip() or "-",
+        "color_theme": (settings.get("color_theme") or DEFAULT_SETTINGS["color_theme"]).strip().lower(),
+        "color_theme_file": settings.get("color_theme_file", ""),
+        "printer_uri": settings["printer_uri"],
+        "printer_model": settings["printer_model"],
+        "label_size": settings["label_size"],
+        "label_font_regular": settings.get("label_font_regular", ""),
+        "label_font_condensed": settings.get("label_font_condensed", ""),
+        "location_regex_regal": settings.get("location_regex_regal", DEFAULT_SETTINGS["location_regex_regal"]),
+        "location_regex_fach": settings.get("location_regex_fach", DEFAULT_SETTINGS["location_regex_fach"]),
+        "location_regex_platz": settings.get("location_regex_platz", DEFAULT_SETTINGS["location_regex_platz"]),
+        "location_regex_ignore_case_regal": bool(settings.get("location_regex_ignore_case_regal", DEFAULT_SETTINGS["location_regex_ignore_case_regal"])),
+        "location_regex_ignore_case_fach": bool(settings.get("location_regex_ignore_case_fach", DEFAULT_SETTINGS["location_regex_ignore_case_fach"])),
+        "location_regex_ignore_case_platz": bool(settings.get("location_regex_ignore_case_platz", DEFAULT_SETTINGS["location_regex_ignore_case_platz"])),
+        "location_regex_normalize_case_regal": str(settings.get("location_regex_normalize_case_regal", DEFAULT_SETTINGS["location_regex_normalize_case_regal"])),
+        "location_regex_normalize_case_fach": str(settings.get("location_regex_normalize_case_fach", DEFAULT_SETTINGS["location_regex_normalize_case_fach"])),
+        "location_regex_normalize_case_platz": str(settings.get("location_regex_normalize_case_platz", DEFAULT_SETTINGS["location_regex_normalize_case_platz"])),
+        "picklist_printer": settings["picklist_printer"],
+        "delivery_note_printer": settings["delivery_note_printer"],
+        "delivery_note_format": _normalize_shipping_label_format(settings.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))),
+        "delivery_note_scale_mode": _normalize_scale_mode(settings.get("delivery_note_scale_mode", DEFAULT_SETTINGS.get("delivery_note_scale_mode", "none"))),
+        "delivery_note_duplex": _normalize_duplex_mode(settings.get("delivery_note_duplex", DEFAULT_SETTINGS.get("delivery_note_duplex", "off"))),
+        "delivery_note_color_mode": _normalize_color_mode(settings.get("delivery_note_color_mode", DEFAULT_SETTINGS.get("delivery_note_color_mode", "color"))),
+        "pdf_output_dir": settings["pdf_output_dir"],
+        "delivery_note_template_path": settings.get("delivery_note_template_path", ""),
+        "delivery_note_logo_source": settings.get("delivery_note_logo_source", ""),
+        "delivery_note_sender_name": settings["delivery_note_sender_name"],
+        "delivery_note_sender_street": settings["delivery_note_sender_street"],
+        "delivery_note_sender_city": settings["delivery_note_sender_city"],
+        "delivery_note_sender_email": settings["delivery_note_sender_email"],
     }
     values.update(_shipping_settings_initial_values())
-    tabs = [
+    return values
+
+
+def _settings_dialog_tabs():
+    return [
         {
             "title_key": "settings_tab_general",
             "fields": [
@@ -5731,14 +6435,8 @@ def settings_dialog(stdscr):
                 ("location_regex_platz", "field_regex_platz"),
             ],
         },
-        {
-            "title_key": "settings_tab_printers",
-            "fields": _shipping_printer_tab_fields(),
-        },
-        {
-            "title_key": "settings_tab_shipping",
-            "fields": _shipping_settings_tab_fields(),
-        },
+        {"title_key": "settings_tab_printers", "fields": _shipping_printer_tab_fields()},
+        {"title_key": "settings_tab_shipping", "fields": _shipping_settings_tab_fields()},
         {
             "title_key": "settings_tab_delivery_note",
             "fields": [
@@ -5752,43 +6450,227 @@ def settings_dialog(stdscr):
             ],
         },
     ]
+
+
+def _settings_apply_initial_shopify_location(values):
     initial_locations = get_shopify_locations_snapshot()
-    if initial_locations:
-        selected_row = next(
-            (row for row in initial_locations if row.get("location_id") == values.get("shopify_active_location_id")),
-            None,
-        )
-        if selected_row is None:
-            selected_row = initial_locations[0]
-            values["shopify_active_location_id"] = selected_row.get("location_id") or ""
-        values["shopify_active_location_display"] = (selected_row.get("name") or selected_row.get("location_id") or "-")
+    if not initial_locations:
+        return
+    selected_row = next(
+        (row for row in initial_locations if row.get("location_id") == values.get("shopify_active_location_id")),
+        None,
+    )
+    if selected_row is None:
+        selected_row = initial_locations[0]
+        values["shopify_active_location_id"] = selected_row.get("location_id") or ""
+    values["shopify_active_location_display"] = selected_row.get("name") or selected_row.get("location_id") or "-"
+
+
+def _settings_dialog_updated_values(values):
+    updated = {
+        "db_host": values["db_host"].strip(),
+        "db_port": int((values.get("db_port") or str(DEFAULT_SETTINGS["db_port"])).strip()),
+        "db_connect_timeout": _db_connect_timeout(values),
+        "db_name": values["db_name"].strip(),
+        "db_user": values["db_user"].strip(),
+        "db_pass": values["db_pass"],
+        "language": values["language"].strip().lower(),
+        "shopify_location_mode": values["shopify_location_mode"].strip().lower(),
+        "shopify_active_location_id": values["shopify_active_location_id"].strip(),
+        "color_theme": values["color_theme"].strip().lower(),
+        "color_theme_file": os.path.expanduser(values["color_theme_file"].strip()),
+        "printer_uri": values["printer_uri"].strip(),
+        "printer_model": values["printer_model"].strip(),
+        "label_size": values["label_size"].strip(),
+        "label_font_regular": os.path.expanduser(values["label_font_regular"].strip()),
+        "label_font_condensed": os.path.expanduser(values["label_font_condensed"].strip()),
+        "location_regex_regal": values["location_regex_regal"].strip(),
+        "location_regex_fach": values["location_regex_fach"].strip(),
+        "location_regex_platz": values["location_regex_platz"].strip(),
+        "location_regex_ignore_case_regal": bool(values.get("location_regex_ignore_case_regal", False)),
+        "location_regex_ignore_case_fach": bool(values.get("location_regex_ignore_case_fach", False)),
+        "location_regex_ignore_case_platz": bool(values.get("location_regex_ignore_case_platz", False)),
+        "location_regex_normalize_case_regal": str(values.get("location_regex_normalize_case_regal", "none")).strip().lower(),
+        "location_regex_normalize_case_fach": str(values.get("location_regex_normalize_case_fach", "none")).strip().lower(),
+        "location_regex_normalize_case_platz": str(values.get("location_regex_normalize_case_platz", "none")).strip().lower(),
+        "picklist_printer": values["picklist_printer"].strip(),
+        "delivery_note_printer": values["delivery_note_printer"].strip(),
+        "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
+        "delivery_note_scale_mode": _normalize_scale_mode(values.get("delivery_note_scale_mode", "none")),
+        "delivery_note_duplex": _normalize_duplex_mode(values.get("delivery_note_duplex", "off")),
+        "delivery_note_color_mode": _normalize_color_mode(values.get("delivery_note_color_mode", "color")),
+        "shipping_active_carriers": _normalize_active_shipping_carriers(values.get("shipping_active_carriers", []), fallback_to_defaults=False),
+        "shipping_label_printer": values["shipping_label_printer"].strip(),
+        "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
+        "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
+        "shipping_label_scale_mode": _normalize_scale_mode(values.get("shipping_label_scale_mode", "none")),
+        "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
+        "manual_label_default_country": _shipping_country_code(values.get("manual_label_default_country", "")),
+        "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
+        "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
+        "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
+        "delivery_note_logo_source": values["delivery_note_logo_source"].strip(),
+        "delivery_note_sender_name": values["delivery_note_sender_name"].strip(),
+        "delivery_note_sender_street": values["delivery_note_sender_street"].strip(),
+        "delivery_note_sender_city": values["delivery_note_sender_city"].strip(),
+        "delivery_note_sender_email": values["delivery_note_sender_email"].strip(),
+    }
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        printer_field = definition.get("printer_field")
+        if printer_field:
+            updated[printer_field] = values.get(printer_field, "").strip()
+        format_field = definition.get("format_field")
+        if format_field:
+            updated[format_field] = _normalize_shipping_label_format(values.get(format_field, "").strip())
+        scale_field = definition.get("scale_field")
+        if scale_field:
+            updated[scale_field] = _normalize_scale_mode(values.get(scale_field, "none"))
+        tracking_mode_field = definition.get("tracking_mode_field")
+        if tracking_mode_field:
+            updated[tracking_mode_field] = values.get(tracking_mode_field, "").strip().lower()
+        tracking_url_field = definition.get("tracking_url_field")
+        if tracking_url_field:
+            updated[tracking_url_field] = values.get(tracking_url_field, "").strip()
+        template_field = definition.get("template_field")
+        if template_field:
+            updated[template_field] = os.path.expanduser(values.get(template_field, "").strip())
+        for field_name, _label_key in definition.get("extra_settings_fields") or []:
+            if field_name == "shipping_services_display":
+                continue
+            if field_name.endswith("_password"):
+                updated[field_name] = values.get(field_name, "")
+            else:
+                updated[field_name] = values.get(field_name, "").strip()
+    return updated
+
+
+def _settings_validate_updated_values(stdscr, updated):
+    missing = [
+        label for key, label in [
+            ("db_host", "DB Host"),
+            ("db_port", "DB Port"),
+            ("db_name", "DB Name"),
+            ("db_user", "DB User"),
+            ("printer_uri", "Drucker URI"),
+            ("printer_model", "Drucker Modell"),
+            ("label_size", "Labelformat"),
+        ]
+        if not updated[key]
+    ]
+    if missing:
+        message_box(stdscr, t("error"), t("missing_fields", fields=", ".join(missing)))
+        return False
+
+    if updated["language"] not in SUPPORTED_LANGUAGES:
+        message_box(stdscr, t("error"), t("language_must_be_supported"))
+        return False
+    if updated["shopify_location_mode"] not in {"single", "multi"}:
+        message_box(stdscr, t("error"), t("shopify_location_mode_invalid"))
+        return False
+    if updated["color_theme_file"] and not os.path.isfile(updated["color_theme_file"]):
+        message_box(stdscr, t("error"), t("theme_file_missing"))
+        return False
+    available_theme_names = set(BASE_THEMES)
+    if updated["color_theme_file"]:
+        available_theme_names.update(load_custom_themes_from_file(updated["color_theme_file"]).keys())
+    else:
+        available_theme_names.update(load_custom_themes().keys())
+    if updated["color_theme"] not in available_theme_names:
+        message_box(stdscr, t("error"), t("theme_invalid", names=", ".join(sorted(available_theme_names)))[:56])
+        return False
+
+    if updated["pdf_output_dir"] and not os.path.isdir(updated["pdf_output_dir"]):
+        message_box(stdscr, t("error"), t("pdf_folder_missing"))
+        return False
+    for key in ("label_font_regular", "label_font_condensed"):
+        if updated[key] and not os.path.isfile(updated[key]):
+            message_box(stdscr, t("error"), t("file_missing", name=key)[:56])
+            return False
+    if updated["delivery_note_template_path"] and not os.path.isfile(updated["delivery_note_template_path"]):
+        message_box(stdscr, t("error"), t("delivery_template_missing"))
+        return False
+    for key, label in [
+        ("location_regex_regal", "Regex Regal"),
+        ("location_regex_fach", "Regex Fach"),
+        ("location_regex_platz", "Regex Platz"),
+    ]:
+        if not updated[key]:
+            message_box(stdscr, t("error"), t("field_must_not_be_empty", label=label))
+            return False
+        try:
+            re.compile(updated[key])
+        except re.error as exc:
+            message_box(stdscr, t("error"), t("regex_invalid", label=label, error=exc)[:56])
+            return False
+    if updated["delivery_note_logo_source"]:
+        logo_source = updated["delivery_note_logo_source"]
+        if not is_http_url(logo_source):
+            logo_path = os.path.expanduser(logo_source)
+            if not os.path.isfile(logo_path):
+                message_box(stdscr, t("error"), t("delivery_logo_missing"))
+                return False
+            updated["delivery_note_logo_source"] = logo_path
+    if updated["shipping_label_output_dir"] and not os.path.isdir(updated["shipping_label_output_dir"]):
+        message_box(stdscr, t("error"), t("shipping_label_folder_missing"))
+        return False
+    if not updated["delivery_note_format"]:
+        updated["delivery_note_format"] = "A4"
+    if not updated["shipping_label_format"]:
+        message_box(stdscr, t("error"), t("label_format_required"))
+        return False
+    if not updated["shipping_active_carriers"]:
+        message_box(stdscr, t("error"), t("at_least_one_shipping_carrier"))
+        return False
+    for code in _configurable_shipping_carrier_codes():
+        definition = _shipping_carrier_definition(code)
+        format_field = definition.get("format_field")
+        if format_field and not updated.get(format_field):
+            updated[format_field] = definition.get("default_format", "A6")
+        scale_field = definition.get("scale_field")
+        if scale_field and not updated.get(scale_field):
+            updated[scale_field] = "none"
+    if not updated.get("shipping_label_format"):
+        updated["shipping_label_format"] = "A6"
+    for code in _configurable_shipping_carrier_codes():
+        template_field = _shipping_carrier_setting_field(code, "template")
+        if template_field and updated.get(template_field) and not os.path.isfile(updated[template_field]):
+            message_box(stdscr, t("error"), t("carrier_template_missing", carrier=_shipping_carrier_label(code))[:56])
+            return False
+    try:
+        packaging_weight = int(updated["shipping_packaging_weight_grams"])
+    except ValueError:
+        message_box(stdscr, t("error"), t("packaging_weight_must_be_number"))
+        return False
+    if packaging_weight < 0:
+        message_box(stdscr, t("error"), t("packaging_weight_negative"))
+        return False
+    updated["shipping_packaging_weight_grams"] = packaging_weight
+    return True
+
+
+def settings_dialog(stdscr):
+    global SETTINGS
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+
+    shipping_printer_fields = _shipping_printer_field_map()
+    shipping_format_fields = _shipping_format_field_map()
+    shipping_scale_fields = _shipping_scale_field_map()
+    shipping_template_fields = _shipping_template_field_map()
+    shipping_tracking_mode_fields = _shipping_tracking_mode_field_map()
+
+    values = _settings_dialog_initial_values(SETTINGS)
+    tabs = _settings_dialog_tabs()
+    _settings_apply_initial_shopify_location(values)
     active_tab = 0
     active_field_by_tab = [0 for _ in tabs]
     sync_state = get_service_runtime_state(max_age_seconds=999999)
     sync_status_refresh_pending = False
     last_sync_status_request_at = 0.0
-    editable_field_names = {
-        name
-        for tab in tabs
-        for name, _ in tab["fields"]
-        if not str(name).startswith("_heading_")
-    }
-    cursor_positions = {name: len(str(values.get(name, ""))) for name in editable_field_names}
-    scroll_offsets = {name: 0 for name in editable_field_names}
-
-    def normalize_view(field_name, field_width):
-        field_width = max(1, field_width)
-        value = str(values.get(field_name, ""))
-        value_len = len(value)
-        max_scroll = max(0, value_len - field_width)
-        cursor = max(0, min(cursor_positions.get(field_name, 0), value_len))
-        cursor_positions[field_name] = cursor
-        scroll = max(0, min(scroll_offsets.get(field_name, 0), max_scroll))
-        if cursor < scroll:
-            scroll = cursor
-        elif cursor > scroll + field_width - 1:
-            scroll = cursor - field_width + 1
-        scroll_offsets[field_name] = max(0, min(scroll, max_scroll))
+    text_state = TextInputState.from_values(collect_editable_field_names(tabs), values)
 
     while True:
         loader_result = _SERVICE_RUNTIME_LOADER.poll()
@@ -5811,19 +6693,7 @@ def settings_dialog(stdscr):
 
         tab = tabs[active_tab]
         tab_fields = tab["fields"]
-        editable_indices = [idx for idx, (name, _label_key) in enumerate(tab_fields) if not str(name).startswith("_heading_")]
-        if not editable_indices:
-            active_index = 0
-            active_name = ""
-        else:
-            current_pos = active_field_by_tab[active_tab]
-            if current_pos >= len(editable_indices):
-                current_pos = len(editable_indices) - 1
-            if current_pos < 0:
-                current_pos = 0
-            active_field_by_tab[active_tab] = current_pos
-            active_index = editable_indices[current_pos]
-            active_name = tab_fields[active_index][0]
+        active_index, active_name, editable_indices = resolve_active_field(tabs, active_tab, active_field_by_tab)
         if not tab_fields:
             active_index = 0
             active_name = ""
@@ -5873,11 +6743,8 @@ def settings_dialog(stdscr):
                 win.attrset(curses.color_pair(1))
             else:
                 label = t(label_key)
-                value = str(values.get(name, ""))
                 win.addstr(row, 2, f"{label}:")
-                normalize_view(name, field_width)
-                start = scroll_offsets[name]
-                visible = value[start:start + field_width]
+                visible = text_state.visible_text(name, field_width, values)
                 if idx == active_index:
                     win.attrset(curses.color_pair(2))
                     win.addstr(row, field_x, visible.ljust(field_width))
@@ -5894,8 +6761,7 @@ def settings_dialog(stdscr):
         win.attrset(curses.color_pair(1))
 
         if active_name:
-            normalize_view(active_name, field_width)
-            cursor_x = field_x + min(max(0, cursor_positions[active_name] - scroll_offsets[active_name]), field_width - 1)
+            cursor_x = text_state.cursor_x(active_name, field_x, field_width, values)
             win.move(3 + active_index, cursor_x)
         win.refresh()
 
@@ -5944,29 +6810,22 @@ def settings_dialog(stdscr):
                 continue
 
         if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
-            pos = cursor_positions[active_name]
-            if pos > 0:
-                value = str(values.get(active_name, ""))
-                values[active_name] = value[:pos - 1] + value[pos:]
-                cursor_positions[active_name] = pos - 1
+            text_state.backspace(active_name, values)
             continue
         if key == curses.KEY_DC:
-            pos = cursor_positions[active_name]
-            value = str(values.get(active_name, ""))
-            if pos < len(value):
-                values[active_name] = value[:pos] + value[pos + 1:]
+            text_state.delete(active_name, values)
             continue
         if key == curses.KEY_LEFT:
-            cursor_positions[active_name] = max(0, cursor_positions[active_name] - 1)
+            text_state.move_left(active_name, values)
             continue
         if key == curses.KEY_RIGHT:
-            cursor_positions[active_name] = min(len(str(values.get(active_name, ""))), cursor_positions[active_name] + 1)
+            text_state.move_right(active_name, values)
             continue
         if key == curses.KEY_HOME:
-            cursor_positions[active_name] = 0
+            text_state.move_home(active_name, values)
             continue
         if key == curses.KEY_END:
-            cursor_positions[active_name] = len(str(values.get(active_name, "")))
+            text_state.move_end(active_name, values)
             continue
 
         if key == curses.KEY_F6:
@@ -5980,7 +6839,7 @@ def settings_dialog(stdscr):
                 shipping_template_fields,
                 shipping_tracking_mode_fields,
             )
-            cursor_positions[active_name] = len(str(values.get(active_name, "")))
+            text_state.set_to_end(active_name, values)
             continue
 
         if key == curses.KEY_F7:
@@ -6054,7 +6913,7 @@ def settings_dialog(stdscr):
             }:
                 if editable_indices:
                     active_field_by_tab[active_tab] = (active_field_by_tab[active_tab] + 1) % len(editable_indices)
-            cursor_positions[active_name] = len(str(values.get(active_name, "")))
+            text_state.set_to_end(active_name, values)
             continue
 
         if isinstance(key, str) and key.isprintable():
@@ -6071,191 +6930,11 @@ def settings_dialog(stdscr):
                 *shipping_scale_fields.keys(),
             }:
                 continue
-            value = str(values.get(active_name, ""))
-            pos = cursor_positions[active_name]
-            values[active_name] = value[:pos] + key + value[pos:]
-            cursor_positions[active_name] = pos + 1
+            text_state.insert_text(active_name, values, key)
 
-    updated = {
-        "db_host": values["db_host"].strip(),
-        "db_port": int((values.get("db_port") or str(DEFAULT_SETTINGS["db_port"])).strip()),
-        "db_connect_timeout": _db_connect_timeout(values),
-        "db_name": values["db_name"].strip(),
-        "db_user": values["db_user"].strip(),
-        "db_pass": values["db_pass"],
-        "language": values["language"].strip().lower(),
-        "shopify_location_mode": values["shopify_location_mode"].strip().lower(),
-        "shopify_active_location_id": values["shopify_active_location_id"].strip(),
-        "color_theme": values["color_theme"].strip().lower(),
-        "color_theme_file": os.path.expanduser(values["color_theme_file"].strip()),
-        "printer_uri": values["printer_uri"].strip(),
-        "printer_model": values["printer_model"].strip(),
-        "label_size": values["label_size"].strip(),
-        "label_font_regular": os.path.expanduser(values["label_font_regular"].strip()),
-        "label_font_condensed": os.path.expanduser(values["label_font_condensed"].strip()),
-        "location_regex_regal": values["location_regex_regal"].strip(),
-        "location_regex_fach": values["location_regex_fach"].strip(),
-        "location_regex_platz": values["location_regex_platz"].strip(),
-        "location_regex_ignore_case_regal": bool(values.get("location_regex_ignore_case_regal", False)),
-        "location_regex_ignore_case_fach": bool(values.get("location_regex_ignore_case_fach", False)),
-        "location_regex_ignore_case_platz": bool(values.get("location_regex_ignore_case_platz", False)),
-        "location_regex_normalize_case_regal": str(values.get("location_regex_normalize_case_regal", "none")).strip().lower(),
-        "location_regex_normalize_case_fach": str(values.get("location_regex_normalize_case_fach", "none")).strip().lower(),
-        "location_regex_normalize_case_platz": str(values.get("location_regex_normalize_case_platz", "none")).strip().lower(),
-        "picklist_printer": values["picklist_printer"].strip(),
-        "delivery_note_printer": values["delivery_note_printer"].strip(),
-        "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
-        "delivery_note_scale_mode": _normalize_scale_mode(values.get("delivery_note_scale_mode", "none")),
-        "delivery_note_duplex": _normalize_duplex_mode(values.get("delivery_note_duplex", "off")),
-        "delivery_note_color_mode": _normalize_color_mode(values.get("delivery_note_color_mode", "color")),
-        "shipping_active_carriers": _normalize_active_shipping_carriers(
-            values.get("shipping_active_carriers", []),
-            fallback_to_defaults=False,
-        ),
-        "shipping_label_printer": values["shipping_label_printer"].strip(),
-        "shipping_label_output_dir": os.path.expanduser(values["shipping_label_output_dir"].strip()),
-        "shipping_label_format": _normalize_shipping_label_format(values["shipping_label_format"].strip()),
-        "shipping_label_scale_mode": _normalize_scale_mode(values.get("shipping_label_scale_mode", "none")),
-        "shipping_services": _normalize_shipping_services(values.get("shipping_services", [])),
-        "manual_label_default_country": _shipping_country_code(values.get("manual_label_default_country", "")),
-        "shipping_packaging_weight_grams": values["shipping_packaging_weight_grams"].strip(),
-        "pdf_output_dir": os.path.expanduser(values["pdf_output_dir"].strip()),
-        "delivery_note_template_path": os.path.expanduser(values["delivery_note_template_path"].strip()),
-        "delivery_note_logo_source": values["delivery_note_logo_source"].strip(),
-        "delivery_note_sender_name": values["delivery_note_sender_name"].strip(),
-        "delivery_note_sender_street": values["delivery_note_sender_street"].strip(),
-        "delivery_note_sender_city": values["delivery_note_sender_city"].strip(),
-        "delivery_note_sender_email": values["delivery_note_sender_email"].strip(),
-    }
-    for code in _configurable_shipping_carrier_codes():
-        definition = _shipping_carrier_definition(code)
-        printer_field = definition.get("printer_field")
-        if printer_field:
-            updated[printer_field] = values.get(printer_field, "").strip()
-        format_field = definition.get("format_field")
-        if format_field:
-            updated[format_field] = _normalize_shipping_label_format(values.get(format_field, "").strip())
-        scale_field = definition.get("scale_field")
-        if scale_field:
-            updated[scale_field] = _normalize_scale_mode(values.get(scale_field, "none"))
-        tracking_mode_field = definition.get("tracking_mode_field")
-        if tracking_mode_field:
-            updated[tracking_mode_field] = values.get(tracking_mode_field, "").strip().lower()
-        tracking_url_field = definition.get("tracking_url_field")
-        if tracking_url_field:
-            updated[tracking_url_field] = values.get(tracking_url_field, "").strip()
-        template_field = definition.get("template_field")
-        if template_field:
-            updated[template_field] = os.path.expanduser(values.get(template_field, "").strip())
-        for field_name, _label_key in definition.get("extra_settings_fields") or []:
-            if field_name == "shipping_services_display":
-                continue
-            if field_name.endswith("_password"):
-                updated[field_name] = values.get(field_name, "")
-            else:
-                updated[field_name] = values.get(field_name, "").strip()
-
-    missing = [
-        label for key, label in [
-            ("db_host", "DB Host"),
-            ("db_port", "DB Port"),
-            ("db_name", "DB Name"),
-            ("db_user", "DB User"),
-            ("printer_uri", "Drucker URI"),
-            ("printer_model", "Drucker Modell"),
-            ("label_size", "Labelformat"),
-        ]
-        if not updated[key]
-    ]
-
-    if missing:
-        message_box(stdscr, t("error"), t("missing_fields", fields=", ".join(missing)))
+    updated = _settings_dialog_updated_values(values)
+    if not _settings_validate_updated_values(stdscr, updated):
         return
-
-    if updated["language"] not in SUPPORTED_LANGUAGES:
-        message_box(stdscr, t("error"), t("language_must_be_supported"))
-        return
-    if updated["shopify_location_mode"] not in {"single", "multi"}:
-        message_box(stdscr, t("error"), t("shopify_location_mode_invalid"))
-        return
-    if updated["color_theme_file"] and not os.path.isfile(updated["color_theme_file"]):
-        message_box(stdscr, t("error"), t("theme_file_missing"))
-        return
-    available_theme_names = set(BASE_THEMES)
-    if updated["color_theme_file"]:
-        available_theme_names.update(load_custom_themes_from_file(updated["color_theme_file"]).keys())
-    else:
-        available_theme_names.update(load_custom_themes().keys())
-    if updated["color_theme"] not in available_theme_names:
-        message_box(stdscr, t("error"), t("theme_invalid", names=", ".join(sorted(available_theme_names)))[:56])
-        return
-
-    if updated["pdf_output_dir"] and not os.path.isdir(updated["pdf_output_dir"]):
-        message_box(stdscr, t("error"), t("pdf_folder_missing"))
-        return
-    for key in ("label_font_regular", "label_font_condensed"):
-        if updated[key] and not os.path.isfile(updated[key]):
-            message_box(stdscr, t("error"), t("file_missing", name=key)[:56])
-            return
-    if updated["delivery_note_template_path"] and not os.path.isfile(updated["delivery_note_template_path"]):
-        message_box(stdscr, t("error"), t("delivery_template_missing"))
-        return
-    for key, label in [
-        ("location_regex_regal", "Regex Regal"),
-        ("location_regex_fach", "Regex Fach"),
-        ("location_regex_platz", "Regex Platz"),
-        ]:
-        if not updated[key]:
-            message_box(stdscr, t("error"), t("field_must_not_be_empty", label=label))
-            return
-        try:
-            re.compile(updated[key])
-        except re.error as exc:
-            message_box(stdscr, t("error"), t("regex_invalid", label=label, error=exc)[:56])
-            return
-    if updated["delivery_note_logo_source"]:
-        logo_source = updated["delivery_note_logo_source"]
-        if not is_http_url(logo_source):
-            logo_path = os.path.expanduser(logo_source)
-            if not os.path.isfile(logo_path):
-                message_box(stdscr, t("error"), t("delivery_logo_missing"))
-                return
-            updated["delivery_note_logo_source"] = logo_path
-    if updated["shipping_label_output_dir"] and not os.path.isdir(updated["shipping_label_output_dir"]):
-        message_box(stdscr, t("error"), t("shipping_label_folder_missing"))
-        return
-    if not updated["delivery_note_format"]:
-        updated["delivery_note_format"] = "A4"
-    if not updated["shipping_label_format"]:
-        message_box(stdscr, t("error"), t("label_format_required"))
-        return
-    if not updated["shipping_active_carriers"]:
-        message_box(stdscr, t("error"), t("at_least_one_shipping_carrier"))
-        return
-    for code in _configurable_shipping_carrier_codes():
-        definition = _shipping_carrier_definition(code)
-        format_field = definition.get("format_field")
-        if format_field and not updated.get(format_field):
-            updated[format_field] = definition.get("default_format", "A6")
-        scale_field = definition.get("scale_field")
-        if scale_field and not updated.get(scale_field):
-            updated[scale_field] = "none"
-    if not updated.get("shipping_label_format"):
-        updated["shipping_label_format"] = "A6"
-    for code in _configurable_shipping_carrier_codes():
-        template_field = _shipping_carrier_setting_field(code, "template")
-        if template_field and updated.get(template_field) and not os.path.isfile(updated[template_field]):
-            message_box(stdscr, t("error"), t("carrier_template_missing", carrier=_shipping_carrier_label(code))[:56])
-            return
-    try:
-        packaging_weight = int(updated["shipping_packaging_weight_grams"])
-    except ValueError:
-        message_box(stdscr, t("error"), t("packaging_weight_must_be_number"))
-        return
-    if packaging_weight < 0:
-        message_box(stdscr, t("error"), t("packaging_weight_negative"))
-        return
-    updated["shipping_packaging_weight_grams"] = packaging_weight
 
     try:
         SETTINGS = run_background_action_dialog(
@@ -6696,6 +7375,7 @@ def toggle_external_fulfillment(stdscr, item):
 def format_address(order):
     parts = [
         order["shipping_name"] or "",
+        order.get("shipping_address2") or "",
         order["shipping_address1"] or "",
         " ".join(part for part in [order["shipping_zip"] or "", order["shipping_city"] or ""] if part),
     ]
@@ -7717,13 +8397,14 @@ def run_partial_execution_for_order(stdscr, order, order_items):
         if print_mode in {"both", "note"}:
             _print_delivery_note_pdf_path(order, note_path)
 
-        if created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
+        if created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier) and _order_allows_shopify_fulfillment(order):
             fresh_rows = list_shipping_labels(order["order_id"])
             current_label = next((row for row in fresh_rows if row["id"] == created["label_id"]), None)
             if current_label:
                 queue_result = enqueue_shopify_fulfillment_job_for_items(current_label, selected_items, notify_customer=False)
                 if queue_result.get("created"):
                     update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
+        apply_custom_order_execution(order, selected_items)
         message_box(
             stdscr,
             t("partial_execution_title"),
@@ -7796,7 +8477,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     if print_mode is None:
         return
     shopify_mode = "manual"
-    if _shipping_carrier_allows_shopify(carrier):
+    if _shipping_carrier_allows_shopify(carrier) and any(_order_allows_shopify_fulfillment(row) for row in selected_orders):
         shopify_mode = _bulk_shopify_queue_mode_dialog(stdscr)
         if shopify_mode is None:
             return
@@ -7836,7 +8517,12 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                         note_paths_to_print.append(note_path)
                         note_titles_to_print.append(f"Lieferschein {order['order_name']}")
 
-                    if shopify_mode == "queue" and created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier):
+                    if (
+                        shopify_mode == "queue"
+                        and created.get("label_id") is not None
+                        and _shipping_carrier_allows_shopify(carrier)
+                        and _order_allows_shopify_fulfillment(order)
+                    ):
                         labels_for_order = ensure_order_shipments_loaded(order["order_id"])
                         created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
                         if created_row:
@@ -7850,6 +8536,7 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                                     queued_count += 1
                                     update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
 
+                    apply_custom_order_execution(order, order_items)
                     success_count += 1
                 except DatabaseUnavailableError:
                     raise
@@ -7929,6 +8616,8 @@ def create_shipping_label_for_order(stdscr, order):
         return
 
     printed = _print_pdf_via_lp(stdscr, created["label_path"], f"{carrier} {created['shipment_reference']}", carrier=resolved_carrier)
+    if _order_is_custom(order):
+        apply_custom_order_execution(order, get_order_items(order["order_id"]))
     if printed:
         if created["label_id"] is not None:
             update_shipping_label_status(created["label_id"], "PRINTED")
@@ -8277,21 +8966,12 @@ def orders_dialog(stdscr):
         curses.curs_set(0)
     except curses.error:
         pass
-    order_filter = None
-    only_pending = False
-    fulfillment_filter = "all"
-    payment_filter = "all"
-    selected = 0
-    top_index = 0
+    state = OrdersDialogState()
     orders_snapshot = []
     last_orders_snapshot_refresh_at = None
     orders = []
     order_items_cache = {}
     order_shipments_cache = {}
-    selected_order_ids = set()
-    reload_orders_snapshot = True
-    orders_snapshot_reload_pending = False
-    rebuild_orders_view = True
     prefetch_order_ids = []
 
     while True:
@@ -8303,54 +8983,51 @@ def orders_dialog(stdscr):
                 order_shipments_cache[result["key"]] = result["value"]
         loader_result = _ORDERS_SNAPSHOT_LOADER.poll()
         if loader_result and loader_result.get("key") == "orders_snapshot":
-            orders_snapshot_reload_pending = False
+            state.orders_snapshot_reload_pending = False
             if loader_result.get("error") is None and loader_result.get("value") is not None:
                 orders_snapshot = loader_result["value"]
                 active_order_ids = {row.get("order_id") for row in orders_snapshot if row.get("order_id")}
                 order_items_cache = {key: value for key, value in order_items_cache.items() if key in active_order_ids}
                 order_shipments_cache = {key: value for key, value in order_shipments_cache.items() if key in active_order_ids}
-                rebuild_orders_view = True
+                state.rebuild_orders_view = True
                 last_orders_snapshot_refresh_at = loader_result["loaded_at"]
 
         try:
-            if reload_orders_snapshot:
+            if state.reload_orders_snapshot:
                 if not orders_snapshot:
                     orders_snapshot = _load_orders_snapshot()
                     active_order_ids = {row.get("order_id") for row in orders_snapshot if row.get("order_id")}
                     order_items_cache = {key: value for key, value in order_items_cache.items() if key in active_order_ids}
                     order_shipments_cache = {key: value for key, value in order_shipments_cache.items() if key in active_order_ids}
                     last_orders_snapshot_refresh_at = time.monotonic()
-                    rebuild_orders_view = True
-                elif not orders_snapshot_reload_pending:
+                    state.rebuild_orders_view = True
+                elif not state.orders_snapshot_reload_pending:
                     _ORDERS_SNAPSHOT_LOADER.request("orders_snapshot", _load_orders_snapshot)
-                    orders_snapshot_reload_pending = True
-                reload_orders_snapshot = False
-            if rebuild_orders_view:
+                    state.orders_snapshot_reload_pending = True
+                state.reload_orders_snapshot = False
+            if state.rebuild_orders_view:
                 orders = _filter_orders_snapshot(
                     orders_snapshot,
-                    order_filter=order_filter,
-                    only_pending=only_pending,
-                    fulfillment_filter=fulfillment_filter,
-                    payment_filter=payment_filter,
+                    order_filter=state.order_filter,
+                    only_pending=state.only_pending,
+                    fulfillment_filter=state.fulfillment_filter,
+                    payment_filter=state.payment_filter,
                 )
-                selected_order_ids = {order_id for order_id in selected_order_ids if any(row["order_id"] == order_id for row in orders)}
-                rebuild_orders_view = False
+                state.trim_selected_order_ids(orders)
+                state.rebuild_orders_view = False
         except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
-            reload_orders_snapshot = True
+            state.reload_orders_snapshot = True
             continue
 
-        if selected >= len(orders):
-            selected = len(orders) - 1
-        if selected < 0:
-            selected = 0
+        state.clamp_selection(len(orders))
 
-        selected_order = orders[selected] if orders else None
-        selected_order_id = selected_order["order_id"] if selected_order else None
+        selected_order = state.selected_order(orders)
+        selected_order_id = state.selected_order_id(orders)
 
         try:
-            prefetch_order_ids = _prefetch_order_ids(orders, selected, ahead=5, behind=1)
+            prefetch_order_ids = _prefetch_order_ids(orders, state.selected, ahead=5, behind=1)
             for order_id in prefetch_order_ids:
                 if order_id not in order_items_cache:
                     _ORDER_ITEMS_LOADER.request(order_id, get_order_items, order_id)
@@ -8359,7 +9036,7 @@ def orders_dialog(stdscr):
         except (DatabaseUnavailableError, DatabaseBusyError) as exc:
             if not database_connection_dialog(stdscr, str(exc)):
                 return
-            reload_orders_snapshot = True
+            state.reload_orders_snapshot = True
             continue
 
         order_items = order_items_cache.get(selected_order_id, [])
@@ -8386,102 +9063,51 @@ def orders_dialog(stdscr):
         orders_win = win.derwin(list_height, left_width, 1, 1)
         details_win = win.derwin(list_height, right_width, 1, 2 + left_width)
 
-        order_lines = []
-        for order in orders:
-            location_count = int(order.get("shopify_location_count") or 0)
-            if location_count > 0:
-                open_hint = "[!]" if int(order.get("active_location_remaining_qty") or 0) > 0 else "   "
-            else:
-                status_value = (order.get("fulfillment_status") or "").strip().lower()
-                open_hint = "[!]" if status_value not in {"fulfilled", "cancelled"} else "   "
-            mark = "[x]" if order["order_id"] in selected_order_ids else "[ ]"
-            order_lines.append(
-                f"{mark}{open_hint} {_fit(order['order_name'], 10)} {_fit(format_address(order), left_width - 19)}"
-            )
+        order_lines = build_order_list_lines(orders, state.selected_order_ids, left_width, _fit, format_address)
         if not order_lines:
             order_lines = [t("orders_none")]
 
-        if selected < top_index:
-            top_index = selected
-        if selected >= top_index + max(1, list_height - 2):
-            top_index = selected - max(1, list_height - 2) + 1
+        if state.selected < state.top_index:
+            state.top_index = state.selected
+        if state.selected >= state.top_index + max(1, list_height - 2):
+            state.top_index = state.selected - max(1, list_height - 2) + 1
 
-        draw_panel(orders_win, t("orders_panel_title"), order_lines, selected if orders else 0, top_index, True)
+        draw_panel(orders_win, t("orders_panel_title"), order_lines, state.selected if orders else 0, state.top_index, True)
 
-        detail_lines = []
-        if selected_order:
-            selected_weight_kg, selected_weight_grams = calculate_order_shipping_weight(selected_order, order_items)
-            country = _localized_country_display(selected_order.get("shipping_country"))
-            created_at = selected_order.get("created_at")
-            if isinstance(created_at, datetime.datetime):
-                ordered_at_text = created_at.strftime("%d.%m.%Y %H:%M")
-            else:
-                ordered_at_text = "-"
-            detail_lines.append(_fit(t("orders_detail_order", value=selected_order["order_name"]), right_width - 2))
-            detail_lines.append(_fit(format_address(selected_order), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_country", value=country), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_email", value=selected_order.get("shipping_email") or "-"), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_phone", value=selected_order.get("shipping_phone") or "-"), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_ordered_at", value=ordered_at_text), right_width - 2))
-            status = _localized_fulfillment_status(selected_order["fulfillment_status"])
-            payment_status = _localized_payment_status(selected_order["payment_status"])
-            internal_qty = selected_order.get("local_internal_qty") or 0
-            active_location_label = _ACTIVE_SHOPIFY_LOCATION_NAME or _active_shopify_location_id() or "-"
-            active_location_qty = int(selected_order.get("active_location_internal_qty") or 0)
-            active_location_remaining_qty = int(selected_order.get("active_location_remaining_qty") or 0)
-            shopify_location_count = int(selected_order.get("shopify_location_count") or 0)
-            detail_lines.append(_fit(t("orders_detail_status", value=status), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_payment", value=payment_status), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_internal_qty", value=internal_qty), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_shopify_location", value=active_location_label), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_location_qty", value=active_location_qty), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_location_open_qty", value=active_location_remaining_qty), right_width - 2))
-            if shopify_location_count > 1:
-                detail_lines.append(_fit(t("orders_detail_location_split", value=shopify_location_count), right_width - 2))
-            detail_lines.append(_fit(t("orders_detail_shipping_weight", grams=selected_weight_grams, kg=selected_weight_kg), right_width - 2))
-            if selected_order_id and selected_order_id not in order_shipments_cache:
-                detail_lines.append(_fit(t("orders_detail_shipments_loading"), right_width - 2))
-            else:
-                detail_lines.extend(_shipment_summary_lines(order_shipments, right_width - 13))
-            detail_lines.append("")
-            qty_width, sku_width, regal_width, fach_width, platz_width, title_width = format_order_item_header(right_width - 2)
-            detail_lines.append(
-                t(
-                    "orders_detail_items_header",
-                    qty=_fit("Off/Ges", qty_width),
-                    sku=_fit("SKU", sku_width),
-                    item=_fit(t("items_panel"), title_width),
-                    regal=_fit(t("field_regal_short"), regal_width),
-                    fach=_fit(t("field_fach_short"), fach_width),
-                    platz=_fit(t("field_platz_short"), platz_width),
-                )
-            )
-            detail_lines.append("-" * max(1, right_width - 2))
-
-            if selected_order_id and selected_order_id not in order_items_cache:
-                detail_lines.append(_fit(t("orders_detail_positions_loading"), right_width - 2))
-            else:
-                if not order_items and shopify_location_count > 0:
-                    detail_lines.append(_fit(t("orders_detail_no_location_positions"), right_width - 2))
-                for row in order_items:
-                    detail_lines.append(format_order_item_row(row, right_width - 2))
-        else:
-            detail_lines.append(t("order_not_found"))
+        detail_lines = build_order_detail_lines(
+            selected_order,
+            selected_order_id,
+            order_items,
+            not (selected_order_id and selected_order_id not in order_items_cache),
+            order_shipments,
+            not (selected_order_id and selected_order_id not in order_shipments_cache),
+            right_width,
+            _ACTIVE_SHOPIFY_LOCATION_NAME or _active_shopify_location_id() or "-",
+            t,
+            _fit,
+            format_address,
+            calculate_order_shipping_weight,
+            _localized_country_display,
+            _localized_fulfillment_status,
+            _localized_payment_status,
+            _shipment_summary_lines,
+            format_order_item_header,
+            format_order_item_row,
+            lambda value: value.strftime("%d.%m.%Y %H:%M") if isinstance(value, datetime.datetime) else "-",
+        )
 
         draw_panel(details_win, t("orders_positions_panel"), detail_lines, 0, 0, False)
 
-        footer = t("orders_footer")
-        filter_tags = []
-        if order_filter:
-            filter_tags.append(t("orders_filter_text", value=order_filter))
-        if only_pending:
-            filter_tags.append(t("orders_filter_only_open"))
-        if fulfillment_filter != "all":
-            filter_tags.append(_fulfillment_filter_label(fulfillment_filter).replace("Status: ", ""))
-        if payment_filter != "all":
-            filter_tags.append(_payment_filter_label(payment_filter).replace("Zahlung: ", ""))
-        if filter_tags:
-            footer = f" Filter[{', '.join(filter_tags)}] " + footer
+        footer = build_orders_footer(
+            t("orders_footer"),
+            state.order_filter,
+            state.only_pending,
+            state.fulfillment_filter,
+            state.payment_filter,
+            t,
+            _fulfillment_filter_label,
+            _payment_filter_label,
+        )
         win.attrset(curses.color_pair(3))
         draw_footer_line(win, height - 1, 1, width - 2, footer)
         win.refresh()
@@ -8490,7 +9116,7 @@ def orders_dialog(stdscr):
             key = win.get_wch()
         except curses.error:
             if should_refresh_orders(last_orders_snapshot_refresh_at):
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
             continue
 
         if key in (27, curses.KEY_F9):
@@ -8500,54 +9126,46 @@ def orders_dialog(stdscr):
                 pass
             return
         if key == curses.KEY_DOWN:
-            selected = move_selection(orders, selected, 1)
+            state.selected = move_selection(orders, state.selected, 1)
         elif key == curses.KEY_UP:
-            selected = move_selection(orders, selected, -1)
+            state.selected = move_selection(orders, state.selected, -1)
         elif key == curses.KEY_NPAGE:
-            selected = move_selection(orders, selected, max(1, list_height - 2))
+            state.selected = move_selection(orders, state.selected, max(1, list_height - 2))
         elif key == curses.KEY_PPAGE:
-            selected = move_selection(orders, selected, -max(1, list_height - 2))
+            state.selected = move_selection(orders, state.selected, -max(1, list_height - 2))
         elif key == curses.KEY_F1:
-            only_pending = not only_pending
-            selected = 0
-            top_index = 0
-            rebuild_orders_view = True
+            state.only_pending = not state.only_pending
+            state.reset_view()
         elif key == curses.KEY_F2:
-            current_index = FULFILLMENT_FILTER_SEQUENCE.index(fulfillment_filter) if fulfillment_filter in FULFILLMENT_FILTER_SEQUENCE else 0
-            fulfillment_filter = FULFILLMENT_FILTER_SEQUENCE[(current_index + 1) % len(FULFILLMENT_FILTER_SEQUENCE)]
-            selected = 0
-            top_index = 0
-            rebuild_orders_view = True
+            current_index = FULFILLMENT_FILTER_SEQUENCE.index(state.fulfillment_filter) if state.fulfillment_filter in FULFILLMENT_FILTER_SEQUENCE else 0
+            state.fulfillment_filter = FULFILLMENT_FILTER_SEQUENCE[(current_index + 1) % len(FULFILLMENT_FILTER_SEQUENCE)]
+            state.reset_view()
         elif key == curses.KEY_F3:
-            current_index = PAYMENT_FILTER_SEQUENCE.index(payment_filter) if payment_filter in PAYMENT_FILTER_SEQUENCE else 0
-            payment_filter = PAYMENT_FILTER_SEQUENCE[(current_index + 1) % len(PAYMENT_FILTER_SEQUENCE)]
-            selected = 0
-            top_index = 0
-            rebuild_orders_view = True
+            current_index = PAYMENT_FILTER_SEQUENCE.index(state.payment_filter) if state.payment_filter in PAYMENT_FILTER_SEQUENCE else 0
+            state.payment_filter = PAYMENT_FILTER_SEQUENCE[(current_index + 1) % len(PAYMENT_FILTER_SEQUENCE)]
+            state.reset_view()
         elif key == curses.KEY_F4:
-            value = order_jump_dialog(stdscr, order_filter or "")
+            value = order_jump_dialog(stdscr, state.order_filter or "")
             try:
                 curses.curs_set(0)
             except curses.error:
                 pass
             if value is not None:
-                order_filter = value or None
-                selected = 0
-                top_index = 0
-                rebuild_orders_view = True
+                state.order_filter = value or None
+                state.reset_view()
                 if value:
                     matched_orders = _filter_orders_snapshot(
                         orders_snapshot,
-                        order_filter=order_filter,
-                        only_pending=only_pending,
-                        fulfillment_filter=fulfillment_filter,
-                        payment_filter=payment_filter,
+                        order_filter=state.order_filter,
+                        only_pending=state.only_pending,
+                        fulfillment_filter=state.fulfillment_filter,
+                        payment_filter=state.payment_filter,
                     )
                     target_index = jump_to_order(matched_orders, value)
                     orders = matched_orders
-                    rebuild_orders_view = False
+                    state.rebuild_orders_view = False
                     if target_index is not None:
-                        selected = target_index
+                        state.selected = target_index
         elif key == curses.KEY_F5 and selected_order:
             try:
                 create_shipping_label_for_order(stdscr, selected_order)
@@ -8563,7 +9181,7 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
             try:
                 create_manual_shipping_label(stdscr)
@@ -8578,14 +9196,14 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key == curses.KEY_F6 and selected_order:
             try:
                 order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
                 order_shipments_cache.pop(selected_order_id, None)
                 order_items_cache.pop(selected_order_id, None)
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -8597,14 +9215,14 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key in (curses.KEY_F19, "t", "T") and selected_order:
             try:
                 order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
                 order_shipments_cache.pop(selected_order_id, None)
                 order_items_cache.pop(selected_order_id, None)
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
                 try:
                     curses.curs_set(0)
                 except curses.error:
@@ -8616,11 +9234,11 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key == curses.KEY_F7:
             try:
-                run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids)
-                reload_orders_snapshot = True
+                run_bulk_execution(stdscr, orders, order_items_cache, state.selected_order_ids)
+                state.reload_orders_snapshot = True
                 order_items_cache = {}
                 order_shipments_cache = {}
                 try:
@@ -8634,7 +9252,7 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key == curses.KEY_F8:
             try:
                 shipping_history_dialog(stdscr, selected_order)
@@ -8650,7 +9268,7 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key == curses.KEY_F11 and selected_order:
             try:
                 handle_delivery_note_output(stdscr, selected_order, order_items=None, order_items_cache=order_items_cache)
@@ -8665,23 +9283,77 @@ def orders_dialog(stdscr):
                     except curses.error:
                         pass
                     return
-                reload_orders_snapshot = True
+                state.reload_orders_snapshot = True
         elif key == curses.KEY_F10 and selected_order:
             order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
             print_picklist(stdscr, selected_order, order_items)
-        elif key == " " and selected_order:
-            order_id = selected_order["order_id"]
-            if order_id in selected_order_ids:
-                selected_order_ids.remove(order_id)
-            else:
-                selected_order_ids.add(order_id)
-        elif key in ("a", "A"):
-            if not orders:
+        elif key == curses.KEY_F12:
+            try:
+                created = custom_order_dialog(stdscr)
+                if created:
+                    state.reload_orders_snapshot = True
+                    orders_snapshot = []
+                    order_items_cache = {}
+                    order_shipments_cache = {}
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                state.reload_orders_snapshot = True
+        elif key in (getattr(curses, "KEY_F24", curses.KEY_F12 + 12), "e", "E") and selected_order:
+            if not _order_is_custom(selected_order):
+                message_box(stdscr, t("custom_order_title"), t("custom_order_only_edit"))
                 continue
-            if len(selected_order_ids) == len(orders):
-                selected_order_ids.clear()
-            else:
-                selected_order_ids = {row["order_id"] for row in orders}
+            try:
+                updated = custom_order_dialog(stdscr, existing_order_id=selected_order_id)
+                if updated:
+                    state.reload_orders_snapshot = True
+                    orders_snapshot = []
+                    order_items_cache = {}
+                    order_shipments_cache = {}
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                state.reload_orders_snapshot = True
+        elif key in (curses.KEY_DC, "d", "D") and selected_order:
+            try:
+                deleted = delete_custom_order_dialog(stdscr, selected_order)
+                if deleted:
+                    state.reload_orders_snapshot = True
+                    orders_snapshot = []
+                    order_items_cache = {}
+                    order_shipments_cache = {}
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    try:
+                        curses.curs_set(1)
+                    except curses.error:
+                        pass
+                    return
+                state.reload_orders_snapshot = True
+        elif key == " " and selected_order:
+            state.toggle_selected_order(selected_order)
+        elif key in ("a", "A"):
+            state.toggle_all_orders(orders)
 
 
 def inventory_count_dialog(stdscr, line):

@@ -268,6 +268,80 @@ class ShippingHistorySchemaTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS shipping_labels", queries)
 
 
+class ShopifySyncShippingMirrorTests(unittest.TestCase):
+    def test_shopify_sync_shipping_sources_match_shared_sources(self):
+        for relative_path in ("history.py", "schema.py"):
+            with self.subTest(relative_path=relative_path):
+                shared_source = (ROOT / "shipping" / relative_path).read_text(encoding="utf-8")
+                sync_source = (ROOT / "shopify-sync" / "shipping" / relative_path).read_text(encoding="utf-8")
+                self.assertEqual(sync_source, shared_source)
+
+
+class UiHelperTests(unittest.TestCase):
+    def test_text_input_state_keeps_cursor_and_value_together(self):
+        from ui_settings import TextInputState
+
+        values = {"sku": "ABC"}
+        state = TextInputState.from_values({"sku"}, values)
+
+        state.move_left("sku", values)
+        state.insert_text("sku", values, "-")
+        state.backspace("sku", values)
+        state.move_end("sku", values)
+        state.insert_text("sku", values, "D")
+
+        self.assertEqual(values["sku"], "ABCD")
+        self.assertEqual(state.cursor_positions["sku"], 4)
+
+    def test_order_list_lines_include_selection_and_open_hint(self):
+        from ui_orders import build_order_list_lines
+
+        orders = [
+            {
+                "order_id": "1",
+                "order_name": "2026-1",
+                "shopify_location_count": 1,
+                "active_location_remaining_qty": 2,
+                "fulfillment_status": "fulfilled",
+            },
+            {
+                "order_id": "2",
+                "order_name": "2026-2",
+                "shopify_location_count": 0,
+                "active_location_remaining_qty": 0,
+                "fulfillment_status": "fulfilled",
+            },
+        ]
+
+        lines = build_order_list_lines(
+            orders,
+            {"1"},
+            60,
+            lambda value, width: str(value)[:width],
+            lambda order: f"Adresse {order['order_id']}",
+        )
+
+        self.assertTrue(lines[0].startswith("[x][!] 2026-1"))
+        self.assertTrue(lines[1].startswith("[ ]    2026-2"))
+
+    def test_orders_footer_adds_active_filter_tags(self):
+        from ui_orders import build_orders_footer
+
+        footer = build_orders_footer(
+            "F9 Ende",
+            order_filter="2722",
+            only_pending=True,
+            fulfillment_filter="open",
+            payment_filter="paid",
+            translate=lambda key, **kwargs: f"Filter:{kwargs['value']}" if key == "orders_filter_text" else "Offen",
+            fulfillment_filter_label=lambda value: "Status: Offen",
+            payment_filter_label=lambda value: "Zahlung: Bezahlt",
+        )
+
+        self.assertIn("Filter[Filter:2722, Offen, Offen, Bezahlt]", footer)
+        self.assertTrue(footer.endswith("F9 Ende"))
+
+
 class DatabaseSchemaTests(unittest.TestCase):
     def test_apply_app_schema_adds_required_items_and_inventory_sql(self):
         from shipping.schema import apply_app_schema
@@ -1659,8 +1733,56 @@ class LagerMcLogicTests(unittest.TestCase):
             self.assertEqual(self.lager_mc.t("db_wait_footer"), "Enter Retry  F2 Settings  F9 Exit")
             self.assertEqual(
                 self.lager_mc.t("orders_footer"),
-                " Space Mark  A All  F1 Open  F2 Status  F3 Payment  F4 Jump  F5 Shipping Label  Shift+F5 Manual  F6 Partial  F7 Bulk  F8 Shipping History  F9 Back  F10 Picklist  F11 Delivery Note ",
+                " Space Mark  A All  F1 Open  F2 Status  F3 Payment  F4 Jump  F5 Shipping Label  Shift+F5 Manual  F6 Partial  F7 Bulk  F8 Shipping History  F9 Back  F10 Picklist  F11 Delivery Note  F12 Custom  E Edit  D Delete ",
             )
+
+    def test_custom_order_number_starts_new_year_sequence(self):
+        cursor = FakeCursor(fetchone_results=[None])
+        result = self.lager_mc._next_custom_order_name(cursor, now=datetime.datetime(2026, 1, 1))
+
+        self.assertEqual(result, "3026-0000")
+        self.assertIn("3026-%", cursor.executed[0][1])
+
+    def test_custom_order_number_increments_existing_sequence(self):
+        cursor = FakeCursor(fetchone_results=[{"order_name": "3026-0042"}])
+        result = self.lager_mc._next_custom_order_name(cursor, now=datetime.datetime(2026, 5, 21))
+
+        self.assertEqual(result, "3026-0043")
+
+    def test_custom_order_blocks_shopify_fulfillment_queue(self):
+        with self.assertRaises(RuntimeError):
+            self.lager_mc.enqueue_shopify_fulfillment_job(
+                {
+                    "id": 1,
+                    "order_id": "custom-3026-0000",
+                    "parcel_number": "ABC123",
+                    "carrier": "gls",
+                }
+            )
+
+    def test_delete_custom_order_releases_remaining_reservation_and_deletes_order(self):
+        cursor = FakeCursor(
+            fetchone_results=[{"order_id": "custom-3026-0000"}],
+            fetchall_results=[
+                [
+                    {
+                        "sku": "SKU-1",
+                        "assigned_location_id": "gid://shopify/Location/1",
+                        "quantity": 2,
+                    }
+                ]
+            ],
+        )
+        connection = FakeConnection(cursor)
+
+        with mock.patch.object(self.lager_mc, "db", return_value=connection):
+            with mock.patch.object(self.lager_mc, "_adjust_custom_order_reservation") as adjust_mock:
+                result = self.lager_mc.delete_custom_order("custom-3026-0000")
+
+        self.assertTrue(result)
+        self.assertTrue(connection.committed)
+        adjust_mock.assert_called_once_with(cursor, "SKU-1", "gid://shopify/Location/1", -2)
+        self.assertTrue(any("DELETE FROM shopify_orders" in query for query, _ in cursor.executed))
 
     def test_shipping_service_summary_translates_for_english(self):
         with mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False):
@@ -1850,6 +1972,42 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(post_fields[0]["name"], "post_product")
         self.assertEqual(post_fields[0]["action"], "carrier_options")
         self.assertEqual(free_fields, [])
+
+    def test_explicit_form_submit_key_saves_even_on_action_field(self):
+        fields = [
+            {"name": "name", "label": "Name", "value": ""},
+            {"name": "post_product", "label": "Produkt", "value": "Paket", "read_only": True, "action": "carrier_options"},
+        ]
+        values = ["Max Mustermann", "Paket"]
+        default_submit_keys = {10, 13, "\n", "\r", self.lager_mc.curses.KEY_ENTER}
+
+        result = self.lager_mc._form_dialog_submit_result(
+            fields,
+            values,
+            active=1,
+            submit_keys={self.lager_mc.curses.KEY_F2},
+            default_submit_keys=default_submit_keys,
+        )
+
+        self.assertEqual(result, {"name": "Max Mustermann", "post_product": "Paket"})
+
+    def test_default_form_submit_key_still_opens_action_field(self):
+        fields = [
+            {"name": "country_display", "label": "Land", "value": "Deutschland (DE)", "read_only": True, "action": "country"},
+        ]
+        values = ["Deutschland (DE)"]
+        default_submit_keys = {10, 13, "\n", "\r", self.lager_mc.curses.KEY_ENTER}
+
+        result = self.lager_mc._form_dialog_submit_result(
+            fields,
+            values,
+            active=0,
+            submit_keys=default_submit_keys,
+            default_submit_keys=default_submit_keys,
+        )
+
+        self.assertEqual(result["__action__"], "country")
+        self.assertEqual(result["__active__"], 0)
 
     def test_handle_delivery_note_output_routes_by_mode(self):
         order = {"order_name": "#1001", "order_id": "OID-1"}

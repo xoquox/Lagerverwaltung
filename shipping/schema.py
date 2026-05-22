@@ -39,6 +39,7 @@ REQUIRED_TABLE_COLUMNS = {
         "created_at",
         "shipping_name",
         "shipping_address1",
+        "shipping_address2",
         "shipping_zip",
         "shipping_city",
         "shipping_country",
@@ -46,6 +47,7 @@ REQUIRED_TABLE_COLUMNS = {
         "shipping_phone",
         "fulfillment_status",
         "payment_status",
+        "source",
         "updated_at",
     },
     "shopify_order_items": {
@@ -229,6 +231,7 @@ def apply_app_schema(cur):
             created_at timestamptz,
             shipping_name text,
             shipping_address1 text,
+            shipping_address2 text,
             shipping_zip text,
             shipping_city text,
             shipping_country text,
@@ -236,14 +239,17 @@ def apply_app_schema(cur):
             shipping_phone text,
             fulfillment_status text,
             payment_status text,
+            source text NOT NULL DEFAULT 'shopify',
             updated_at timestamptz NOT NULL DEFAULT NOW()
         )
         """
     )
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_country text")
+    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_address2 text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_email text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_phone text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS payment_status text")
+    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'shopify'")
     cur.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_shopify_orders_name

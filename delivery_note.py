@@ -47,6 +47,8 @@ def format_delivery_address_lines(order):
 
     if order.get("shipping_name"):
         lines.append(order["shipping_name"])
+    if order.get("shipping_address2"):
+        lines.append(order["shipping_address2"])
     if order.get("shipping_address1"):
         lines.append(order["shipping_address1"])
 

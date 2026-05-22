@@ -38,6 +38,10 @@ def load_shopify_sync_module():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    if str(MODULE_PATH.parent) in sys.path:
+        sys.path.remove(str(MODULE_PATH.parent))
+    for module_name in ("shipping", "shipping.history", "shipping.schema"):
+        sys.modules.pop(module_name, None)
     return module
 
 
@@ -46,22 +50,17 @@ class ShopifySyncLoggingTests(unittest.TestCase):
     def setUpClass(cls):
         cls.shopify_sync = load_shopify_sync_module()
 
-    def test_resolve_sync_base_dir_uses_repo_root_when_shipping_package_exists(self):
+    def test_resolve_sync_base_dir_uses_app_dir_in_repo_layout(self):
         script_path = ROOT / "shopify-sync" / "shopify_sync.py"
 
         base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
 
-        self.assertEqual(base_dir, ROOT)
+        self.assertEqual(base_dir, ROOT / "shopify-sync")
 
     def test_resolve_sync_base_dir_falls_back_to_app_dir_for_standalone_layout(self):
         script_path = Path("/app/shopify_sync.py")
 
-        with mock.patch.object(Path, "is_dir", autospec=True) as is_dir_mock:
-            def fake_is_dir(path_obj):
-                return str(path_obj) == "/app"
-
-            is_dir_mock.side_effect = fake_is_dir
-            base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
+        base_dir = self.shopify_sync.resolve_sync_base_dir(script_path)
 
         self.assertEqual(base_dir, Path("/app"))
 
@@ -357,6 +356,57 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(insert_params[3], "Max Mustermann")
         self.assertEqual(insert_params[7], "Musterstr. 1")
         self.assertEqual(insert_params[10], "Germany")
+
+    def test_sync_orders_preserves_custom_orders(self):
+        executed = []
+
+        class FakeCursor:
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        orders = [
+            {
+                "id": "gid://shopify/Order/1",
+                "name": "2026-3000",
+                "createdAt": "2026-05-21T10:00:00Z",
+                "email": "kunde@example.test",
+                "displayFulfillmentStatus": "UNFULFILLED",
+                "displayFinancialStatus": "PAID",
+                "shippingAddress": {
+                    "name": "Max Mustermann",
+                    "address1": "Musterstr. 1",
+                    "address2": "Firma",
+                    "zip": "12345",
+                    "city": "Berlin",
+                    "country": "Germany",
+                    "phone": "01234",
+                },
+                "lineItems": {"nodes": []},
+                "fulfillmentOrders": {"nodes": []},
+                "fulfillments": {"nodes": []},
+            }
+        ]
+
+        with mock.patch.object(self.shopify_sync, "get_all_orders", return_value=orders):
+            with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+                count = self.shopify_sync.sync_orders()
+
+        self.assertEqual(count, 1)
+        self.assertFalse(any("TRUNCATE TABLE shopify_fulfillment_order_items" in query for query, _ in executed))
+        self.assertTrue(any("DELETE FROM shopify_orders WHERE COALESCE(source, 'shopify') = 'shopify'" in query for query, _ in executed))
+        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shopify_orders" in q)
+        self.assertIn("source", insert_query)
+        self.assertEqual(insert_params[5], "Firma")
 
     def test_get_all_product_variants_paginates_graphql_connection(self):
         responses = [

@@ -34,11 +34,7 @@ except ModuleNotFoundError:
 
 
 def resolve_sync_base_dir(script_path=None):
-    app_dir = Path(script_path or __file__).resolve().parent
-    repo_root = app_dir.parent
-    if (repo_root / "shipping").is_dir():
-        return repo_root
-    return app_dir
+    return Path(script_path or __file__).resolve().parent
 
 
 BASE_DIR = resolve_sync_base_dir()
@@ -1777,6 +1773,7 @@ def get_all_orders():
           shippingAddress {
             name
             address1
+            address2
             zip
             city
             country
@@ -1960,8 +1957,30 @@ def sync_orders():
     con = db()
     cur = con.cursor()
     cur.execute(
-        "TRUNCATE TABLE shopify_fulfillment_order_items, shopify_fulfillment_orders, shopify_order_items, shopify_orders"
+        """
+        DELETE FROM shopify_fulfillment_order_items foi
+        USING shopify_orders so
+        WHERE foi.order_id = so.order_id
+          AND COALESCE(so.source, 'shopify') = 'shopify'
+        """
     )
+    cur.execute(
+        """
+        DELETE FROM shopify_fulfillment_orders fo
+        USING shopify_orders so
+        WHERE fo.order_id = so.order_id
+          AND COALESCE(so.source, 'shopify') = 'shopify'
+        """
+    )
+    cur.execute(
+        """
+        DELETE FROM shopify_order_items oi
+        USING shopify_orders so
+        WHERE oi.order_id = so.order_id
+          AND COALESCE(so.source, 'shopify') = 'shopify'
+        """
+    )
+    cur.execute("DELETE FROM shopify_orders WHERE COALESCE(source, 'shopify') = 'shopify'")
 
     for order in orders:
         shipping = order.get("shippingAddress") or {}
@@ -1974,6 +1993,7 @@ def sync_orders():
                 created_at,
                 shipping_name,
                 shipping_address1,
+                shipping_address2,
                 shipping_zip,
                 shipping_city,
                 shipping_country,
@@ -1981,9 +2001,10 @@ def sync_orders():
                 shipping_phone,
                 fulfillment_status,
                 payment_status,
+                source,
                 updated_at
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'shopify',NOW())
             """,
             (
                 order["id"],
@@ -1991,6 +2012,7 @@ def sync_orders():
                 order["createdAt"],
                 shipping.get("name"),
                 shipping.get("address1"),
+                shipping.get("address2"),
                 shipping.get("zip"),
                 shipping.get("city"),
                 shipping.get("country"),

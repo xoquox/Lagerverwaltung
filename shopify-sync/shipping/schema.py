@@ -1,4 +1,4 @@
-"""Gemeinsame Datenbank-Schemafunktionen fuer den Shopify-Sync."""
+"""Gemeinsame Datenbank-Schemafunktionen fuer Lager MC."""
 
 from shipping.history import ensure_shipping_history_schema
 
@@ -6,6 +6,7 @@ from shipping.history import ensure_shipping_history_schema
 REQUIRED_TABLE_COLUMNS = {
     "items": {
         "sku",
+        "display_sku",
         "name",
         "regal",
         "fach",
@@ -38,6 +39,7 @@ REQUIRED_TABLE_COLUMNS = {
         "created_at",
         "shipping_name",
         "shipping_address1",
+        "shipping_address2",
         "shipping_zip",
         "shipping_city",
         "shipping_country",
@@ -45,6 +47,7 @@ REQUIRED_TABLE_COLUMNS = {
         "shipping_phone",
         "fulfillment_status",
         "payment_status",
+        "source",
         "updated_at",
     },
     "shopify_order_items": {
@@ -55,6 +58,28 @@ REQUIRED_TABLE_COLUMNS = {
         "title",
         "quantity",
         "fulfilled_quantity",
+    },
+    "shopify_fulfillment_orders": {
+        "fulfillment_order_id",
+        "order_id",
+        "assigned_location_id",
+        "assigned_location_name",
+        "status",
+        "request_status",
+        "updated_at",
+    },
+    "shopify_fulfillment_order_items": {
+        "fulfillment_order_line_item_id",
+        "fulfillment_order_id",
+        "order_id",
+        "order_line_item_id",
+        "sku",
+        "title",
+        "quantity",
+        "remaining_quantity",
+        "assigned_location_id",
+        "assigned_location_name",
+        "updated_at",
     },
     "service_runtime_state": {
         "service",
@@ -100,6 +125,27 @@ REQUIRED_TABLE_COLUMNS = {
         "soll_menge",
         "ist_menge",
     },
+    "shopify_locations": {
+        "location_id",
+        "name",
+        "fulfills_online_orders",
+        "is_active",
+        "updated_at",
+    },
+    "item_location_inventory": {
+        "sku",
+        "location_id",
+        "regal",
+        "fach",
+        "platz",
+        "menge",
+        "available",
+        "reserved",
+        "committed",
+        "unavailable",
+        "dirty",
+        "updated_at",
+    },
 }
 
 
@@ -108,6 +154,7 @@ def apply_app_schema(cur):
         """
         CREATE TABLE IF NOT EXISTS items (
             sku text PRIMARY KEY,
+            display_sku text,
             name text NOT NULL,
             regal text,
             fach text,
@@ -136,6 +183,7 @@ def apply_app_schema(cur):
         )
         """
     )
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS display_sku text")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS available integer")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS reserved integer DEFAULT 0")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS committed integer DEFAULT 0")
@@ -158,6 +206,7 @@ def apply_app_schema(cur):
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
     cur.execute("UPDATE items SET reserved = COALESCE(reserved, 0)")
     cur.execute("UPDATE items SET committed = COALESCE(committed, 0)")
+    cur.execute("UPDATE items SET display_sku = sku WHERE display_sku IS NULL")
     cur.execute(
         """
         UPDATE items
@@ -182,6 +231,7 @@ def apply_app_schema(cur):
             created_at timestamptz,
             shipping_name text,
             shipping_address1 text,
+            shipping_address2 text,
             shipping_zip text,
             shipping_city text,
             shipping_country text,
@@ -189,14 +239,17 @@ def apply_app_schema(cur):
             shipping_phone text,
             fulfillment_status text,
             payment_status text,
+            source text NOT NULL DEFAULT 'shopify',
             updated_at timestamptz NOT NULL DEFAULT NOW()
         )
         """
     )
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_country text")
+    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_address2 text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_email text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS shipping_phone text")
     cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS payment_status text")
+    cur.execute("ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'shopify'")
     cur.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_shopify_orders_name
@@ -219,6 +272,79 @@ def apply_app_schema(cur):
     )
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
     cur.execute("ALTER TABLE shopify_order_items ADD COLUMN IF NOT EXISTS fulfilled_quantity integer NOT NULL DEFAULT 0")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_fulfillment_orders (
+            fulfillment_order_id text PRIMARY KEY,
+            order_id text NOT NULL REFERENCES shopify_orders(order_id) ON DELETE CASCADE,
+            assigned_location_id text,
+            assigned_location_name text,
+            status text,
+            request_status text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS assigned_location_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS assigned_location_name text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS status text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS request_status text")
+    cur.execute("ALTER TABLE shopify_fulfillment_orders ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_orders_order
+        ON shopify_fulfillment_orders(order_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_orders_location
+        ON shopify_fulfillment_orders(assigned_location_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_fulfillment_order_items (
+            fulfillment_order_line_item_id text PRIMARY KEY,
+            fulfillment_order_id text NOT NULL REFERENCES shopify_fulfillment_orders(fulfillment_order_id) ON DELETE CASCADE,
+            order_id text NOT NULL REFERENCES shopify_orders(order_id) ON DELETE CASCADE,
+            order_line_item_id text,
+            sku text,
+            title text NOT NULL,
+            quantity integer NOT NULL,
+            remaining_quantity integer NOT NULL DEFAULT 0,
+            assigned_location_id text,
+            assigned_location_name text,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS order_line_item_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS sku text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS title text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS remaining_quantity integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS assigned_location_id text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS assigned_location_name text")
+    cur.execute("ALTER TABLE shopify_fulfillment_order_items ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_order_items_order
+        ON shopify_fulfillment_order_items(order_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_order_items_location
+        ON shopify_fulfillment_order_items(assigned_location_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_order_items_order_line
+        ON shopify_fulfillment_order_items(order_line_item_id)
+        """
+    )
     ensure_shipping_history_schema(cur)
     cur.execute(
         """
@@ -304,9 +430,64 @@ def apply_app_schema(cur):
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shopify_locations (
+            location_id text PRIMARY KEY,
+            name text,
+            fulfills_online_orders boolean NOT NULL DEFAULT FALSE,
+            is_active boolean NOT NULL DEFAULT TRUE,
+            updated_at timestamptz NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS name text")
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS fulfills_online_orders boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT TRUE")
+    cur.execute("ALTER TABLE shopify_locations ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS item_location_inventory (
+            sku text NOT NULL REFERENCES items(sku) ON DELETE CASCADE,
+            location_id text NOT NULL REFERENCES shopify_locations(location_id) ON DELETE CASCADE,
+            regal text,
+            fach text,
+            platz text,
+            menge integer NOT NULL DEFAULT 0,
+            available integer,
+            reserved integer NOT NULL DEFAULT 0,
+            committed integer NOT NULL DEFAULT 0,
+            unavailable integer NOT NULL DEFAULT 0,
+            dirty boolean NOT NULL DEFAULT FALSE,
+            updated_at timestamptz NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (sku, location_id)
+        )
+        """
+    )
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS regal text")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS fach text")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS platz text")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS menge integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS available integer")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS reserved integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS committed integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS unavailable integer NOT NULL DEFAULT 0")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS dirty boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE item_location_inventory ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_item_location_inventory_location
+        ON item_location_inventory(location_id)
+        """
+    )
 
 
 def collect_schema_issues(cur):
+    def _row_value(row, key):
+        if isinstance(row, dict):
+            return row.get(key)
+        return row[0]
+
     table_names = list(REQUIRED_TABLE_COLUMNS.keys())
     cur.execute(
         """
@@ -315,7 +496,7 @@ def collect_schema_issues(cur):
         WHERE table_schema = 'public'
         """
     )
-    existing_tables = {row[0] for row in cur.fetchall()}
+    existing_tables = {_row_value(row, "table_name") for row in cur.fetchall()}
 
     issues = []
     for table_name in table_names:
@@ -330,7 +511,7 @@ def collect_schema_issues(cur):
             """,
             (table_name,),
         )
-        existing_columns = {row[0] for row in cur.fetchall()}
+        existing_columns = {_row_value(row, "column_name") for row in cur.fetchall()}
         missing_columns = sorted(REQUIRED_TABLE_COLUMNS[table_name] - existing_columns)
         for column_name in missing_columns:
             issues.append(f"Spalte fehlt: {table_name}.{column_name}")
