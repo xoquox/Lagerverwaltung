@@ -1064,6 +1064,275 @@ def graphql_request(query, variables=None):
     return data["data"]
 
 
+def _shopify_user_errors(payload):
+    return payload.get("userErrors") or payload.get("user_errors") or []
+
+
+def _raise_shopify_user_errors(action, display_sku, user_errors):
+    if user_errors:
+        detail = shorten_text(json.dumps(user_errors, ensure_ascii=False))
+        raise RuntimeError(f"{action} sku={display_sku or '-/-'} user_errors={detail}")
+
+
+def _normalize_product_status(value, fallback="DRAFT"):
+    normalized = str(value or fallback or "DRAFT").strip().upper()
+    return normalized if normalized in {"ACTIVE", "DRAFT"} else "DRAFT"
+
+
+def _product_input_from_row(row, force_status=None):
+    product = {
+        "title": row["name"],
+        "status": _normalize_product_status(force_status or row.get("shopify_product_status")),
+    }
+    description = (row.get("shopify_description") or "").strip()
+    if description:
+        product["descriptionHtml"] = description
+    return product
+
+
+def _variant_input_from_row(row, variant_id=None):
+    variant = {}
+    if variant_id:
+        variant["id"] = variant_id
+    if row.get("shopify_price") not in (None, ""):
+        variant["price"] = str(row.get("shopify_price"))
+    if row.get("shopify_compare_at_price") not in (None, ""):
+        variant["compareAtPrice"] = str(row.get("shopify_compare_at_price"))
+    if row.get("barcode") not in (None, ""):
+        variant["barcode"] = str(row.get("barcode"))
+    inventory_item = {"sku": row["display_sku"] or row["sku"], "tracked": True}
+    if row.get("shopify_unit_cost") not in (None, ""):
+        inventory_item["cost"] = str(row.get("shopify_unit_cost"))
+    if row.get("shopify_weight_grams") is not None:
+        inventory_item["measurement"] = {
+            "weight": {
+                "unit": "GRAMS",
+                "value": float(row.get("shopify_weight_grams") or 0),
+            }
+        }
+    variant["inventoryItem"] = inventory_item
+    return variant
+
+
+def _create_shopify_product(row):
+    mutation = """
+    mutation LagerProductCreate($product: ProductCreateInput!) {
+      productCreate(product: $product) {
+        product {
+          id
+          status
+          variants(first: 1) {
+            nodes {
+              id
+              inventoryItem {
+                id
+              }
+            }
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+    data = graphql_request(mutation, {"product": _product_input_from_row(row, force_status="DRAFT")})
+    payload = data.get("productCreate") or {}
+    _raise_shopify_user_errors("productCreate", row.get("display_sku") or row.get("sku"), _shopify_user_errors(payload))
+    product = payload.get("product") or {}
+    variants = ((product.get("variants") or {}).get("nodes") or [])
+    if not product.get("id") or not variants:
+        raise RuntimeError(f"Shopify Produktanlage ohne Produkt/Variante sku={row.get('display_sku') or row.get('sku')}")
+    variant = variants[0]
+    inventory_item = variant.get("inventoryItem") or {}
+    return {
+        "product_id": product.get("id"),
+        "variant_id": variant.get("id"),
+        "inventory_item_id": _canonical_inventory_item_id(inventory_item.get("id")),
+        "status": product.get("status") or "DRAFT",
+    }
+
+
+def _update_shopify_product(row, product_id, variant_id):
+    mutation = """
+    mutation LagerProductUpdate($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product {
+          id
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+    product_input = _product_input_from_row(row)
+    product_input["id"] = product_id
+    data = graphql_request(mutation, {"product": product_input})
+    payload = data.get("productUpdate") or {}
+    _raise_shopify_user_errors("productUpdate", row.get("display_sku") or row.get("sku"), _shopify_user_errors(payload))
+
+    mutation = """
+    mutation LagerVariantUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants {
+          id
+          inventoryItem {
+            id
+          }
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+    variables = {"productId": product_id, "variants": [_variant_input_from_row(row, variant_id=variant_id)]}
+    data = graphql_request(mutation, variables)
+    payload = data.get("productVariantsBulkUpdate") or {}
+    _raise_shopify_user_errors("productVariantsBulkUpdate", row.get("display_sku") or row.get("sku"), _shopify_user_errors(payload))
+    variants = payload.get("productVariants") or []
+    inventory_item = (variants[0].get("inventoryItem") if variants else None) or {}
+    return {
+        "product_id": product_id,
+        "variant_id": variant_id,
+        "inventory_item_id": _canonical_inventory_item_id(inventory_item.get("id") or row.get("shopify_inventory_item_id")),
+        "status": (payload.get("product") or {}).get("status") or row.get("shopify_product_status"),
+    }
+
+
+def _mark_product_sync_failed(cur, sku, error_text):
+    cur.execute(
+        """
+        UPDATE items
+        SET shopify_product_sync_error = %s,
+            sync_status = 'shopify_error',
+            updated_at = NOW()
+        WHERE sku = %s
+        """,
+        (shorten_text(error_text, limit=300), sku),
+    )
+
+
+def push_product_changes(limit=20):
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT
+            sku,
+            COALESCE(display_sku, sku) AS display_sku,
+            name,
+            barcode,
+            shopify_product_id,
+            shopify_variant_id,
+            shopify_inventory_item_id,
+            shopify_product_status,
+            shopify_description,
+            shopify_price,
+            shopify_compare_at_price,
+            shopify_unit_cost,
+            shopify_weight_grams,
+            shopify_product_sync_action,
+            menge,
+            available
+        FROM items
+        WHERE COALESCE(shopify_product_dirty, FALSE) = TRUE
+        ORDER BY updated_at, sku
+        LIMIT %s
+        """,
+        (int(limit),),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        con.close()
+        return 0
+
+    pushed_count = 0
+    for raw_row in rows:
+        row = {
+            "sku": raw_row[0],
+            "display_sku": raw_row[1],
+            "name": raw_row[2],
+            "barcode": raw_row[3],
+            "shopify_product_id": raw_row[4],
+            "shopify_variant_id": raw_row[5],
+            "shopify_inventory_item_id": raw_row[6],
+            "shopify_product_status": raw_row[7],
+            "shopify_description": raw_row[8],
+            "shopify_price": raw_row[9],
+            "shopify_compare_at_price": raw_row[10],
+            "shopify_unit_cost": raw_row[11],
+            "shopify_weight_grams": raw_row[12],
+            "shopify_product_sync_action": raw_row[13],
+            "menge": raw_row[14],
+            "available": raw_row[15],
+        }
+        sku = row["sku"]
+        display_sku = row["display_sku"] or sku
+        action = (row.get("shopify_product_sync_action") or "").strip().lower()
+        try:
+            if action == "create" or not row.get("shopify_product_id"):
+                result = _create_shopify_product(row)
+                if result.get("variant_id"):
+                    result = _update_shopify_product(row, result["product_id"], result["variant_id"])
+            else:
+                result = _update_shopify_product(row, row["shopify_product_id"], row["shopify_variant_id"])
+        except Exception as exc:
+            _mark_product_sync_failed(cur, sku, str(exc))
+            log_error("Shopify Produkt-Sync Fehler sku=%s error=%s", display_sku, shorten_text(exc))
+            continue
+
+        cur.execute(
+            """
+            UPDATE items
+            SET shopify_product_id = %s,
+                shopify_variant_id = %s,
+                shopify_inventory_item_id = %s,
+                shopify_product_status = %s,
+                shopify_product_dirty = FALSE,
+                shopify_product_sync_action = NULL,
+                shopify_product_sync_error = NULL,
+                sync_status = 'ok',
+                last_sync = NOW(),
+                updated_at = NOW()
+            WHERE sku = %s
+            """,
+            (
+                result.get("product_id"),
+                result.get("variant_id"),
+                result.get("inventory_item_id"),
+                _normalize_product_status(result.get("status"), fallback=row.get("shopify_product_status")),
+                sku,
+            ),
+        )
+        if result.get("inventory_item_id"):
+            location_id = _location_gid()
+            cur.execute(
+                """
+                INSERT INTO item_location_inventory (
+                    sku, location_id, menge, available, reserved, committed, unavailable, dirty, updated_at
+                )
+                VALUES (%s, %s, %s, %s, 0, 0, 0, TRUE, NOW())
+                ON CONFLICT (sku, location_id)
+                DO UPDATE SET dirty = TRUE,
+                    updated_at = NOW()
+                """,
+                (sku, location_id, int(row.get("menge") or 0), int(row.get("available") or row.get("menge") or 0)),
+            )
+        log_info("Shopify Produkt-Sync sku=%s action=%s", display_sku, action or "update")
+        pushed_count += 1
+        time.sleep(0.5)
+
+    con.commit()
+    con.close()
+    return pushed_count
+
+
 def _inventory_item_gid(value):
     text = (value or "").strip()
     if not text:
@@ -1464,7 +1733,10 @@ def push_inventory_changes():
         cur.execute(
             """
             UPDATE items
-            SET sync_status = 'pushed',
+            SET sync_status = CASE
+                    WHEN COALESCE(shopify_product_dirty, FALSE) = TRUE THEN sync_status
+                    ELSE 'pushed'
+                END,
                 last_sync = NOW(),
                 updated_at = NOW()
             WHERE sku = ANY(%s)
@@ -1617,7 +1889,10 @@ def sync_inventory_levels():
     cur.execute(
         """
         UPDATE items
-        SET sync_status = 'ok',
+        SET sync_status = CASE
+                WHEN COALESCE(shopify_product_dirty, FALSE) = TRUE THEN sync_status
+                ELSE 'ok'
+            END,
             last_sync = NOW(),
             updated_at = NOW()
         WHERE sku = ANY(%s)
@@ -1693,8 +1968,14 @@ def sync_products():
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ok',NOW(),NOW())
             ON CONFLICT (sku)
             DO UPDATE SET
-                name = EXCLUDED.name,
-                display_sku = EXCLUDED.display_sku,
+                name = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.name
+                    ELSE EXCLUDED.name
+                END,
+                display_sku = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.display_sku
+                    ELSE EXCLUDED.display_sku
+                END,
                 menge = CASE
                     WHEN items.dirty = TRUE THEN items.menge
                     ELSE EXCLUDED.menge
@@ -1709,16 +1990,43 @@ def sync_products():
                 shopify_product_id = EXCLUDED.shopify_product_id,
                 shopify_variant_id = EXCLUDED.shopify_variant_id,
                 shopify_inventory_item_id = EXCLUDED.shopify_inventory_item_id,
-                barcode = EXCLUDED.barcode,
-                shopify_product_status = EXCLUDED.shopify_product_status,
-                shopify_description = EXCLUDED.shopify_description,
-                shopify_price = EXCLUDED.shopify_price,
-                shopify_compare_at_price = EXCLUDED.shopify_compare_at_price,
-                shopify_unit_cost = EXCLUDED.shopify_unit_cost,
-                shopify_unit_cost_currency = EXCLUDED.shopify_unit_cost_currency,
-                shopify_weight_grams = EXCLUDED.shopify_weight_grams,
+                barcode = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.barcode
+                    ELSE EXCLUDED.barcode
+                END,
+                shopify_product_status = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_product_status
+                    ELSE EXCLUDED.shopify_product_status
+                END,
+                shopify_description = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_description
+                    ELSE EXCLUDED.shopify_description
+                END,
+                shopify_price = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_price
+                    ELSE EXCLUDED.shopify_price
+                END,
+                shopify_compare_at_price = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_compare_at_price
+                    ELSE EXCLUDED.shopify_compare_at_price
+                END,
+                shopify_unit_cost = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_unit_cost
+                    ELSE EXCLUDED.shopify_unit_cost
+                END,
+                shopify_unit_cost_currency = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_unit_cost_currency
+                    ELSE EXCLUDED.shopify_unit_cost_currency
+                END,
+                shopify_weight_grams = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_weight_grams
+                    ELSE EXCLUDED.shopify_weight_grams
+                END,
                 last_sync = NOW(),
-                sync_status = 'ok',
+                sync_status = CASE
+                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.sync_status
+                    ELSE 'ok'
+                END,
                 updated_at = NOW(),
                 dirty = CASE
                     WHEN items.dirty = TRUE AND items.available = EXCLUDED.available THEN FALSE
@@ -2518,8 +2826,9 @@ def run_sync_loop():
             ok_jobs, failed_jobs = process_fulfillment_jobs(limit=20)
             if ok_jobs or failed_jobs:
                 log_info("Fulfillment Jobs verarbeitet: ok=%s failed=%s", ok_jobs, failed_jobs)
+            pushed_products = push_product_changes()
             pushed_inventory = push_inventory_changes()
-            if ok_jobs > 0 or pushed_inventory > 0:
+            if ok_jobs > 0 or pushed_products > 0 or pushed_inventory > 0:
                 update_service_runtime_state(mark_seen=True, mark_push=True)
             sync_products()
             sync_inventory_levels()

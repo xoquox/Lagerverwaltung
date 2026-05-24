@@ -805,7 +805,7 @@ def db():
 
 def _display_sku_value(row):
     value = (row.get("display_sku") or "").strip()
-    return value or "-/-"
+    return value or (row.get("sku") or "").strip() or "-/-"
 
 
 def _is_custom_order_id(order_id):
@@ -1118,6 +1118,9 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
         items.shopify_unit_cost,
         items.shopify_unit_cost_currency,
         items.shopify_weight_grams,
+        COALESCE(items.shopify_product_dirty, FALSE) AS shopify_product_dirty,
+        items.shopify_product_sync_action,
+        items.shopify_product_sync_error,
         items.sync_status,
         COALESCE(items.external_fulfillment, FALSE) AS external_fulfillment,
         ili.location_id AS shopify_location_id
@@ -1181,6 +1184,9 @@ def _load_items_snapshot(active_location_id=None):
             items.shopify_unit_cost,
             items.shopify_unit_cost_currency,
             items.shopify_weight_grams,
+            COALESCE(items.shopify_product_dirty, FALSE) AS shopify_product_dirty,
+            items.shopify_product_sync_action,
+            items.shopify_product_sync_error,
             items.sync_status,
             COALESCE(items.external_fulfillment, FALSE) AS external_fulfillment,
             ili.location_id AS shopify_location_id
@@ -3216,14 +3222,14 @@ def _apply_parsed_address_to_manual_state(state, parsed, current_country):
     return updated, country
 
 
-def manual_address_text_dialog(stdscr):
+def multiline_text_dialog(stdscr, title, footer, initial_text=""):
     h, w = stdscr.getmaxyx()
     width = min(max(72, int(w * 0.72)), w - 4)
     height = min(max(14, int(h * 0.55)), h - 2)
     y = max(1, (h - height) // 2)
     x = max(2, (w - width) // 2)
-    text = ""
-    cursor = 0
+    text = initial_text or ""
+    cursor = len(text)
 
     draw_shadow(stdscr, y, x, height, width)
     win = curses.newwin(height, width, y, x)
@@ -3236,7 +3242,7 @@ def manual_address_text_dialog(stdscr):
             while True:
                 win.erase()
                 win.box()
-                win.addstr(0, 2, f" {t('manual_address_paste_title')} ")
+                win.addstr(0, 2, f" {title} ")
                 content_width = width - 4
                 content_height = height - 4
                 lines = text.split("\n")
@@ -3253,7 +3259,6 @@ def manual_address_text_dialog(stdscr):
                 top = max(0, cursor_row - content_height + 1)
                 for row_index, line in enumerate(lines[top:top + content_height]):
                     win.addstr(2 + row_index, 2, _fit(line, content_width))
-                footer = t("manual_address_paste_footer")
                 draw_footer_line(win, height - 1, 1, width - 2, footer)
                 win.move(2 + min(cursor_row - top, content_height - 1), 2 + min(cursor_col, content_width - 1))
                 win.refresh()
@@ -3297,6 +3302,23 @@ def manual_address_text_dialog(stdscr):
                     cursor += len(key)
     finally:
         win.timeout(-1)
+
+
+def manual_address_text_dialog(stdscr):
+    return multiline_text_dialog(
+        stdscr,
+        t("manual_address_paste_title"),
+        t("manual_address_paste_footer"),
+    )
+
+
+def shopify_description_dialog(stdscr, initial_text):
+    return multiline_text_dialog(
+        stdscr,
+        t("shopify_description_edit_title"),
+        t("shopify_description_edit_footer"),
+        initial_text=initial_text,
+    )
 
 
 def _merge_pdf_files(pdf_paths, output_path):
@@ -4342,6 +4364,10 @@ def build_item_info_lines(item):
     weight_value = f"{weight_grams} g" if weight_grams is not None else "-"
     lines.append(t("item_info_weight", value=weight_value))
     lines.append(t("item_info_sync", value=item.get("sync_status") or "-"))
+    if item.get("shopify_product_dirty"):
+        lines.append(t("item_info_shopify_pending", value=item.get("shopify_product_sync_action") or "-"))
+    if item.get("shopify_product_sync_error"):
+        lines.append(t("item_info_shopify_error", value=item.get("shopify_product_sync_error") or "-"))
     lines.append(t("item_info_local_qty", value=item.get("menge")))
     lines.append(t("item_info_total_qty", value=item.get("gesamt_menge", item.get("menge"))))
     lines.append(
@@ -4409,7 +4435,9 @@ def item_info_dialog(stdscr, item):
         except curses.error:
             continue
         if key in (27, "\x1b", curses.KEY_F9, curses.KEY_ENTER, "\n", "\r"):
-            return
+            return None
+        if key == curses.KEY_F2:
+            return "edit"
         if key == curses.KEY_NPAGE:
             description_top = min(max(0, len(wrapped_description) - visible_desc_rows), description_top + visible_desc_rows)
         elif key == curses.KEY_PPAGE:
@@ -7189,31 +7217,79 @@ def change_location(stdscr, item):
     return {"regal": regal, "fach": fach, "platz": platz}
     
 def edit_item(stdscr, item):
+    is_local_item = (item.get("sync_status") or "") == "local" and not item.get("shopify_product_id")
+    current_status = _normalize_shopify_product_status(item.get("shopify_product_status") or "DRAFT")
+    state = {
+        "sku": _display_sku_value(item),
+        "name": item.get("name") or "",
+        "barcode": item.get("barcode") or "",
+        "shopify_description": item.get("shopify_description") or "",
+        "shopify_price": item.get("shopify_price") or "",
+        "shopify_compare_at_price": item.get("shopify_compare_at_price") or "",
+        "shopify_unit_cost": item.get("shopify_unit_cost") or "",
+        "shopify_weight_grams": "" if item.get("shopify_weight_grams") is None else str(item.get("shopify_weight_grams")),
+        "regal": item.get("regal") or "",
+        "fach": item.get("fach") or "",
+        "platz": item.get("platz") or "",
+        "menge": str(item.get("menge") or 0),
+    }
+    active = 0
 
-    if item["sync_status"] != "local":
-        message_box(stdscr, t("error"), t("local_items_only_edit"))
-        return
+    while True:
+        res = form_dialog(
+            stdscr,
+            t("edit_item_title"),
+            [
+                {"name": "sku", "label": t("field_sku_short"), "value": state["sku"]},
+                {"name": "name", "label": t("field_name_short"), "value": state["name"]},
+                {"name": "barcode", "label": t("field_barcode"), "value": state["barcode"]},
+                {
+                    "name": "shopify_description",
+                    "label": t("field_shopify_description"),
+                    "value": _fit(clean_shopify_description(state["shopify_description"]).replace("\n", " / "), 48),
+                    "read_only": True,
+                    "action": "shopify_description",
+                },
+                {"name": "shopify_price", "label": t("field_shopify_price"), "value": state["shopify_price"]},
+                {"name": "shopify_compare_at_price", "label": t("field_shopify_compare_price"), "value": state["shopify_compare_at_price"]},
+                {"name": "shopify_unit_cost", "label": t("field_shopify_unit_cost"), "value": state["shopify_unit_cost"]},
+                {"name": "shopify_weight_grams", "label": t("field_shopify_weight"), "value": state["shopify_weight_grams"]},
+                {"name": "shopify_product_status", "label": t("field_shopify_status"), "value": _localized_shopify_product_status(current_status), "read_only": True, "action": "shopify_status"},
+                {"name": "regal", "label": t("field_regal_short"), "value": state["regal"]},
+                {"name": "fach", "label": t("field_fach_short"), "value": state["fach"]},
+                {"name": "platz", "label": t("field_platz_short"), "value": state["platz"]},
+                {"name": "menge", "label": t("field_menge_short"), "value": state["menge"]},
+            ],
+            initial_active=active,
+            footer_text=t("edit_item_footer"),
+            field_validators={
+                "regal": lambda value: is_location_input_allowed("regal", value),
+                "fach": lambda value: is_location_input_allowed("fach", value),
+                "platz": lambda value: is_location_input_allowed("platz", value),
+            },
+            field_normalizers=_location_field_normalizers(),
+            submit_keys={curses.KEY_F2},
+        )
+        if res is None:
+            return
+        if "__action__" in res:
+            values = res.get("__values__") or {}
+            state.update({key: value for key, value in values.items() if key in state and key != "shopify_description"})
+            active = int(res.get("__active__") or 0)
+            if res["__action__"] == "shopify_status":
+                chosen_status = shopify_product_status_dialog(stdscr, current_status)
+                if chosen_status:
+                    current_status = chosen_status
+            elif res["__action__"] == "shopify_description":
+                description = shopify_description_dialog(stdscr, state["shopify_description"])
+                if description is not None:
+                    state["shopify_description"] = description
+            continue
+        break
 
-    res = form_dialog(
-        stdscr,
-        t("edit_item_title"),
-        [
-            {"name": "sku", "label": t("field_sku_short"), "value": item["sku"]},
-            {"name": "name", "label": t("field_name_short"), "value": item["name"]},
-            {"name": "regal", "label": t("field_regal_short"), "value": item["regal"] or ""},
-            {"name": "fach", "label": t("field_fach_short"), "value": item["fach"] or ""},
-            {"name": "platz", "label": t("field_platz_short"), "value": item["platz"] or ""},
-            {"name": "menge", "label": t("field_menge_short"), "value": str(item["menge"])},
-        ],
-        field_validators={
-            "regal": lambda value: is_location_input_allowed("regal", value),
-            "fach": lambda value: is_location_input_allowed("fach", value),
-            "platz": lambda value: is_location_input_allowed("platz", value),
-        },
-        field_normalizers=_location_field_normalizers(),
-    )
-
-    if res is None:
+    sku = (res.get("sku") or "").strip()
+    if not sku:
+        message_box(stdscr, t("error"), t("sku_required"))
         return
 
     regal = validate_regal_or_error(stdscr, res["regal"])
@@ -7228,18 +7304,57 @@ def edit_item(stdscr, item):
 
     try:
         menge = int(res["menge"])
-    except:
+    except ValueError:
         message_box(stdscr, t("error"), t("quantity_must_be_number"))
         return
+    if menge < 0:
+        message_box(stdscr, t("error"), t("quantity_must_be_number"))
+        return
+
+    weight_grams_raw = (res.get("shopify_weight_grams") or "").strip()
+    weight_grams = None
+    if weight_grams_raw:
+        try:
+            weight_grams = int(weight_grams_raw)
+        except ValueError:
+            message_box(stdscr, t("error"), t("weight_grams_integer"))
+            return
+        if weight_grams < 0:
+            message_box(stdscr, t("error"), t("weight_grams_positive"))
+            return
+
+    push_mode = edit_item_save_mode_dialog(stdscr, is_local_item)
+    if push_mode in (None, "discard"):
+        return
+    push_to_shopify = push_mode == "shopify"
+    sync_action = "create" if is_local_item and push_to_shopify else "update"
+    product_status = "DRAFT" if sync_action == "create" else current_status
 
     def action():
         con = db()
         cur = con.cursor()
         try:
+            if sku != item["sku"]:
+                cur.execute("UPDATE item_location_inventory SET sku=%s WHERE sku=%s", (sku, item["sku"]))
+                cur.execute("UPDATE inventory_lines SET sku=%s WHERE sku=%s", (sku, item["sku"]))
+                cur.execute("UPDATE shopify_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
+                cur.execute("UPDATE shopify_fulfillment_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
             cur.execute("""
                 UPDATE items
                 SET sku=%s,
+                    display_sku=%s,
                     name=%s,
+                    barcode=%s,
+                    shopify_description=%s,
+                    shopify_product_status=%s,
+                    shopify_price=%s,
+                    shopify_compare_at_price=%s,
+                    shopify_unit_cost=%s,
+                    shopify_weight_grams=%s,
+                    shopify_product_dirty=%s,
+                    shopify_product_sync_action=%s,
+                    shopify_product_sync_error=NULL,
+                    sync_status=CASE WHEN %s THEN 'shopify_pending' ELSE sync_status END,
                     regal=%s,
                     fach=%s,
                     platz=%s,
@@ -7252,8 +7367,19 @@ def edit_item(stdscr, item):
                 WHERE sku=%s
             """,
             (
-                res["sku"],
-                res["name"],
+                sku,
+                sku,
+                res["name"].strip(),
+                res.get("barcode", "").strip() or None,
+                state["shopify_description"].strip() or None,
+                product_status,
+                res.get("shopify_price", "").strip() or None,
+                res.get("shopify_compare_at_price", "").strip() or None,
+                res.get("shopify_unit_cost", "").strip() or None,
+                weight_grams,
+                push_to_shopify,
+                sync_action if push_to_shopify else None,
+                push_to_shopify,
                 regal,
                 fach,
                 platz,
@@ -7267,6 +7393,41 @@ def edit_item(stdscr, item):
             con.close()
 
     run_background_action_dialog(stdscr, t("item_save_action_title"), action, detail=t("item_save_detail"))
+
+
+def _normalize_shopify_product_status(value):
+    normalized = str(value or "DRAFT").strip().upper()
+    return normalized if normalized in {"ACTIVE", "DRAFT"} else "DRAFT"
+
+
+def _localized_shopify_product_status(value):
+    normalized = _normalize_shopify_product_status(value)
+    if current_language() == "de":
+        return "Aktiv" if normalized == "ACTIVE" else "Entwurf"
+    return "Active" if normalized == "ACTIVE" else "Draft"
+
+
+def shopify_product_status_dialog(stdscr, current_status):
+    options = [
+        {"value": "DRAFT", "label": t("shopify_status_draft")},
+        {"value": "ACTIVE", "label": t("shopify_status_active")},
+    ]
+    return choice_dialog(stdscr, t("shopify_status_title"), options, _normalize_shopify_product_status(current_status), cancel_returns_none=True)
+
+
+def edit_item_save_mode_dialog(stdscr, is_local_item):
+    if is_local_item:
+        options = [
+            {"value": "shopify", "label": t("edit_item_save_shopify_draft")},
+            {"value": "local", "label": t("edit_item_save_local")},
+            {"value": "discard", "label": t("edit_item_save_discard")},
+        ]
+    else:
+        options = [
+            {"value": "shopify", "label": t("edit_item_save_shopify")},
+            {"value": "discard", "label": t("edit_item_save_discard")},
+        ]
+    return choice_dialog(stdscr, t("edit_item_save_title"), options, "shopify", cancel_returns_none=True)
 
 def print_label(stdscr, item):
 
@@ -9771,7 +9932,14 @@ def main(stdscr):
                     reload_items_snapshot = True
 
         elif key == curses.KEY_F4 and selected_item:
-            item_info_dialog(stdscr, selected_item)
+            try:
+                if item_info_dialog(stdscr, selected_item) == "edit":
+                    edit_item(stdscr, selected_item)
+                    reload_items_snapshot = True
+            except DatabaseUnavailableError as exc:
+                if not database_connection_dialog(stdscr, str(exc)):
+                    return
+                reload_items_snapshot = True
 
         elif key == curses.KEY_F5:
             try:

@@ -29,6 +29,9 @@ REQUIRED_TABLE_COLUMNS = {
         "shopify_unit_cost",
         "shopify_unit_cost_currency",
         "shopify_weight_grams",
+        "shopify_product_dirty",
+        "shopify_product_sync_action",
+        "shopify_product_sync_error",
         "sync_status",
         "last_sync",
         "updated_at",
@@ -176,6 +179,9 @@ def apply_app_schema(cur):
             shopify_unit_cost text,
             shopify_unit_cost_currency text,
             shopify_weight_grams integer,
+            shopify_product_dirty boolean NOT NULL DEFAULT FALSE,
+            shopify_product_sync_action text,
+            shopify_product_sync_error text,
             sync_status text NOT NULL DEFAULT 'local',
             last_sync timestamptz,
             updated_at timestamptz NOT NULL DEFAULT NOW(),
@@ -201,6 +207,9 @@ def apply_app_schema(cur):
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost text")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_unit_cost_currency text")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_weight_grams integer")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_dirty boolean NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_sync_action text")
+    cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_sync_error text")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS sync_status text NOT NULL DEFAULT 'local'")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS last_sync timestamptz")
     cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT NOW()")

@@ -353,6 +353,9 @@ class DatabaseSchemaTests(unittest.TestCase):
         queries = "\n".join(query for query, _ in cursor.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS items", queries)
         self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS external_fulfillment", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_dirty", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_sync_action", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_sync_error", queries)
         self.assertIn("CREATE TABLE IF NOT EXISTS inventory_sessions", queries)
         self.assertIn("CREATE TABLE IF NOT EXISTS inventory_lines", queries)
 
@@ -1057,6 +1060,26 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertIn("Barcode/GTIN: 4012345678901", lines)
         self.assertIn("EK Kosten: 6.20 EUR", lines)
         self.assertIn("Gewicht: 380 g", lines)
+
+    def test_display_sku_falls_back_to_storage_sku(self):
+        item = {"sku": "LOCAL-1", "display_sku": ""}
+
+        self.assertEqual(self.lager_mc._display_sku_value(item), "LOCAL-1")
+        self.assertIn("SKU: LOCAL-1", self.lager_mc.build_item_info_lines(item))
+
+    def test_build_item_info_lines_shows_pending_product_sync(self):
+        item = {
+            "sku": "LOCAL-1",
+            "name": "Lokales Teil",
+            "shopify_product_dirty": True,
+            "shopify_product_sync_action": "create",
+            "shopify_product_sync_error": "Fehlertext",
+        }
+
+        lines = self.lager_mc.build_item_info_lines(item)
+
+        self.assertTrue(any("Shopify Uebertragung" in line for line in lines))
+        self.assertTrue(any("Fehlertext" in line for line in lines))
 
     def test_clean_shopify_description_strips_html(self):
         html_text = "<p>Text&nbsp;A</p><p>Text<br>B</p><ul><li>Punkt</li></ul>"

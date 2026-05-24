@@ -478,6 +478,96 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(variables["input"]["quantities"][0]["quantity"], 7)
         self.assertTrue(any("UPDATE item_location_inventory SET dirty = FALSE" in query for query, _ in executed))
 
+    def test_push_product_changes_creates_local_item_as_draft(self):
+        executed = []
+
+        class FakeCursor:
+            def __init__(self):
+                self._rows = [
+                    (
+                        "SKU-LOCAL",
+                        "SKU-LOCAL",
+                        "Lokales Produkt",
+                        "4012345678901",
+                        None,
+                        None,
+                        None,
+                        "ACTIVE",
+                        "Beschreibung",
+                        "19.99",
+                        None,
+                        "8.50",
+                        250,
+                        "create",
+                        3,
+                        3,
+                    )
+                ]
+
+            def execute(self, query, params=None):
+                executed.append((" ".join(query.split()), params))
+
+            def fetchall(self):
+                rows = self._rows
+                self._rows = []
+                return rows
+
+        class FakeConnection:
+            def cursor(self):
+                return FakeCursor()
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        responses = [
+            {
+                "productCreate": {
+                    "product": {
+                        "id": "gid://shopify/Product/99",
+                        "status": "DRAFT",
+                        "variants": {
+                            "nodes": [
+                                {
+                                    "id": "gid://shopify/ProductVariant/88",
+                                    "inventoryItem": {"id": "gid://shopify/InventoryItem/77"},
+                                }
+                            ]
+                        },
+                    },
+                    "userErrors": [],
+                }
+            },
+            {"productUpdate": {"product": {"id": "gid://shopify/Product/99", "status": "DRAFT"}, "userErrors": []}},
+            {
+                "productVariantsBulkUpdate": {
+                    "productVariants": [
+                        {
+                            "id": "gid://shopify/ProductVariant/88",
+                            "inventoryItem": {"id": "gid://shopify/InventoryItem/77"},
+                        }
+                    ],
+                    "userErrors": [],
+                }
+            },
+        ]
+
+        with mock.patch.object(self.shopify_sync, "db", return_value=FakeConnection()):
+            with mock.patch.object(self.shopify_sync, "graphql_request", side_effect=responses) as graphql_mock:
+                count = self.shopify_sync.push_product_changes()
+
+        self.assertEqual(count, 1)
+        self.assertIn("productCreate", graphql_mock.call_args_list[0].args[0])
+        self.assertEqual(graphql_mock.call_args_list[0].args[1]["product"]["status"], "DRAFT")
+        self.assertIn("productVariantsBulkUpdate", graphql_mock.call_args_list[2].args[0])
+        variant = graphql_mock.call_args_list[2].args[1]["variants"][0]
+        self.assertEqual(variant["inventoryItem"]["sku"], "SKU-LOCAL")
+        self.assertEqual(variant["inventoryItem"]["tracked"], True)
+        self.assertTrue(any("shopify_product_dirty = FALSE" in query for query, _ in executed))
+        self.assertTrue(any("INSERT INTO item_location_inventory" in query for query, _ in executed))
+
     def test_sync_products_writes_graphql_variant_fields(self):
         executed = []
 
@@ -542,6 +632,8 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(insert_params[16], "12.50")
         self.assertEqual(insert_params[17], "EUR")
         self.assertEqual(insert_params[18], 250)
+        self.assertIn("WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.name", insert_query)
+        self.assertIn("WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_price", insert_query)
 
     def test_sync_products_reconciles_existing_variant_row_before_upsert(self):
         executed = []
