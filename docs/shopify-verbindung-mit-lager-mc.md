@@ -46,7 +46,7 @@ Diese Werte setzen:
 ### 5. Admin-API-Scopes setzen
 
 ```text
-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_inventory,write_merchant_managed_fulfillment_orders
+read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_products,write_inventory,write_merchant_managed_fulfillment_orders
 ```
 
 ### 6. App-Version freigeben
@@ -75,7 +75,7 @@ Der Installer fragt diese Werte ab:
 Die Scopes sind im Installer vorbelegt:
 
 ```text
-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_inventory,write_merchant_managed_fulfillment_orders
+read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_products,write_inventory,write_merchant_managed_fulfillment_orders
 ```
 
 ### 9. Authentifizierung ausfuehren

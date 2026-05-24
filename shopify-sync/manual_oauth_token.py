@@ -11,7 +11,7 @@ from shopify_sync import run_manual_connect_flow
 
 DEFAULT_SCOPES = (
     "read_customers,read_inventory,read_locations,"
-    "read_merchant_managed_fulfillment_orders,read_orders,read_products,"
+    "read_merchant_managed_fulfillment_orders,read_orders,read_products,write_products,"
     "write_inventory,write_merchant_managed_fulfillment_orders"
 )
 

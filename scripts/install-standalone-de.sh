@@ -6,7 +6,7 @@ SCRIPT_VERSION="0.1.0"
 
 REPO_ARCHIVE_URL_DEFAULT="${LAGER_MC_ARCHIVE_URL:-https://github.com/xoquox/Lagerverwaltung/archive/refs/heads/main.tar.gz}"
 TARGET_DIR_DEFAULT="${LAGER_MC_TARGET_DIR:-${HOME}/Lagerverwaltung}"
-SHOPIFY_APP_SCOPES_DEFAULT="${SHOPIFY_APP_SCOPES:-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_inventory,write_merchant_managed_fulfillment_orders}"
+SHOPIFY_APP_SCOPES_DEFAULT="${SHOPIFY_APP_SCOPES:-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_products,write_inventory,write_merchant_managed_fulfillment_orders}"
 SHOPIFY_APP_REDIRECT_URI_DEFAULT="${SHOPIFY_APP_REDIRECT_URI:-}"
 PRIVACY_URL_DEFAULT="${LAGER_MC_PRIVACY_URL:-https://lagerverwaltung.org/de/app-datenschutz.txt}"
 TERMS_URL_DEFAULT="${LAGER_MC_TERMS_URL:-https://lagerverwaltung.org/de/agb.txt}"

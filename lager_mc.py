@@ -4284,7 +4284,7 @@ def format_row(row):
 
     if status == "local":
         status = "L"
-    elif row["dirty"]:
+    elif row["dirty"] or row.get("shopify_product_dirty") or status in {"shopify_pending", "shopify_error"}:
         status = "D"
     else:
         status = "S"

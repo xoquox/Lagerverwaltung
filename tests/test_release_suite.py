@@ -820,6 +820,25 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(rows[2]["item"]["sku"], "SKU-1")
         self.assertEqual(rows[4]["item"]["sku"], "SKU-2")
 
+    def test_format_row_marks_pending_shopify_product_sync_dirty(self):
+        row = {
+            "sku": "P189",
+            "display_sku": "P189",
+            "name": "Wasserpumpe",
+            "regal": "",
+            "fach": "",
+            "platz": "",
+            "menge": 1,
+            "unavailable": 0,
+            "committed": 0,
+            "available": 1,
+            "dirty": False,
+            "sync_status": "shopify_error",
+            "shopify_product_dirty": True,
+        }
+
+        self.assertTrue(self.lager_mc.format_row(row).rstrip().endswith("D"))
+
     def test_clamp_top_index_keeps_first_item_visible_when_scrolling_up(self):
         self.assertEqual(self.lager_mc.clamp_top_index(0, 1, 10), 0)
         self.assertEqual(self.lager_mc.clamp_top_index(5, 1, 10), 1)

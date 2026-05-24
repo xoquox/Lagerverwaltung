@@ -46,7 +46,7 @@ Set these values:
 ### 5. Set the Admin API scopes
 
 ```text
-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_inventory,write_merchant_managed_fulfillment_orders
+read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_products,write_inventory,write_merchant_managed_fulfillment_orders
 ```
 
 ### 6. Release the app version
@@ -75,7 +75,7 @@ The installer asks for:
 The scopes are prefilled in the installer:
 
 ```text
-read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_inventory,write_merchant_managed_fulfillment_orders
+read_customers,read_inventory,read_locations,read_merchant_managed_fulfillment_orders,read_orders,read_products,write_products,write_inventory,write_merchant_managed_fulfillment_orders
 ```
 
 ### 9. Run the authentication
