@@ -791,6 +791,23 @@ def _wait_for_local_manual_oauth_callback(port, expected_state, timeout_seconds)
     return {"shop": _normalize_shop_domain(result["shop"]), "code": result["code"]}
 
 
+def _manual_oauth_callback_from_url(callback_url, expected_state):
+    parsed = urllib.parse.urlparse((callback_url or "").strip())
+    params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    state = (params.get("state") or [""])[0]
+    shop = (params.get("shop") or [""])[0]
+    code = (params.get("code") or [""])[0]
+    error = (params.get("error") or [""])[0]
+
+    if error:
+        raise RuntimeError(f"Shopify-Verbindung fehlgeschlagen: {error}")
+    if state != expected_state:
+        raise RuntimeError("Shopify-OAuth-Callback hatte einen ungueltigen state.")
+    if not shop or not code:
+        raise RuntimeError("Shopify-OAuth-Callback war unvollstaendig.")
+    return {"shop": _normalize_shop_domain(shop), "code": code}
+
+
 def run_connect_flow(shop, relay_base_url=None, port=3459, timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS, open_browser=True):
     normalized_shop = _normalize_shop_domain(shop)
     state = secrets.token_urlsafe(24)
@@ -824,6 +841,7 @@ def run_manual_connect_flow(
     port=3459,
     timeout_seconds=DEFAULT_CONNECT_TIMEOUT_SECONDS,
     open_browser=True,
+    paste_callback=False,
 ):
     normalized_shop = _normalize_shop_domain(shop)
     state = secrets.token_urlsafe(24)
@@ -838,11 +856,17 @@ def run_manual_connect_flow(
     print(auth_url)
     if open_browser:
         webbrowser.open(auth_url)
-    callback_payload = _wait_for_local_manual_oauth_callback(
-        port=port,
-        expected_state=state,
-        timeout_seconds=timeout_seconds,
-    )
+    if paste_callback:
+        print("")
+        print("Nach der Shopify-Freigabe die komplette Callback-URL hier einfuegen.")
+        callback_url = input("Callback URL: ").strip()
+        callback_payload = _manual_oauth_callback_from_url(callback_url, expected_state=state)
+    else:
+        callback_payload = _wait_for_local_manual_oauth_callback(
+            port=port,
+            expected_state=state,
+            timeout_seconds=timeout_seconds,
+        )
     response = requests.post(
         f"https://{normalized_shop}/admin/oauth/access_token",
         json={
@@ -2864,6 +2888,7 @@ def main():
     manual_connect_cmd.add_argument("--port", type=int, default=3459, help="Lokaler Callback-Port fuer die Browser-Weiterleitung")
     manual_connect_cmd.add_argument("--timeout", type=int, default=DEFAULT_CONNECT_TIMEOUT_SECONDS, help="Wartezeit fuer den OAuth-Callback in Sekunden")
     manual_connect_cmd.add_argument("--no-browser", action="store_true", help="Browser nicht automatisch oeffnen")
+    manual_connect_cmd.add_argument("--paste-callback", action="store_true", help="Callback-URL manuell einfuegen statt lokalem Callback-Port")
     fulfill_cmd = sub.add_parser("fulfill", help="Fulfillment fuer Bestellung erzeugen")
     fulfill_cmd.add_argument("--order-id", required=True, help="Shopify Order GID")
     fulfill_cmd.add_argument("--tracking-number", required=True, help="Trackingnummer")
@@ -2904,6 +2929,7 @@ def main():
             port=args.port,
             timeout_seconds=args.timeout,
             open_browser=not args.no_browser,
+            paste_callback=args.paste_callback,
         )
         print(json.dumps({"shop": result["shop"], "connected": True}, ensure_ascii=False))
         return

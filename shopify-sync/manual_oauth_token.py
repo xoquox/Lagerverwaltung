@@ -47,6 +47,7 @@ def main():
         scopes=scopes,
         redirect_uri=redirect_uri,
         open_browser=True,
+        paste_callback=True,
     )
     print("")
     print("OK: Token in .env gespeichert.")

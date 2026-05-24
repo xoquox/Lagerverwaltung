@@ -819,6 +819,17 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertIn("TOKEN_EXPIRES_AT=1712443600", env_text)
         env_path.unlink()
 
+    def test_manual_oauth_callback_from_url_parses_shop_and_code(self):
+        callback = (
+            "https://sync-auth.lagerverwaltung.org/manual-oauth-callback"
+            "?code=abc123&shop=example-shop.myshopify.com&state=expected"
+        )
+
+        payload = self.shopify_sync._manual_oauth_callback_from_url(callback, expected_state="expected")
+
+        self.assertEqual(payload["shop"], "example-shop.myshopify.com")
+        self.assertEqual(payload["code"], "abc123")
+
     def test_refresh_access_token_updates_runtime_and_env(self):
         env_path = ROOT / "shopify-sync" / ".env.test-refresh"
         if env_path.exists():
