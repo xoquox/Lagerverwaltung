@@ -407,6 +407,9 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shopify_orders" in q)
         self.assertIn("source", insert_query)
         self.assertEqual(insert_params[5], "Firma")
+        self.assertEqual(insert_query.count("%s"), len(insert_params))
+        self.assertEqual(insert_params[11], "UNFULFILLED")
+        self.assertEqual(insert_params[12], "PAID")
 
     def test_get_all_product_variants_paginates_graphql_connection(self):
         responses = [

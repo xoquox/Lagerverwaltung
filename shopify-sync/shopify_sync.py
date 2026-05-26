@@ -2336,7 +2336,7 @@ def sync_orders():
                 source,
                 updated_at
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'shopify',NOW())
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'shopify',NOW())
             """,
             (
                 order["id"],
