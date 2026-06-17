@@ -562,7 +562,6 @@ def _reconcile_item_identity(cur, sku, variant_id, inventory_item_id):
     if not any((row.get("sku") or "").strip() == target_sku for row in unique_rows):
         source_row = unique_rows[0]
         source_sku = (source_row.get("sku") or "").strip()
-        _update_item_sku_references(cur, source_sku, target_sku)
         cur.execute(
             """
             UPDATE items
@@ -572,6 +571,7 @@ def _reconcile_item_identity(cur, sku, variant_id, inventory_item_id):
             """,
             (target_sku, source_sku),
         )
+        _update_item_sku_references(cur, source_sku, target_sku)
         unique_rows[0] = dict(source_row, sku=target_sku)
     for row in unique_rows:
         row_sku = (row.get("sku") or "").strip()

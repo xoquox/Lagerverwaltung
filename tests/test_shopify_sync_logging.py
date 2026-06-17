@@ -697,6 +697,9 @@ class ShopifySyncLoggingTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertTrue(any("UPDATE items SET sku = %s" in query for query, _ in executed))
+        item_update_index = next(index for index, (query, _params) in enumerate(executed) if "UPDATE items SET sku = %s" in query)
+        child_update_index = next(index for index, (query, _params) in enumerate(executed) if "UPDATE item_location_inventory" in query)
+        self.assertLess(item_update_index, child_update_index)
         update_query, update_params = next((q, p) for q, p in executed if "UPDATE items SET sku = %s" in q)
         self.assertEqual(update_params, ("SKU-11", "__shopify_variant__11"))
         insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO items(" in q)
