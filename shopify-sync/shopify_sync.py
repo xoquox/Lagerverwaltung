@@ -487,6 +487,82 @@ def _update_item_sku_references(cur, source_sku, target_sku):
     )
 
 
+def _copy_item_row_to_sku(cur, source_sku, target_sku):
+    if source_sku == target_sku:
+        return
+    cur.execute(
+        """
+        INSERT INTO items (
+            sku,
+            display_sku,
+            name,
+            regal,
+            fach,
+            platz,
+            menge,
+            available,
+            reserved,
+            committed,
+            unavailable,
+            dirty,
+            shopify_product_id,
+            shopify_variant_id,
+            shopify_inventory_item_id,
+            barcode,
+            shopify_product_status,
+            shopify_description,
+            shopify_price,
+            shopify_compare_at_price,
+            shopify_unit_cost,
+            shopify_unit_cost_currency,
+            shopify_weight_grams,
+            shopify_product_dirty,
+            shopify_product_sync_action,
+            shopify_product_sync_error,
+            sync_status,
+            last_sync,
+            updated_at,
+            external_fulfillment
+        )
+        SELECT
+            %s,
+            %s,
+            name,
+            regal,
+            fach,
+            platz,
+            menge,
+            available,
+            reserved,
+            committed,
+            unavailable,
+            dirty,
+            shopify_product_id,
+            shopify_variant_id,
+            shopify_inventory_item_id,
+            barcode,
+            shopify_product_status,
+            shopify_description,
+            shopify_price,
+            shopify_compare_at_price,
+            shopify_unit_cost,
+            shopify_unit_cost_currency,
+            shopify_weight_grams,
+            shopify_product_dirty,
+            shopify_product_sync_action,
+            shopify_product_sync_error,
+            sync_status,
+            last_sync,
+            NOW(),
+            external_fulfillment
+        FROM items
+        WHERE sku = %s
+        ON CONFLICT (sku) DO NOTHING
+        """,
+        (target_sku, target_sku, source_sku),
+    )
+
+
 def _merge_item_row_into_sku(cur, source_row, target_sku):
     source_sku = (source_row.get("sku") or "").strip()
     if not source_sku or source_sku == target_sku:
@@ -562,16 +638,15 @@ def _reconcile_item_identity(cur, sku, variant_id, inventory_item_id):
     if not any((row.get("sku") or "").strip() == target_sku for row in unique_rows):
         source_row = unique_rows[0]
         source_sku = (source_row.get("sku") or "").strip()
+        _copy_item_row_to_sku(cur, source_sku, target_sku)
+        _update_item_sku_references(cur, source_sku, target_sku)
         cur.execute(
             """
-            UPDATE items
-            SET sku = %s,
-                updated_at = NOW()
+            DELETE FROM items
             WHERE sku = %s
             """,
-            (target_sku, source_sku),
+            (source_sku,),
         )
-        _update_item_sku_references(cur, source_sku, target_sku)
         unique_rows[0] = dict(source_row, sku=target_sku)
     for row in unique_rows:
         row_sku = (row.get("sku") or "").strip()
