@@ -112,7 +112,10 @@ def ensure_shipping_history_schema(cur):
 def list_shipping_labels(db_factory, order_id=None, limit=400):
     con = db_factory()
     cur = con.cursor()
-    if order_id:
+    where = "WHERE order_id = %s" if order_id else ""
+    limit_clause = "" if order_id else "LIMIT %s"
+    params = (order_id,) if order_id else (int(limit),)
+    try:
         cur.execute(
             f"""
             SELECT
@@ -136,43 +139,17 @@ def list_shipping_labels(db_factory, order_id=None, limit=400):
                 cancel_requested_at,
                 cancelled_at
             FROM {SHIPPING_LABEL_TABLE}
-            WHERE order_id = %s
+            {where}
             ORDER BY created_at DESC, id DESC
+            {limit_clause}
             """,
-            (order_id,),
+            params,
         )
-    else:
-        cur.execute(
-            f"""
-            SELECT
-                id,
-                carrier,
-                order_id,
-                order_name,
-                shipment_reference,
-                track_id,
-                parcel_number,
-                status,
-                weight_kg,
-                label_path,
-                last_error,
-                source,
-                shop_fulfillment_id,
-                shop_synced_at,
-                tracking_url,
-                created_at,
-                updated_at,
-                cancel_requested_at,
-                cancelled_at
-            FROM {SHIPPING_LABEL_TABLE}
-            ORDER BY created_at DESC, id DESC
-            LIMIT {int(limit)}
-            """
-        )
-    rows = cur.fetchall()
-    cur.close()
-    con.close()
-    return rows
+        return cur.fetchall()
+    finally:
+        cur.close()
+        con.close()
+
 
 
 def get_latest_shipping_label_for_order(db_factory, order_id):

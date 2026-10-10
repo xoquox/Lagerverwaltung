@@ -11,7 +11,6 @@ import psycopg2.extras
 import locale
 import queue
 import re
-import ssl
 import subprocess
 import sys
 import string
@@ -35,8 +34,6 @@ from post.product_catalog import find_post_product, list_post_base_products
 from shipping.carriers import (
     DEFAULT_ACTIVE_SHIPPING_CARRIERS,
     SHIPPING_CARRIER_DEFINITIONS,
-    SHIPPING_CARRIER_ORDER,
-    ShippingCarrierRuntime,
     carrier_allows_shop as _shipping_carrier_allows_shop,
     carrier_definition as _shipping_carrier_definition,
     carrier_field_to_code as _shipping_carrier_field_to_code,
@@ -45,13 +42,11 @@ from shipping.carriers import (
     configurable_carrier_codes as _configurable_shipping_carrier_codes,
     default_tracking_mode_for_carrier as _default_tracking_mode_for_carrier,
     normalize_active_carriers as _normalize_active_shipping_carriers,
-    shipping_active_carrier_values as _shipping_active_carrier_values,
     shipping_carrier_options as _shipping_carrier_options_impl,
     shop_tracking_company as _shop_tracking_company,
 )
 from shipping.base import normalize_country_code as _shipping_country_code
 from shipping.history import (
-    SHIPPING_LABEL_TABLE,
     find_or_create_shop_fulfillment_job as _find_or_create_shop_fulfillment_job,
     get_latest_shop_job_for_label as _get_latest_shop_job_for_label,
     get_latest_shipping_label_for_order as _get_latest_shipping_label_for_order,
@@ -63,10 +58,8 @@ from shipping.history import (
 from shipping.post import (
     normalize_option_codes as _post_module_normalize_option_codes,
     resolve_product_selection as _post_module_resolve_product_selection,
-    selection_summary as _post_module_selection_summary,
 )
 from shipping.runtime import carrier_module as _shipping_carrier_module, carrier_runtime as _shipping_carrier_runtime
-from shipping import free
 from shipping.schema import apply_app_schema, collect_schema_issues
 from shipping.shop import assert_shop_system, shop_system, sync_service
 from ui_orders import (
@@ -619,12 +612,14 @@ def _summarize_db_error(exc):
 
 
 def _execute_db_query(cur, query, params=None, deadlock_retries=1):
+    """Retry reads on their dedicated connection after clearing an aborted transaction."""
     params = params or []
     for attempt in range(deadlock_retries + 1):
         try:
             cur.execute(query, params)
             return
         except psycopg2.errors.DeadlockDetected as exc:
+            cur.connection.rollback()
             if attempt < deadlock_retries:
                 time.sleep(0.2 * (attempt + 1))
                 continue
@@ -1307,195 +1302,104 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
 
     query_params = [active_location_id, active_location_id] + params
 
-    _execute_db_query(
-        cur,
-        f"""
-        SELECT
-            so.order_id,
-            so.order_name,
-            so.created_at,
-            so.shipping_name,
-            so.shipping_address1,
-            so.shipping_address2,
-            so.shipping_zip,
-            so.shipping_city,
-            so.shipping_country,
-            so.shipping_email,
-            so.shipping_phone,
-            so.fulfillment_status,
-            so.payment_status,
-            COALESCE(so.source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) AS source,
-            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
-            COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
-            COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
-            COALESCE(fo_stats.location_count, 0) AS shop_location_count
-        FROM shop_orders so
-        LEFT JOIN (
+    try:
+        _execute_db_query(
+            cur,
+            f"""
             SELECT
-                oi.order_id,
-                SUM(
-                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                    THEN oi.quantity
-                    ELSE 0
-                    END
-                ) AS local_internal_qty
-            FROM shop_order_items oi
-            LEFT JOIN items i ON i.sku = oi.sku
-            GROUP BY oi.order_id
-        ) AS order_stats ON order_stats.order_id = so.order_id
-        LEFT JOIN (
-            SELECT
-                grouped.order_id,
-                SUM(
-                    CASE
-                        WHEN grouped.external_fulfillment = FALSE
-                         AND grouped.assigned_location_id = %s
-                        THEN grouped.quantity
-                        ELSE 0
-                    END
-                ) AS active_location_internal_qty,
-                SUM(
-                    CASE
-                        WHEN grouped.external_fulfillment = FALSE
-                         AND grouped.assigned_location_id = %s
-                        THEN grouped.remaining_quantity
-                        ELSE 0
-                    END
-                ) AS active_location_remaining_qty,
-                COUNT(DISTINCT NULLIF(grouped.assigned_location_id, '')) AS location_count
-            FROM (
+                so.order_id,
+                so.order_name,
+                so.created_at,
+                so.shipping_name,
+                so.shipping_address1,
+                so.shipping_address2,
+                so.shipping_zip,
+                so.shipping_city,
+                so.shipping_country,
+                so.shipping_email,
+                so.shipping_phone,
+                so.fulfillment_status,
+                so.payment_status,
+                COALESCE(so.source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) AS source,
+                COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
+                COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
+                COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
+                COALESCE(fo_stats.location_count, 0) AS shop_location_count
+            FROM shop_orders so
+            LEFT JOIN (
                 SELECT
-                    foi.order_id,
-                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id) AS line_key,
-                    foi.assigned_location_id,
-                    COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
-                    LEAST(
-                        SUM(COALESCE(foi.quantity, 0)),
-                        COALESCE(MAX(oi.quantity), SUM(COALESCE(foi.quantity, 0)))
-                    ) AS quantity,
-                    LEAST(
-                        SUM(COALESCE(foi.remaining_quantity, 0)),
-                        COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
-                    ) AS remaining_quantity
-                FROM shop_fulfillment_order_items foi
-                LEFT JOIN shop_order_items oi
-                    ON oi.order_id = foi.order_id
-                   AND oi.order_line_item_id = foi.order_line_item_id
-                LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
-                GROUP BY
-                    foi.order_id,
-                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id),
-                    foi.assigned_location_id,
-                    COALESCE(i.external_fulfillment, FALSE)
-            ) AS grouped
-            GROUP BY grouped.order_id
-        ) AS fo_stats ON fo_stats.order_id = so.order_id
-        {where}
-        ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
-        """,
-        query_params,
-    )
-    rows = cur.fetchall()
-    cur.close()
-    con.close()
-    return rows
+                    oi.order_id,
+                    SUM(
+                        CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
+                        THEN oi.quantity
+                        ELSE 0
+                        END
+                    ) AS local_internal_qty
+                FROM shop_order_items oi
+                LEFT JOIN items i ON i.sku = oi.sku
+                GROUP BY oi.order_id
+            ) AS order_stats ON order_stats.order_id = so.order_id
+            LEFT JOIN (
+                SELECT
+                    grouped.order_id,
+                    SUM(
+                        CASE
+                            WHEN grouped.external_fulfillment = FALSE
+                             AND grouped.assigned_location_id = %s
+                            THEN grouped.quantity
+                            ELSE 0
+                        END
+                    ) AS active_location_internal_qty,
+                    SUM(
+                        CASE
+                            WHEN grouped.external_fulfillment = FALSE
+                             AND grouped.assigned_location_id = %s
+                            THEN grouped.remaining_quantity
+                            ELSE 0
+                        END
+                    ) AS active_location_remaining_qty,
+                    COUNT(DISTINCT NULLIF(grouped.assigned_location_id, '')) AS location_count
+                FROM (
+                    SELECT
+                        foi.order_id,
+                        COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id) AS line_key,
+                        foi.assigned_location_id,
+                        COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
+                        LEAST(
+                            SUM(COALESCE(foi.quantity, 0)),
+                            COALESCE(MAX(oi.quantity), SUM(COALESCE(foi.quantity, 0)))
+                        ) AS quantity,
+                        LEAST(
+                            SUM(COALESCE(foi.remaining_quantity, 0)),
+                            COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
+                        ) AS remaining_quantity
+                    FROM shop_fulfillment_order_items foi
+                    LEFT JOIN shop_order_items oi
+                        ON oi.order_id = foi.order_id
+                       AND oi.order_line_item_id = foi.order_line_item_id
+                    LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
+                    GROUP BY
+                        foi.order_id,
+                        COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id),
+                        foi.assigned_location_id,
+                        COALESCE(i.external_fulfillment, FALSE)
+                ) AS grouped
+                GROUP BY grouped.order_id
+            ) AS fo_stats ON fo_stats.order_id = so.order_id
+            {where}
+            ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
+            """,
+            query_params,
+        )
+        rows = cur.fetchall()
+        return rows
+    finally:
+        cur.close()
+        con.close()
 
 
 def _load_orders_snapshot():
-    con = db()
-    cur = con.cursor()
-    active_location_id = _active_shop_location_id()
-    _execute_db_query(
-        cur,
-        """
-        SELECT
-            so.order_id,
-            so.order_name,
-            so.created_at,
-            so.shipping_name,
-            so.shipping_address1,
-            so.shipping_address2,
-            so.shipping_zip,
-            so.shipping_city,
-            so.shipping_country,
-            so.shipping_email,
-            so.shipping_phone,
-            so.fulfillment_status,
-            so.payment_status,
-            COALESCE(so.source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) AS source,
-            COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
-            COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
-            COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
-            COALESCE(fo_stats.location_count, 0) AS shop_location_count
-        FROM shop_orders so
-        LEFT JOIN (
-            SELECT
-                oi.order_id,
-                SUM(
-                    CASE WHEN COALESCE(i.external_fulfillment, FALSE) = FALSE
-                    THEN oi.quantity
-                    ELSE 0
-                    END
-                ) AS local_internal_qty
-            FROM shop_order_items oi
-            LEFT JOIN items i ON i.sku = oi.sku
-            GROUP BY oi.order_id
-        ) AS order_stats ON order_stats.order_id = so.order_id
-        LEFT JOIN (
-            SELECT
-                grouped.order_id,
-                SUM(
-                    CASE
-                        WHEN grouped.external_fulfillment = FALSE
-                         AND grouped.assigned_location_id = %s
-                        THEN grouped.quantity
-                        ELSE 0
-                    END
-                ) AS active_location_internal_qty,
-                SUM(
-                    CASE
-                        WHEN grouped.external_fulfillment = FALSE
-                         AND grouped.assigned_location_id = %s
-                        THEN grouped.remaining_quantity
-                        ELSE 0
-                    END
-                ) AS active_location_remaining_qty,
-                COUNT(DISTINCT NULLIF(grouped.assigned_location_id, '')) AS location_count
-            FROM (
-                SELECT
-                    foi.order_id,
-                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id) AS line_key,
-                    foi.assigned_location_id,
-                    COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
-                    LEAST(
-                        SUM(COALESCE(foi.quantity, 0)),
-                        COALESCE(MAX(oi.quantity), SUM(COALESCE(foi.quantity, 0)))
-                    ) AS quantity,
-                    LEAST(
-                        SUM(COALESCE(foi.remaining_quantity, 0)),
-                        COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
-                    ) AS remaining_quantity
-                FROM shop_fulfillment_order_items foi
-                LEFT JOIN shop_order_items oi
-                    ON oi.order_id = foi.order_id
-                   AND oi.order_line_item_id = foi.order_line_item_id
-                LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
-                GROUP BY
-                    foi.order_id,
-                    COALESCE(foi.order_line_item_id, oi.order_line_item_id, foi.fulfillment_order_line_item_id),
-                    foi.assigned_location_id,
-                    COALESCE(i.external_fulfillment, FALSE)
-            ) AS grouped
-            GROUP BY grouped.order_id
-        ) AS fo_stats ON fo_stats.order_id = so.order_id
-        ORDER BY so.created_at DESC NULLS LAST, so.order_name DESC
-        """,
-        [active_location_id, active_location_id],
-    )
-    rows = cur.fetchall()
-    cur.close()
-    con.close()
-    return rows
+    return get_orders()
 
 
 def _matches_fulfillment_filter(status_value, fulfillment_filter, only_pending=False):
@@ -7344,20 +7248,15 @@ def edit_item(stdscr, item):
     push_to_shop = push_mode == "shop"
     sync_action = "create" if is_local_item and push_to_shop else "update"
     product_status = "DRAFT" if sync_action == "create" else current_status
+    location_id = _active_shop_location_id()
 
     def action():
         con = db()
         cur = con.cursor()
         try:
-            if sku != item["sku"]:
-                cur.execute("UPDATE item_location_inventory SET sku=%s WHERE sku=%s", (sku, item["sku"]))
-                cur.execute("UPDATE inventory_lines SET sku=%s WHERE sku=%s", (sku, item["sku"]))
-                cur.execute("UPDATE shop_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
-                cur.execute("UPDATE shop_fulfillment_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
             cur.execute("""
                 UPDATE items
-                SET sku=%s,
-                    display_sku=%s,
+                SET display_sku=%s,
                     name=%s,
                     barcode=%s,
                     shop_description=%s,
@@ -7374,6 +7273,7 @@ def edit_item(stdscr, item):
                     fach=%s,
                     platz=%s,
                     menge=%s,
+                    dirty=dirty OR menge IS DISTINCT FROM %s,
                     available=GREATEST(
                         %s - COALESCE(unavailable, COALESCE(reserved, 0)) - COALESCE(committed, 0),
                         0
@@ -7382,7 +7282,6 @@ def edit_item(stdscr, item):
                 WHERE sku=%s
             """,
             (
-                sku,
                 sku,
                 res["name"].strip(),
                 res.get("barcode", "").strip() or None,
@@ -7400,8 +7299,20 @@ def edit_item(stdscr, item):
                 platz,
                 menge,
                 menge,
+                menge,
                 item["sku"]
             ))
+            if location_id:
+                _ensure_location_inventory_row(cur, item["sku"], location_id)
+                cur.execute("""
+                    UPDATE item_location_inventory
+                    SET regal=%s, fach=%s, platz=%s, menge=%s,
+                        available=GREATEST(%s - COALESCE(unavailable, reserved, 0) - COALESCE(committed, 0), 0),
+                        dirty=dirty OR menge IS DISTINCT FROM %s,
+                        updated_at=NOW()
+                    WHERE sku=%s AND location_id=%s
+                """, (regal, fach, platz, menge, menge, menge, item["sku"], location_id))
+                _refresh_single_item_totals(cur, item["sku"])
             con.commit()
         finally:
             cur.close()
@@ -7412,20 +7323,19 @@ def edit_item(stdscr, item):
 
 def _normalize_shop_product_status(value):
     normalized = str(value or "DRAFT").strip().upper()
-    return normalized if normalized in {"ACTIVE", "DRAFT"} else "DRAFT"
+    return normalized if normalized in {"ACTIVE", "DRAFT", "ARCHIVED"} else "DRAFT"
 
 
 def _localized_shop_product_status(value):
     normalized = _normalize_shop_product_status(value)
-    if current_language() == "de":
-        return "Aktiv" if normalized == "ACTIVE" else "Entwurf"
-    return "Active" if normalized == "ACTIVE" else "Draft"
+    return t(f"shop_status_{normalized.lower()}")
 
 
 def shop_product_status_dialog(stdscr, current_status):
     options = [
         {"value": "DRAFT", "label": t("shop_status_draft")},
         {"value": "ACTIVE", "label": t("shop_status_active")},
+        {"value": "ARCHIVED", "label": t("shop_status_archived")},
     ]
     return choice_dialog(stdscr, t("shop_status_title"), options, _normalize_shop_product_status(current_status), cancel_returns_none=True)
 
@@ -8959,7 +8869,7 @@ def create_manual_shipping_label(stdscr):
         )
 
 
-def _format_gls_history_line(row, width):
+def _format_shipping_history_line(row, width):
     created_at = row.get("created_at")
     if isinstance(created_at, datetime.datetime):
         ts = created_at.strftime("%d.%m %H:%M")
@@ -9011,7 +8921,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         list_win = win.derwin(list_height, left_width, 1, 1)
         details_win = win.derwin(list_height, right_width, 1, 2 + left_width)
 
-        display_lines = [_format_gls_history_line(row, left_width - 2) for row in rows] or [t("history_none")]
+        display_lines = [_format_shipping_history_line(row, left_width - 2) for row in rows] or [t("history_none")]
 
         if selected < top_index:
             top_index = selected
@@ -10135,9 +10045,10 @@ def main(stdscr):
             rebuild_items_view = True
 
 
-try:
-    LOGGER.debug("Starte lager_mc")
-    curses.wrapper(main)
-except Exception:
-    LOGGER.exception("lager_mc Start oder Laufzeitfehler")
-    raise
+if __name__ == "__main__":
+    try:
+        LOGGER.debug("Starte lager_mc")
+        curses.wrapper(main)
+    except Exception:
+        LOGGER.exception("lager_mc Start oder Laufzeitfehler")
+        raise

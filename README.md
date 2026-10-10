@@ -11,7 +11,7 @@ kommuniziert mit dem Shop ausschliesslich ueber PostgreSQL. Der WooCommerce-Work
 verwendet eine Datenbankbruecke in WordPress; Einrichtung und Funktionsgrenzen:
 [WooCommerce-Sync](docs/woocommerce-sync.md).
 
-Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
+Lizenz: [MIT](LICENSE)
 
 ## Kernfunktionen
 
@@ -38,15 +38,15 @@ Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Ver
 
 ## Dokumentation
 
-- Shopauswahl, Migration und Sync-Vertrag: [docs/shop-systeme.md](docs/shop-systeme.md)
+- Shopauswahl und Migration: [docs/shop-systeme.md](docs/shop-systeme.md)
 
-- Bedienungsanleitung: [docs/bedienungsanleitung.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.md)
-- Versand-Integrationsdoku: [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md)
-- Shopify-Verbindung mit Lager-MC: [docs/shopify-verbindung-mit-lager-mc.md](/home/chrisi/Lagerverwaltung/docs/shopify-verbindung-mit-lager-mc.md)
-- English README: [README.en.md](/home/chrisi/Lagerverwaltung/README.en.md)
-- English user manual: [docs/bedienungsanleitung.en.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.en.md)
-- English shipping integration notes: [docs/shipping-providers.en.md](/home/chrisi/Lagerverwaltung/docs/shipping-providers.en.md)
-- Release-Historie: [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md)
+- Bedienungsanleitung: [docs/bedienungsanleitung.md](docs/bedienungsanleitung.md)
+- Versand-Integrationsdoku: [docs/versanddienstleister.md](docs/versanddienstleister.md)
+- Shopify-Verbindung mit Lager-MC: [docs/shopify-verbindung-mit-lager-mc.md](docs/shopify-verbindung-mit-lager-mc.md)
+- English README: [README.en.md](README.en.md)
+- English user manual: [docs/bedienungsanleitung.en.md](docs/bedienungsanleitung.en.md)
+- English shipping integration notes: [docs/shipping-providers.en.md](docs/shipping-providers.en.md)
+- Release-Historie: [CHANGELOG.md](CHANGELOG.md)
 - GitHub Releases: <https://github.com/xoquox/Lagerverwaltung/releases>
 
 ## Varianten

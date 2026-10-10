@@ -6,7 +6,7 @@
 
 Terminal-based warehouse and shipping software with storage locations, order handling, stocktaking, selectable shop integration and shipping workflows.
 
-License: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
+License: [MIT](LICENSE)
 
 ## Core features
 
@@ -33,10 +33,10 @@ The carrier structure uses central carrier definitions with shared shipping hist
 
 ## Documentation
 
-- User manual: [docs/bedienungsanleitung.en.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.en.md)
-- Shipping integration notes: [docs/shipping-providers.en.md](/home/chrisi/Lagerverwaltung/docs/shipping-providers.en.md)
-- Shopify connection with Lager-MC: [docs/shopify-connection-with-lager-mc.en.md](/home/chrisi/Lagerverwaltung/docs/shopify-connection-with-lager-mc.en.md)
-- Release history: [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md)
+- User manual: [docs/bedienungsanleitung.en.md](docs/bedienungsanleitung.en.md)
+- Shipping integration notes: [docs/shipping-providers.en.md](docs/shipping-providers.en.md)
+- Shopify connection with Lager-MC: [docs/shopify-connection-with-lager-mc.en.md](docs/shopify-connection-with-lager-mc.en.md)
+- Release history: [CHANGELOG.md](CHANGELOG.md)
 - GitHub Releases: <https://github.com/xoquox/Lagerverwaltung/releases>
 
 ## Repository variants

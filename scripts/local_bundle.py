@@ -155,7 +155,8 @@ def apply_bundle(root_dir, bundle_path):
 
         manifest = json.loads((stage / "bundle_manifest.json").read_text(encoding="utf-8"))
         bundle_settings = json.loads((stage / "settings.bundle.json").read_text(encoding="utf-8"))
-        protected_keys = set(manifest.get("non_overwritten_local_keys") or [])
+        protected_keys = set(NON_OVERWRITTEN_LOCAL_KEYS)
+        protected_keys.update(manifest.get("non_overwritten_local_keys") or [])
         local_settings_path = root_dir / "settings.local.json"
         local_settings = {}
         if local_settings_path.exists():
@@ -179,7 +180,10 @@ def apply_bundle(root_dir, bundle_path):
                 continue
             local_settings[key] = value
 
-        local_settings_path.write_text(json.dumps(local_settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        fd = os.open(local_settings_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(local_settings, indent=2, sort_keys=True) + "\n")
+        local_settings_path.chmod(0o600)
         return local_settings_path
 
 

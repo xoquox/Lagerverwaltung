@@ -21,7 +21,7 @@ Die Carrier-Struktur umfasst zentrale Carrier-Definitionen, gemeinsame Versandhi
 
 ## Carrier-Definition
 
-Die zentrale Carrier-Struktur liegt in [shipping/carriers.py](/home/chrisi/Lagerverwaltung/shipping/carriers.py).
+Die zentrale Carrier-Struktur liegt in [shipping/carriers.py](../shipping/carriers.py).
 
 Dort werden pro Carrier unter anderem gepflegt:
 
@@ -36,7 +36,7 @@ Dort werden pro Carrier unter anderem gepflegt:
 
 ## Versandhistory und Shopify-Queue
 
-Die gemeinsame Datenhaltung liegt in [shipping/history.py](/home/chrisi/Lagerverwaltung/shipping/history.py).
+Die gemeinsame Datenhaltung liegt in [shipping/history.py](../shipping/history.py).
 
 Abgedeckt sind dort:
 
@@ -50,7 +50,7 @@ Diese Logik wird sowohl von der TUI als auch vom Shopify-Sync genutzt.
 
 ## Runtime-Anbindung in der TUI
 
-Die TUI registriert Carrier-Runtimes in [lager_mc.py](/home/chrisi/Lagerverwaltung/lager_mc.py).
+Die TUI registriert Carrier-Runtimes in [lager_mc.py](../lager_mc.py).
 
 Aktuelle Runtime-Hooks:
 
@@ -88,15 +88,15 @@ Carrier-spezifische Defaults fuer Tracking-Modus und Tracking-URL werden ueber d
 
 ## Notwendige Schritte fuer einen neuen Carrier
 
-1. Carrier-Definition in [shipping/carriers.py](/home/chrisi/Lagerverwaltung/shipping/carriers.py) anlegen
-2. benoetigte Standard-Settings in [app_settings.py](/home/chrisi/Lagerverwaltung/app_settings.py) ergaenzen
-3. Carrier-Implementierung in [lager_mc.py](/home/chrisi/Lagerverwaltung/lager_mc.py) schreiben
+1. Carrier-Definition in [shipping/carriers.py](../shipping/carriers.py) anlegen
+2. benoetigte Standard-Settings in [app_settings.py](../app_settings.py) ergaenzen
+3. Carrier-Implementierung in [lager_mc.py](../lager_mc.py) schreiben
 4. Runtime-Spezifikation in `SHIPPING_CARRIER_RUNTIME_SPECS` registrieren
 5. falls Shopify genutzt werden soll:
    - Tracking-Company und Tracking-URL sauber abbilden
 6. Tests ergaenzen in:
-   - [tests/test_release_suite.py](/home/chrisi/Lagerverwaltung/tests/test_release_suite.py)
-   - [tests/test_shopify_sync_logging.py](/home/chrisi/Lagerverwaltung/tests/test_shopify_sync_logging.py)
+   - [tests/test_release_suite.py](../tests/test_release_suite.py)
+   - [tests/test_shopify_sync_logging.py](../tests/test_shopify_sync_logging.py)
 
 ## Aktuelle Schnittstellen
 
@@ -124,4 +124,4 @@ Carrier-spezifische Defaults fuer Tracking-Modus und Tracking-URL werden ueber d
 
 Dieses Dokument beschreibt die vorhandenen technischen Integrationspunkte.
 
-Betriebsanleitung und Benutzerablauf stehen in [docs/bedienungsanleitung.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.md).
+Betriebsanleitung und Benutzerablauf stehen in [docs/bedienungsanleitung.md](bedienungsanleitung.md).

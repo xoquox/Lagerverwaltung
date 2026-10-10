@@ -26,7 +26,7 @@ Zusaetzlich vorhanden:
 
 Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shop-Anbindung.
 
-Details zur Carrier-Struktur und zu den Integrationspunkten stehen in [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md).
+Details zur Carrier-Struktur und zu den Integrationspunkten stehen in [docs/versanddienstleister.md](versanddienstleister.md).
 
 ## Voraussetzungen
 
@@ -362,6 +362,6 @@ Nicht ueberschrieben werden lokale Arbeitsplatz-Einstellungen wie:
 
 Wichtige Logdateien:
 
-- [logs/lagerverwaltung.log](/home/chrisi/Lagerverwaltung/logs/lagerverwaltung.log)
-- [logs/print.log](/home/chrisi/Lagerverwaltung/logs/print.log)
-- [logs/shopify-sync.log](/home/chrisi/Lagerverwaltung/logs/shopify-sync.log)
+- [logs/lagerverwaltung.log](../logs/lagerverwaltung.log)
+- [logs/print.log](../logs/print.log)
+- [logs/shopify-sync.log](../logs/shopify-sync.log)

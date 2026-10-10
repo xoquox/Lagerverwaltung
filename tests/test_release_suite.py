@@ -20,6 +20,8 @@ from pathlib import Path
 from unittest import mock
 import subprocess
 from urllib.parse import parse_qs, urlparse
+from shipping import free
+from shipping.carriers import ShippingCarrierRuntime
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -163,7 +165,7 @@ class BundleScriptTests(unittest.TestCase):
                 json.dumps(
                     {
                         "bundle_version": 2,
-                        "non_overwritten_local_keys": ["shipping_label_printer_gls"],
+                        "non_overwritten_local_keys": [],
                         "setting_file_mappings": [],
                     }
                 ),
@@ -191,6 +193,7 @@ class BundleScriptTests(unittest.TestCase):
             imported = json.loads((target_root / "settings.local.json").read_text(encoding="utf-8"))
             self.assertEqual(imported["db_host"], "bundle-db")
             self.assertEqual(imported["shipping_label_printer_gls"], "LOCAL-PRINTER")
+            self.assertEqual((target_root / "settings.local.json").stat().st_mode & 0o777, 0o600)
 
     def test_bundle_roundtrip_imports_free_template_and_active_carriers(self):
         with tempfile.TemporaryDirectory() as source_tmpdir, tempfile.TemporaryDirectory() as target_tmpdir:
@@ -688,6 +691,22 @@ class LagerMcLogicTests(unittest.TestCase):
                 self.lager_mc._BACKGROUND_UI_EVENTS.get_nowait()
             except queue.Empty:
                 break
+
+    def test_archived_product_status_is_preserved_and_localized(self):
+        self.assertEqual(self.lager_mc._normalize_shop_product_status('ARCHIVED'),'ARCHIVED')
+        with mock.patch.object(self.lager_mc,'current_language',return_value='de'):
+            self.assertEqual(self.lager_mc._localized_shop_product_status('ARCHIVED'),'Archiviert')
+
+    def test_orders_connection_closes_when_query_fails(self):
+        connection = FakeConnection(FakeCursor())
+        with (
+            mock.patch.object(self.lager_mc,'db',return_value=connection),
+            mock.patch.object(self.lager_mc,'_execute_db_query',side_effect=RuntimeError('query failed')),
+            self.assertRaises(RuntimeError),
+        ):
+            self.lager_mc.get_orders()
+        self.assertTrue(connection.closed)
+        self.assertTrue(connection._cursor.closed)
 
     def test_normalize_regal_accepts_single_letter_only(self):
         with mock.patch.dict(
@@ -2007,7 +2026,7 @@ class LagerMcLogicTests(unittest.TestCase):
         ctx = self.lager_mc._shipping_runtime_context()
         gls_fields = self.lager_mc._shipping_carrier_module("gls").manual_fields(ctx, {"selected_services": ["service_flexdelivery"]})
         post_fields = self.lager_mc._shipping_carrier_module("post").manual_fields(ctx, {"post_selection": {"name": "Paket", "price_eur": "4.99"}})
-        free_fields = self.lager_mc.free.manual_fields(ctx, {})
+        free_fields = free.manual_fields(ctx, {})
 
         self.assertEqual(gls_fields[0]["name"], "services_display")
         self.assertEqual(gls_fields[0]["action"], "carrier_options")
@@ -2127,7 +2146,7 @@ class LagerMcLogicTests(unittest.TestCase):
             "shipping_country": "DE",
         }
 
-        runtime = self.lager_mc.ShippingCarrierRuntime(create_label=mock.Mock(return_value={"ok": True}))
+        runtime = ShippingCarrierRuntime(create_label=mock.Mock(return_value={"ok": True}))
         with mock.patch.object(self.lager_mc, "_shipping_carrier_runtime", return_value=runtime) as runtime_mock:
             result = self.lager_mc.create_shipping_label(order, weight_kg=1.2, carrier="free")
 
@@ -2160,10 +2179,10 @@ class LagerMcLogicTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.lager_mc, "build_address_label_pdf", side_effect=fake_build),
-            mock.patch.object(self.lager_mc.free, "save_shipping_label_pdf", return_value="/tmp/free.pdf") as save_mock,
+            mock.patch.object(free, "save_shipping_label_pdf", return_value="/tmp/free.pdf") as save_mock,
             mock.patch.object(self.lager_mc, "insert_shipping_label_history", return_value=77) as insert_mock,
         ):
-            result = self.lager_mc.free.create_label(self.lager_mc._shipping_runtime_context(), order, weight_kg=0.4, shipment_reference="ADR-1")
+            result = free.create_label(self.lager_mc._shipping_runtime_context(), order, weight_kg=0.4, shipment_reference="ADR-1")
 
         self.assertEqual(result["label_id"], 77)
         self.assertEqual(result["label_path"], "/tmp/free.pdf")

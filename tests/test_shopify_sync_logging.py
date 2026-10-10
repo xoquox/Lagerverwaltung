@@ -463,7 +463,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
                 executed.append((" ".join(query.split()), params))
 
             def fetchall(self):
-                return [("SKU 1", "SKU 1", "gid://shopify/Location/67402989753", 7, "12345")]
+                return [("SKU 1", "SKU 1", "gid://shopify/Location/67402989753", 7, "12345", "2026-10-11T00:00:00Z")]
 
         class FakeConnection:
             def cursor(self):
@@ -520,6 +520,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
                         "create",
                         3,
                         3,
+                        "2026-10-11T00:00:00Z",
                     )
                 ]
 
@@ -584,7 +585,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         variant = graphql_mock.call_args_list[2].args[1]["variants"][0]
         self.assertEqual(variant["inventoryItem"]["sku"], "SKU-LOCAL")
         self.assertEqual(variant["inventoryItem"]["tracked"], True)
-        self.assertTrue(any("shop_product_dirty = FALSE" in query for query, _ in executed))
+        self.assertTrue(any("shop_product_dirty = CASE WHEN updated_at = %s THEN FALSE" in query for query, _ in executed))
         self.assertTrue(any("INSERT INTO item_location_inventory" in query for query, _ in executed))
 
     def test_sync_products_writes_graphql_variant_fields(self):
@@ -783,6 +784,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertTrue(any("UPDATE item_location_inventory AS dest" in query for query, _ in executed))
+        self.assertTrue(any("UPDATE shop_fulfillment_order_items SET sku = %s" in query for query, _ in executed))
         self.assertTrue(any("DELETE FROM items WHERE sku = %s" in query for query, _ in executed))
         delete_query, delete_params = next((q, p) for q, p in executed if "DELETE FROM items WHERE sku = %s" in q)
         self.assertEqual(delete_params, ("__shopify_variant__11",))

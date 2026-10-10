@@ -21,7 +21,7 @@ The carrier structure includes central carrier definitions, shared shipping hist
 
 ## Carrier definition
 
-The central carrier structure is defined in [shipping/carriers.py](/home/chrisi/Lagerverwaltung/shipping/carriers.py).
+The central carrier structure is defined in [shipping/carriers.py](../shipping/carriers.py).
 
 Per-carrier fields include:
 
@@ -36,7 +36,7 @@ Per-carrier fields include:
 
 ## Shipping history and Shopify queue
 
-Shared data handling is implemented in [shipping/history.py](/home/chrisi/Lagerverwaltung/shipping/history.py).
+Shared data handling is implemented in [shipping/history.py](../shipping/history.py).
 
 It covers:
 
@@ -50,7 +50,7 @@ This logic is used by both the TUI and the Shopify sync process.
 
 ## Runtime integration in the TUI
 
-The TUI registers carrier runtimes in [lager_mc.py](/home/chrisi/Lagerverwaltung/lager_mc.py).
+The TUI registers carrier runtimes in [lager_mc.py](../lager_mc.py).
 
 Current runtime hooks:
 
@@ -88,15 +88,15 @@ Carrier-specific defaults for tracking mode and tracking URL are controlled thro
 
 ## Required steps for a new carrier
 
-1. add a carrier definition in [shipping/carriers.py](/home/chrisi/Lagerverwaltung/shipping/carriers.py)
-2. add required default settings in [app_settings.py](/home/chrisi/Lagerverwaltung/app_settings.py)
-3. implement carrier behavior in [lager_mc.py](/home/chrisi/Lagerverwaltung/lager_mc.py)
+1. add a carrier definition in [shipping/carriers.py](../shipping/carriers.py)
+2. add required default settings in [app_settings.py](../app_settings.py)
+3. implement carrier behavior in [lager_mc.py](../lager_mc.py)
 4. register the runtime spec in `SHIPPING_CARRIER_RUNTIME_SPECS`
 5. if Shopify support is required:
    - map tracking company and tracking URL correctly
 6. add tests in:
-   - [tests/test_release_suite.py](/home/chrisi/Lagerverwaltung/tests/test_release_suite.py)
-   - [tests/test_shopify_sync_logging.py](/home/chrisi/Lagerverwaltung/tests/test_shopify_sync_logging.py)
+   - [tests/test_release_suite.py](../tests/test_release_suite.py)
+   - [tests/test_shopify_sync_logging.py](../tests/test_shopify_sync_logging.py)
 
 ## Current interfaces
 
@@ -124,4 +124,4 @@ Carrier-specific defaults for tracking mode and tracking URL are controlled thro
 
 This document describes the available technical integration points.
 
-User workflow and operation are documented in [docs/bedienungsanleitung.en.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.en.md).
+User workflow and operation are documented in [docs/bedienungsanleitung.en.md](bedienungsanleitung.en.md).

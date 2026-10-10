@@ -29,10 +29,10 @@ Regeln:
 - `MAJOR` nur bei groben, inkompatiblen Umstellungen erhoehen
 - `MINOR` bei groesseren neuen Funktionsbloecken erhoehen
 - `PATCH` fuer produktive Hotfixes auf derselben Release-Linie erhoehen
-- die TUI liest ihre Version aus [version.json](/home/chrisi/Lagerverwaltung/version.json)
+- die TUI liest ihre Version aus [version.json](version.json)
 - auf `develop` bleibt `stage = "dev"` und `build` wird fuer jeden neuen testbaren Stand weiter hochgezaehlt
 - auf `main` ist `stage = ""` und `build = 0`
-- der Shopify-Sync fuehrt seine eigene Version separat in [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json)
+- der Shopify-Sync fuehrt seine eigene Version separat in [shopify-sync/version.json](shopify-sync/version.json)
   und wird nicht ueber die TUI-Version mitversioniert
 - nach einem Release auf `main` uebernimmt `develop` dieselbe Release-Nummer wieder mit `-dev.0`
 
@@ -43,11 +43,11 @@ Aktueller Stand:
 
 ## Changelog
 
-- [CHANGELOG.md](/home/chrisi/Lagerverwaltung/CHANGELOG.md) beschreibt nur Releases auf `main`
+- [CHANGELOG.md](CHANGELOG.md) beschreibt nur Releases auf `main`
 - kein Eintrag fuer unfertige Zwischenstaende auf `develop`
 - der naechste Release-Block kann auf `develop` vorbereitet und beim Merge nach `main` mit Datum versehen werden
 - ein Changelog-Eintrag fasst alle relevanten Aenderungen seit dem letzten Release auf `main` zusammen
-- der Shopify-Sync pflegt zusaetzlich sein eigenes Changelog in [shopify-sync/CHANGELOG.md](/home/chrisi/Lagerverwaltung/shopify-sync/CHANGELOG.md)
+- der Shopify-Sync pflegt zusaetzlich sein eigenes Changelog in [shopify-sync/CHANGELOG.md](shopify-sync/CHANGELOG.md)
 - Eintraege im Haupt-Changelog nennen die zugehoerige Sync-Version und verweisen auf das separate Sync-Changelog
 
 ## Empfohlener Ablauf
@@ -57,8 +57,8 @@ Aktueller Stand:
 3. Merge nach `develop`
 4. Gesamtstand auf `develop` testen
 5. Vor Release:
-   - [version.json](/home/chrisi/Lagerverwaltung/version.json) auf finale Release-Version setzen
-   - [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json) auf finale Release-Version setzen
+   - [version.json](version.json) auf finale Release-Version setzen
+   - [shopify-sync/version.json](shopify-sync/version.json) auf finale Release-Version setzen
    - `stage = ""`
    - `build = 0`
    - Changelog fuer alle Aenderungen seit dem letzten Release ergaenzen
@@ -70,8 +70,8 @@ Aktueller Stand:
 ## Naechster Schritt nach einem Release
 
 1. `main` auf `develop` zurueckfuehren
-2. [version.json](/home/chrisi/Lagerverwaltung/version.json) auf `1.22.0-dev.0` stellen
-3. [shopify-sync/version.json](/home/chrisi/Lagerverwaltung/shopify-sync/version.json) auf `1.0.0-dev.0` stellen
+2. [version.json](version.json) auf `1.22.0-dev.0` stellen
+3. [shopify-sync/version.json](shopify-sync/version.json) auf `1.0.0-dev.0` stellen
 4. beide Aenderungen auf `develop` committen und pushen
 
 ## Mindest-Checkliste vor Merge nach `main`

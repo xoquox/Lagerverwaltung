@@ -1,10 +1,8 @@
 import os
 import time
 import json
-import hmac
 import argparse
 import datetime
-import hashlib
 import logging
 import secrets
 import sys
@@ -42,7 +40,6 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from shipping.history import (
-    SHIPPING_LABEL_TABLE,
     claim_shop_fulfillment_jobs as _claim_shop_fulfillment_jobs,
     mark_shop_fulfillment_job_done as _mark_shop_fulfillment_job_done,
     mark_shop_fulfillment_job_failed as _mark_shop_fulfillment_job_failed,
@@ -418,22 +415,11 @@ def _fetch_item_identity_rows(cur, sku, variant_id, inventory_item_id):
 def _update_item_sku_references(cur, source_sku, target_sku):
     if source_sku == target_sku:
         return
-    cur.execute(
-        """
-        UPDATE shop_order_items
-        SET sku = %s
-        WHERE sku = %s
-        """,
-        (target_sku, source_sku),
-    )
-    cur.execute(
-        """
-        UPDATE inventory_lines
-        SET sku = %s
-        WHERE sku = %s
-        """,
-        (target_sku, source_sku),
-    )
+    for table in ("shop_order_items", "shop_fulfillment_order_items", "inventory_lines"):
+        cur.execute(
+            f"UPDATE {table} SET sku = %s WHERE sku = %s",
+            (target_sku, source_sku),
+        )
     cur.execute(
         """
         UPDATE item_location_inventory AS dest
@@ -1305,16 +1291,16 @@ def _update_shopify_product(row, product_id, variant_id):
     }
 
 
-def _mark_product_sync_failed(cur, sku, error_text):
+def _mark_product_sync_failed(cur, sku, error_text, revision):
     cur.execute(
         """
         UPDATE items
         SET shop_product_sync_error = %s,
             sync_status = 'shop_error',
             updated_at = NOW()
-        WHERE sku = %s
+        WHERE sku = %s AND updated_at = %s
         """,
-        (shorten_text(error_text, limit=300), sku),
+        (shorten_text(error_text, limit=300), sku, revision),
     )
 
 
@@ -1339,7 +1325,8 @@ def push_product_changes(limit=20):
             shop_weight_grams,
             shop_product_sync_action,
             menge,
-            available
+            available,
+            updated_at
         FROM items
         WHERE COALESCE(shop_product_dirty, FALSE) = TRUE
         ORDER BY updated_at, sku
@@ -1371,6 +1358,7 @@ def push_product_changes(limit=20):
             "shop_product_sync_action": raw_row[13],
             "menge": raw_row[14],
             "available": raw_row[15],
+            "revision": raw_row[16],
         }
         sku = row["sku"]
         display_sku = row["display_sku"] or sku
@@ -1383,7 +1371,7 @@ def push_product_changes(limit=20):
             else:
                 result = _update_shopify_product(row, row["shop_product_id"], row["shop_variant_id"])
         except Exception as exc:
-            _mark_product_sync_failed(cur, sku, str(exc))
+            _mark_product_sync_failed(cur, sku, str(exc), row["revision"])
             log_error("Shopify Produkt-Sync Fehler sku=%s error=%s", display_sku, shorten_text(exc))
             continue
 
@@ -1393,11 +1381,11 @@ def push_product_changes(limit=20):
             SET shop_product_id = %s,
                 shop_variant_id = %s,
                 shop_inventory_item_id = %s,
-                shop_product_status = %s,
-                shop_product_dirty = FALSE,
-                shop_product_sync_action = NULL,
-                shop_product_sync_error = NULL,
-                sync_status = 'ok',
+                shop_product_status = CASE WHEN updated_at = %s THEN %s ELSE shop_product_status END,
+                shop_product_dirty = CASE WHEN updated_at = %s THEN FALSE ELSE shop_product_dirty END,
+                shop_product_sync_action = CASE WHEN updated_at = %s THEN NULL ELSE shop_product_sync_action END,
+                shop_product_sync_error = CASE WHEN updated_at = %s THEN NULL ELSE shop_product_sync_error END,
+                sync_status = CASE WHEN updated_at = %s THEN 'ok' ELSE sync_status END,
                 last_sync = NOW(),
                 updated_at = NOW()
             WHERE sku = %s
@@ -1406,7 +1394,12 @@ def push_product_changes(limit=20):
                 result.get("product_id"),
                 result.get("variant_id"),
                 result.get("inventory_item_id"),
+                row["revision"],
                 _normalize_product_status(result.get("status"), fallback=row.get("shop_product_status")),
+                row["revision"],
+                row["revision"],
+                row["revision"],
+                row["revision"],
                 sku,
             ),
         )
@@ -1738,7 +1731,8 @@ def push_inventory_changes():
             COALESCE(i.display_sku, i.sku) AS display_sku,
             ili.location_id,
             ili.available,
-            i.shop_inventory_item_id
+            i.shop_inventory_item_id,
+            ili.updated_at
         FROM item_location_inventory ili
         JOIN items i ON i.sku = ili.sku
         WHERE ili.dirty = TRUE
@@ -1757,12 +1751,7 @@ def push_inventory_changes():
     pushed_count = 0
     touched_skus = set()
     for row in rows:
-        if len(row) == 5:
-            sku, display_sku, location_id, available_qty, inventory_item_id = row
-        else:
-            sku, available_qty, inventory_item_id = row
-            display_sku = sku
-            location_id = _location_gid()
+        sku, display_sku, location_id, available_qty, inventory_item_id, revision = row
         inventory_item_gid = _inventory_item_gid(inventory_item_id)
         if not inventory_item_gid:
             log_error("Shopify Inventory-Sync uebersprungen: fehlende inventory item id fuer sku=%s", display_sku or sku)
@@ -1819,9 +1808,9 @@ def push_inventory_changes():
             UPDATE item_location_inventory
             SET dirty = FALSE,
                 updated_at = NOW()
-            WHERE sku = %s AND location_id = %s
+            WHERE sku = %s AND location_id = %s AND updated_at = %s
         """,
-        (sku, location_id),
+        (sku, location_id, revision),
         )
         touched_skus.add(sku)
         pushed_count += 1
@@ -1834,7 +1823,7 @@ def push_inventory_changes():
             """
             UPDATE items
             SET sync_status = CASE
-                    WHEN COALESCE(shop_product_dirty, FALSE) = TRUE THEN sync_status
+                    WHEN dirty OR COALESCE(shop_product_dirty, FALSE) = TRUE THEN sync_status
                     ELSE 'pushed'
                 END,
                 last_sync = NOW(),

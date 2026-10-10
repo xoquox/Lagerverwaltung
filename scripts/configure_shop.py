@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Select the shop during installation; never migrate existing shop data implicitly."""
+
 import argparse
 import sys
 from pathlib import Path
@@ -18,9 +19,12 @@ def main():
     settings = load_settings()
     selected = args.shop_system
     if selected is None and sys.stdin.isatty():
-        selected = input(
-            f"Shopsystem (shopify/woocommerce) [{settings['shop_system']}]: "
-        ).strip() or settings["shop_system"]
+        selected = (
+            input(
+                f"Shopsystem (shopify/woocommerce) [{settings['shop_system']}]: "
+            ).strip()
+            or settings["shop_system"]
+        )
     settings["shop_system"] = selected or settings["shop_system"]
     save_settings(settings)
     print(f"Shopsystem: {SHOP_SYSTEMS[settings['shop_system']]}")

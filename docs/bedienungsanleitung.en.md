@@ -26,7 +26,7 @@ Also available:
 
 The carrier structure uses central carrier definitions with shared shipping history and shop handover.
 
-Details about carrier integration points are available in [docs/shipping-providers.en.md](/home/chrisi/Lagerverwaltung/docs/shipping-providers.en.md).
+Details about carrier integration points are available in [docs/shipping-providers.en.md](shipping-providers.en.md).
 
 ## Requirements
 
@@ -362,6 +362,6 @@ These local workstation settings are not overwritten:
 
 Important log files:
 
-- [logs/lagerverwaltung.log](/home/chrisi/Lagerverwaltung/logs/lagerverwaltung.log)
-- [logs/print.log](/home/chrisi/Lagerverwaltung/logs/print.log)
-- [logs/shopify-sync.log](/home/chrisi/Lagerverwaltung/logs/shopify-sync.log)
+- [logs/lagerverwaltung.log](../logs/lagerverwaltung.log)
+- [logs/print.log](../logs/print.log)
+- [logs/shopify-sync.log](../logs/shopify-sync.log)

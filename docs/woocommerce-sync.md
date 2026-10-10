@@ -1,6 +1,6 @@
 # WooCommerce-Datenbank-Sync
 
-Der neue Worker liegt unter `woocommerce-sync/`. Lager-MC spricht weiterhin nur
+Der Worker liegt unter `woocommerce-sync/`. Lager-MC spricht weiterhin nur
 mit seiner PostgreSQL-Datenbank. Der Worker verbindet PostgreSQL mit drei eigenen
 Tabellen in der WooCommerce-MySQL/MariaDB-Datenbank. Das mitgelieferte
 WordPress-Plugin liest und schreibt WooCommerce-Objekte ueber deren CRUD-Schicht.
@@ -28,8 +28,9 @@ werden durch dieselben WooCommerce-Objekte bedient.
    installieren. Keine bestehende Shopify-Datenbank umetikettieren.
 2. Den Ordner `woocommerce-sync/wordpress/lager-mc-db-bridge/` nach
    `wp-content/plugins/` kopieren und das Plugin in WordPress aktivieren.
-   PHP >= 8.1 ist erforderlich. Fuer die erste Version WooCommerce 10.7.x
-   verwenden; die native Fulfillment-Schnittstelle ist versionsabhaengig.
+   PHP >= 8.1 ist erforderlich. Die Bruecke meldet die Faehigkeiten der
+   installierten WooCommerce-Version. Native Fulfillments benoetigen
+   WooCommerce >= 10.7 und die aktivierte Fulfillment-Funktion.
 3. Im Worker-Verzeichnis `.env.example` nach `.env` kopieren und PostgreSQL-
    sowie Woo-Datenbankzugang eintragen. Die Komplettinstallation bereitet
    die PostgreSQL-Werte bereits vor und behaelt vorhandene `.env`-Dateien bei.
@@ -84,12 +85,12 @@ aneinander gebunden; eine andere Kombination wird abgelehnt. Nach dem Kopieren
 eines Shops fuer Staging diese Bindungen nur mit angehaltenen Workern und
 gezielt neu initialisieren; eine Datenbankkopie uebernimmt auch die UUIDs.
 
-## Was bereits funktioniert und was sich unterscheidet
+## Funktionen und Shopunterschiede
 
 | Bereich | Verhalten / Grenze |
 | --- | --- |
 | Artikel und Varianten | Import sowie Rueckschreiben bestehender einfacher Produkte und Varianten: SKU, Beschreibung, Preise, Gewicht, Status, Barcode und bedingt Kosten. Interne IDs bleiben bei SKU-Aenderungen stabil. Variablen Elternprodukte werden nicht als eigener Lagerartikel importiert. Name/Status einer Variante gehoeren in Woo zum Elternprodukt; abweichende Aenderungen werden abgelehnt. |
-| Lagerstandorte | WooCommerce-Core hat keinen Shopify-Location-/Fulfillment-Order-Vertrag. Die Bruecke erzeugt genau `wc:location:main`. Mehrlager-Erweiterungen benoetigen spaeter eigene Adapter; Lagerplaetze innerhalb von Lager-MC bleiben moeglich. |
+| Lagerstandorte | WooCommerce-Core hat keinen Shopify-Location-/Fulfillment-Order-Vertrag. Die Bruecke erzeugt genau `wc:location:main`. Lagerplaetze werden innerhalb des gemeinsamen Standorts in Lager-MC gepflegt. |
 | Mengen und Verfuegbarkeit | Eigene Bestandsverwaltung je einfachem Produkt/Variante, ganze nichtnegative Stueckzahlen, keine Backorders. Gemeinsamer Elternbestand, Bundles, Subscriptions und pluginabhaengige Bestandsmodelle werden nicht geschrieben. Checkout-Reservierungen werden importiert; physischer Bestand wird aus Woo-Verkaufsbestand plus noch unversandten, bereits abgezogenen Bestellmengen rekonstruiert. Woo bietet keine exakte Entsprechung aller Shopify-Zustaende wie damaged/safety_stock. |
 | Bestellungen und Zahlung | Import inklusive Gastkunden, Positionen, Rueckerstattungsmengen, Adresse, Bezahlstatus und offenen Versandmengen. `processing`/`on-hold` koennen bereits abgezogenen Bestand haben; `on-hold` wird nicht automatisch als bezahlt behandelt. Bezahlstatus folgt dem Zahlungsdatum. |
 | Teilversand und Tracking | Mit aktivierten nativen Fulfillments >= 10.7: einzelne Positionen/Mengen, Sendungsnummer und Trackinglink. Ohne diese Funktion werden Bestellungen importiert, Schreibjobs aber sichtbar abgelehnt. Vorhandene Entwurfs-Fulfillments gelten als bereits zugeordnet und werden nicht doppelt versandt. Aeltere Tracking-Plugins speichern andere Metadaten und sind noch nicht angebunden. Die Bruecke aendert den Zahlungs-/Bestellstatus nicht automatisch auf `completed`. |
@@ -97,13 +98,13 @@ gezielt neu initialisieren; eine Datenbankkopie uebernimmt auch die UUIDs.
 | Barcode | Woo verwendet global unique IDs fuer GTIN/EAN/UPC/ISBN und prueft deren Format/Einmaligkeit; beliebige Shopify-Barcode-Texte sind nicht gleichwertig. Ungueltige Werte werden als Fehler angezeigt. |
 | Einkaufspreis | Nur bei aktiviertem WooCommerce-COGS. Variantenkosten werden als absoluter Wert gesetzt, nicht als Zuschlag auf den Elternpreis. Ohne COGS wird eine Kosten-Aenderung abgelehnt. |
 | Preise | Lager-MC bleibt auf EUR beschraenkt; andere Shop-/Bestellwaehrungen werden abgelehnt. Shopify-Compare-at wird als Woo-Regular/Sale-Preis abgebildet. Geplante Sale-Preise muessen in Woo bearbeitet werden; normale Artikelpflege erhaelt deren Zeitplan. Woo-Steuer-/Preisanzeige folgt weiterhin der Shopkonfiguration. |
-| Produktanlage / Kategorien | Noch nicht umgesetzt, wie fuer diesen Schritt vereinbart. Ein `create`-Auftrag meldet diese Grenze. Spaetere Erstbefuellung und Shopify-Kategorieuebernahme sind gesonderte Schritte. |
+| Produktanlage / Kategorien | Die Produktpflege bearbeitet bestehende Artikel. Kategorien werden im WooCommerce-Backend gepflegt. |
 
 WooCommerce dokumentiert [native Fulfillments und Teilversand](https://woocommerce.com/document/order-fulfillment/),
 die [Schnittstelle ab 10.7](https://developer.woocommerce.com/2026/04/15/woocommerce-10-7/),
 [Bestellstatus und Bestandsabzug](https://woocommerce.com/document/managing-orders/order-statuses/)
 sowie [COGS](https://developer.woocommerce.com/2025/05/21/cost-of-goods-soldcogs-is-ready-to-blossom-out-of-beta-this-summer/).
-Diese WooCommerce-Faehigkeiten sind von den bewusst engeren Grenzen dieses Adapters zu unterscheiden.
+Die Tabelle beschreibt den Funktionsumfang des Lager-MC-Adapters.
 
 ## Ausfaelle, Konflikte und Betrieb
 
@@ -135,8 +136,8 @@ Diese WooCommerce-Faehigkeiten sind von den bewusst engeren Grenzen dieses Adapt
   einen Loesch-Hook verlieren; die erste Version besitzt noch keinen vollstaendigen
   Abgleich verschwundener IDs. Loeschungen im normalen Woo-Prozess werden exportiert.
 - Quittierte Ereignisse werden nach sieben Tagen geloescht. Auftragsprotokolle
-  bleiben fuer Idempotenz erhalten; fuer grosse Shops spaeter Retention/Archivierung
-  mit Abgleich der lokalen Outbox ergaenzen. Datenschutz/Backups gelten fuer beide DBs.
+  bleiben fuer Idempotenz erhalten; Archivierung erfolgt
+  mit Abgleich der lokalen Outbox. Datenschutz/Backups gelten fuer beide DBs.
 
 ## Pruefungen
 
