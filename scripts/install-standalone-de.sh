@@ -18,6 +18,7 @@ DB_NAME_DEFAULT="${PGDATABASE:-lagerdb}"
 DB_USER_DEFAULT="${PGUSER:-lager}"
 CONNECT_BROWSER_MODE="${LAGER_MC_CONNECT_BROWSER_MODE:-auto}"
 
+SHOP_SYSTEM_VALUE=""
 MODE="complete"
 MODE_SET_BY_ARG=0
 TARGET_DIR="${TARGET_DIR_DEFAULT}"
@@ -54,12 +55,14 @@ ${SCRIPT_NAME} ${SCRIPT_VERSION}
 
 Standalone-Installer fuer Lager-MC.
 Laedt die Programmdaten von GitHub, installiert Lager-MC und optional
-shopify-sync, richtet PostgreSQL ein und kann den Shopify-Connect starten.
+shopify-sync, bietet Shopify oder WooCommerce zur Auswahl und richtet PostgreSQL ein.
+WooCommerce verwendet einen separat einzurichtenden Datenbank-Sync-Server.
 
 Verwendung:
   ${SCRIPT_NAME} [optionen]
 
 Optionen:
+  --shop-system <shopify|woocommerce>
   --mode <complete|app-only|workstation|update>
   --target <pfad>
   --archive-url <url>
@@ -76,6 +79,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --shop-system)
+      SHOP_SYSTEM_VALUE="${2:-}"
+      shift 2
+      ;;
     --mode)
       MODE="${2:-}"
       MODE_SET_BY_ARG=1
@@ -653,9 +660,40 @@ select_mode_interactively() {
   MODE="$(ui_menu "Installationsmodus" "Bitte den gewuenschten Installationsmodus waehlen." \
     "complete" "Komplettinstallation (empfohlen)" \
     "app-only" "Nur Lager-MC installieren" \
-    "workstation" "Arbeitsplatz mit vorhandenem shopify-sync" \
+    "workstation" "Arbeitsplatz mit vorhandenem Shop-Sync-Server" \
     "update" "Update oder Reparatur")"
   [[ -n "${MODE}" ]] || die "Kein Installationsmodus gewaehlt."
+}
+
+select_shop_system() {
+  local existing="shopify"
+  if [[ -f "${INSTALL_ROOT}/settings.local.json" || -f "${INSTALL_ROOT}/settings.json" ]]; then
+    existing="$(python3 - "${INSTALL_ROOT}" <<'PYSET'
+import json
+import sys
+from pathlib import Path
+settings = {}
+for name in ("settings.json", "settings.local.json"):
+    path = Path(sys.argv[1]) / name
+    if path.exists():
+        settings.update(json.loads(path.read_text(encoding="utf-8")))
+print(settings.get("shop_system", "shopify"))
+PYSET
+)"
+  fi
+  if [[ -z "${SHOP_SYSTEM_VALUE}" ]]; then
+    if [[ "${MODE}" == "update" ]]; then
+      SHOP_SYSTEM_VALUE="${existing}"
+    else
+      SHOP_SYSTEM_VALUE="$(ui_menu "Shopsystem" "Shopsystem waehlen. Vorhandene Datenbanken muessen zum gewaehlten System passen." \
+        "shopify" "Shopify" \
+        "woocommerce" "WooCommerce (separater Datenbank-Sync-Server)")"
+    fi
+  fi
+  case "${SHOP_SYSTEM_VALUE}" in
+    shopify|woocommerce) ;;
+    *) die "Ungueltiges Shopsystem: ${SHOP_SYSTEM_VALUE}" ;;
+  esac
 }
 
 consent_phase() {
@@ -667,7 +705,9 @@ consent_phase() {
     ui_confirm "AGB" "AGB konnten nicht geladen werden. Die URL wurde angezeigt. Trotzdem fortfahren?" || die "Installation abgebrochen: AGB nicht bestaetigt."
   fi
   ui_confirm "AGB" "Ich habe die AGB gelesen und stimme ihnen fuer diese Installation zu." || die "Installation abgebrochen: AGB nicht akzeptiert."
-  ui_confirm "Shopify-Berechtigungen" "Bei lokaler Shopify-Anbindung werden Produkt-, Bestands-, Bestell-, Kunden- und Fulfillment-Berechtigungen verwendet. Fortfahren?" || die "Installation abgebrochen: Shopify-Berechtigungen nicht akzeptiert."
+  if [[ "${SHOP_SYSTEM_VALUE}" == "shopify" && "${MODE}" == "complete" ]]; then
+    ui_confirm "Shopify-Berechtigungen" "Bei lokaler Shopify-Anbindung werden Produkt-, Bestands-, Bestell-, Kunden- und Fulfillment-Berechtigungen verwendet. Fortfahren?" || die "Installation abgebrochen: Shopify-Berechtigungen nicht akzeptiert."
+  fi
 }
 
 choose_target_dir() {
@@ -751,6 +791,7 @@ if settings_path.exists():
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
 
 updates = {
+    "shop_system": sys.argv[9],
     "db_host": sys.argv[2],
     "db_port": int(sys.argv[3]),
     "db_name": sys.argv[4],
@@ -766,7 +807,7 @@ settings.update(updates)
 settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 os.chmod(settings_path, 0o600)
 PY
-  run_logged python3 "${python_script}" "${INSTALL_ROOT}" "${db_host}" "${db_port}" "${db_name}" "${db_user}" "${db_pass}" "${pdf_dir}" "${label_dir}"
+  run_logged python3 "${python_script}" "${INSTALL_ROOT}" "${db_host}" "${db_port}" "${db_name}" "${db_user}" "${db_pass}" "${pdf_dir}" "${label_dir}" "${SHOP_SYSTEM_VALUE}"
   rm -f "${python_script}"
 }
 
@@ -791,8 +832,8 @@ mode = (sys.argv[2] or "single").strip().lower()
 if mode not in {"single", "multi"}:
     mode = "single"
 
-settings["shopify_location_mode"] = mode
-settings["shopify_active_location_id"] = (sys.argv[3] or "").strip()
+settings["shop_location_mode"] = mode
+settings["shop_active_location_id"] = (sys.argv[3] or "").strip()
 settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 os.chmod(settings_path, 0o600)
 PY
@@ -926,7 +967,7 @@ Exec=${LAUNCHER_PATH}
 Icon=${ICON_TARGET}
 Terminal=true
 Categories=Office;Utility;
-Keywords=Lager;Inventar;Shopify;
+Keywords=Lager;Inventar;Shopify;WooCommerce;
 StartupNotify=true
 EOF
 }
@@ -945,10 +986,6 @@ configure_shopify_sync_env() {
 load_shopify_locations_json() {
   local output_path
   output_path="$(mktemp "${TMPDIR:-/tmp}/lager-mc-locations-XXXXXX.json")"
-  if ! run_logged "${VENV_DIR}/bin/python" "${INSTALL_ROOT}/shopify-sync/shopify_sync.py" list-locations --json > /dev/null; then
-    rm -f "${output_path}"
-    return 1
-  fi
   if ! "${VENV_DIR}/bin/python" "${INSTALL_ROOT}/shopify-sync/shopify_sync.py" list-locations --json > "${output_path}" 2>>"${LOG_FILE}"; then
     rm -f "${output_path}"
     return 1
@@ -1037,13 +1074,10 @@ prompt_shopify_location_settings() {
     return
   fi
 
-  if [[ "${SHOPIFY_LOCATION_MODE_VALUE}" == "single" ]]; then
-    select_shopify_location_from_json "${locations_json_path}"
-  else
-    select_shopify_location_from_json "${locations_json_path}"
-  fi
+  select_shopify_location_from_json "${locations_json_path}"
   rm -f "${locations_json_path}"
   write_shopify_location_settings "${SHOPIFY_LOCATION_MODE_VALUE}" "${SHOPIFY_ACTIVE_LOCATION_ID_VALUE}"
+  upsert_env_value "${INSTALL_ROOT}/shopify-sync/.env" "SHOPIFY_LOCATION_ID" "${SHOPIFY_ACTIVE_LOCATION_ID_VALUE}"
 }
 
 run_shopify_connect() {
@@ -1135,7 +1169,9 @@ run_database_migrations() {
 summarize_completion() {
   local message
   message="Installation abgeschlossen.\n\nZielverzeichnis: ${INSTALL_ROOT}\nStarter: ${LAUNCHER_PATH}\nLogdatei: ${LOG_FILE}\nDoku: ${DOC_URL}\nDownloadseite: ${DOWNLOAD_URL}"
-  if [[ "${MODE}" == "complete" ]]; then
+  if [[ "${SHOP_SYSTEM_VALUE}" == "woocommerce" ]]; then
+    message="${message}\n\nShopsystem: WooCommerce. Separaten WooCommerce-Sync-Server einrichten; Lager-MC kommuniziert ueber PostgreSQL."
+  elif [[ "${MODE}" == "complete" ]]; then
     message="${message}\n\nLokale Shopify-Anbindung wurde eingerichtet.\nshopify-sync ist lokal installiert."
   elif [[ "${MODE}" == "workstation" ]]; then
     message="${message}\n\nDiese Installation nutzt einen bereits vorhandenen shopify-sync ueber dieselbe Datenbank. Eine lokale Shopify-Autorisierung wurde uebersprungen."
@@ -1144,7 +1180,9 @@ summarize_completion() {
   fi
   ui_message "Fertig" "${message}"
   printf '\nStarten mit:\n  %s\n\n' "${LAUNCHER_PATH}"
-  printf 'Wenn shopify-sync manuell gestartet werden soll:\n  %s %s/shopify-sync/shopify_sync.py\n\n' "${VENV_DIR}/bin/python" "${INSTALL_ROOT}"
+  if [[ "${SHOP_SYSTEM_VALUE}" == "shopify" ]]; then
+    printf 'Wenn shopify-sync manuell gestartet werden soll:\n  %s %s/shopify-sync/shopify_sync.py\n\n' "${VENV_DIR}/bin/python" "${INSTALL_ROOT}"
+  fi
 }
 
 main() {
@@ -1160,8 +1198,6 @@ main() {
   fi
 
   ui_message "Willkommen" "Der Lager-MC Installer laedt Programmdaten direkt von GitHub und richtet Lager-MC sowie optional shopify-sync auf diesem System ein.\n\nLogdatei: ${LOG_FILE}"
-  ui_progress 8 "Rechtstexte und Zustimmung werden geprueft..."
-  consent_phase
 
   if [[ "${MODE_SET_BY_ARG}" -eq 0 ]]; then
     select_mode_interactively
@@ -1170,6 +1206,9 @@ main() {
   fi
 
   choose_target_dir
+  select_shop_system
+  ui_progress 8 "Rechtstexte und Zustimmung werden geprueft..."
+  consent_phase
 
   if [[ "${MODE}" == "update" && ! -d "${INSTALL_ROOT}" ]]; then
     die "Update/Reparatur wurde gewaehlt, aber das Zielverzeichnis existiert nicht: ${INSTALL_ROOT}"
@@ -1187,7 +1226,12 @@ main() {
   ui_progress 62 "Datenbankdaten werden abgefragt..."
   prompt_db_values
   write_json_settings "${DB_HOST_VALUE}" "${DB_PORT_VALUE}" "${DB_NAME_VALUE}" "${DB_USER_VALUE}" "${DB_PASS_VALUE}" "" ""
-  configure_shopify_sync_env
+  if [[ "${SHOP_SYSTEM_VALUE}" == "shopify" ]]; then
+    configure_shopify_sync_env
+  elif [[ "${MODE}" == "complete" ]]; then
+    run_logged "${VENV_DIR}/bin/python" -m pip install -r "${INSTALL_ROOT}/woocommerce-sync/requirements.txt"
+    run_logged "${VENV_DIR}/bin/python" "${INSTALL_ROOT}/scripts/configure_woocommerce_sync.py"
+  fi
 
   ui_progress 72 "PostgreSQL-Verbindung wird geprueft..."
   if ! test_db_connection "${VENV_DIR}/bin/python"; then
@@ -1198,7 +1242,12 @@ main() {
   prompt_optional_directories
   write_json_settings "${DB_HOST_VALUE}" "${DB_PORT_VALUE}" "${DB_NAME_VALUE}" "${DB_USER_VALUE}" "${DB_PASS_VALUE}" "${PDF_DIR_VALUE}" "${LABEL_DIR_VALUE}"
 
-  if [[ "${MODE}" == "complete" ]]; then
+  ui_progress 82 "Datenbankschema und Shopsystem werden geprueft..."
+  run_database_migrations
+
+  if [[ "${SHOP_SYSTEM_VALUE}" == "woocommerce" ]]; then
+    ui_message "WooCommerce" "Lager-MC ist fuer WooCommerce vorbereitet. Fuer den Sync-Server die Datenbankbruecke als WordPress-Plugin installieren und woocommerce-sync/.env ergaenzen. Anleitung: docs/woocommerce-sync.md."
+  elif [[ "${MODE}" == "complete" ]]; then
     ui_progress 84 "Shopify-Verbindung wird gestartet..."
     run_shopify_connect
     ui_progress 88 "Shopify-Location wird konfiguriert..."
@@ -1207,10 +1256,10 @@ main() {
     ui_message "Arbeitsplatzmodus" "Die lokale Shopify-Autorisierung wird uebersprungen. Es wird davon ausgegangen, dass ein vorhandener shopify-sync bereits dieselbe PostgreSQL-Datenbank bedient."
   fi
 
-  ui_progress 92 "Datenbankschema wird eingerichtet..."
-  run_database_migrations
   ui_progress 100 "Installation abgeschlossen."
   summarize_completion
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

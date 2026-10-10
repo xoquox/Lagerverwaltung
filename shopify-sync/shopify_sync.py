@@ -43,12 +43,13 @@ if str(BASE_DIR) not in sys.path:
 
 from shipping.history import (
     SHIPPING_LABEL_TABLE,
-    claim_shopify_fulfillment_jobs as _claim_shopify_fulfillment_jobs,
-    mark_shopify_fulfillment_job_done as _mark_shopify_fulfillment_job_done,
-    mark_shopify_fulfillment_job_failed as _mark_shopify_fulfillment_job_failed,
-    upsert_shopify_shipment as _upsert_shopify_shipment_record,
+    claim_shop_fulfillment_jobs as _claim_shop_fulfillment_jobs,
+    mark_shop_fulfillment_job_done as _mark_shop_fulfillment_job_done,
+    mark_shop_fulfillment_job_failed as _mark_shop_fulfillment_job_failed,
+    upsert_shop_shipment as _upsert_shop_shipment_record,
 )
 from shipping.schema import apply_app_schema, collect_schema_issues
+from shipping.shop import assert_shop_system
 from sync_version import SYNC_VERSION
 
 load_dotenv()
@@ -71,7 +72,7 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
 API_VERSION = "2026-04"
-SHOPIFY_LOCATION_ID = str(os.getenv("SHOPIFY_LOCATION_ID") or "67402989753").strip()
+SHOPIFY_LOCATION_ID = str(os.getenv("SHOPIFY_LOCATION_ID") or "").strip()
 GRAPHQL_URL = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
 SYNC_INTERVAL = 60
 REQUEST_TIMEOUT_SECONDS = 45
@@ -365,10 +366,10 @@ def _fetch_item_identity_rows(cur, sku, variant_id, inventory_item_id):
         clauses.append("sku = %s")
         params.append(sku)
     if variant_id:
-        clauses.append("shopify_variant_id = %s")
+        clauses.append("shop_variant_id = %s")
         params.append(variant_id)
     if inventory_item_id:
-        clauses.append("shopify_inventory_item_id = %s")
+        clauses.append("shop_inventory_item_id = %s")
         params.append(inventory_item_id)
     if not clauses:
         return []
@@ -419,7 +420,7 @@ def _update_item_sku_references(cur, source_sku, target_sku):
         return
     cur.execute(
         """
-        UPDATE shopify_order_items
+        UPDATE shop_order_items
         SET sku = %s
         WHERE sku = %s
         """,
@@ -505,20 +506,20 @@ def _copy_item_row_to_sku(cur, source_sku, target_sku):
             committed,
             unavailable,
             dirty,
-            shopify_product_id,
-            shopify_variant_id,
-            shopify_inventory_item_id,
+            shop_product_id,
+            shop_variant_id,
+            shop_inventory_item_id,
             barcode,
-            shopify_product_status,
-            shopify_description,
-            shopify_price,
-            shopify_compare_at_price,
-            shopify_unit_cost,
-            shopify_unit_cost_currency,
-            shopify_weight_grams,
-            shopify_product_dirty,
-            shopify_product_sync_action,
-            shopify_product_sync_error,
+            shop_product_status,
+            shop_description,
+            shop_price,
+            shop_compare_at_price,
+            shop_unit_cost,
+            shop_unit_cost_currency,
+            shop_weight_grams,
+            shop_product_dirty,
+            shop_product_sync_action,
+            shop_product_sync_error,
             sync_status,
             last_sync,
             updated_at,
@@ -537,20 +538,20 @@ def _copy_item_row_to_sku(cur, source_sku, target_sku):
             committed,
             unavailable,
             dirty,
-            shopify_product_id,
-            shopify_variant_id,
-            shopify_inventory_item_id,
+            shop_product_id,
+            shop_variant_id,
+            shop_inventory_item_id,
             barcode,
-            shopify_product_status,
-            shopify_description,
-            shopify_price,
-            shopify_compare_at_price,
-            shopify_unit_cost,
-            shopify_unit_cost_currency,
-            shopify_weight_grams,
-            shopify_product_dirty,
-            shopify_product_sync_action,
-            shopify_product_sync_error,
+            shop_product_status,
+            shop_description,
+            shop_price,
+            shop_compare_at_price,
+            shop_unit_cost,
+            shop_unit_cost_currency,
+            shop_weight_grams,
+            shop_product_dirty,
+            shop_product_sync_action,
+            shop_product_sync_error,
             sync_status,
             last_sync,
             NOW(),
@@ -1181,9 +1182,9 @@ def _normalize_product_status(value, fallback="DRAFT"):
 def _product_input_from_row(row, force_status=None):
     product = {
         "title": row["name"],
-        "status": _normalize_product_status(force_status or row.get("shopify_product_status")),
+        "status": _normalize_product_status(force_status or row.get("shop_product_status")),
     }
-    description = (row.get("shopify_description") or "").strip()
+    description = (row.get("shop_description") or "").strip()
     if description:
         product["descriptionHtml"] = description
     return product
@@ -1193,20 +1194,20 @@ def _variant_input_from_row(row, variant_id=None):
     variant = {}
     if variant_id:
         variant["id"] = variant_id
-    if row.get("shopify_price") not in (None, ""):
-        variant["price"] = str(row.get("shopify_price"))
-    if row.get("shopify_compare_at_price") not in (None, ""):
-        variant["compareAtPrice"] = str(row.get("shopify_compare_at_price"))
+    if row.get("shop_price") not in (None, ""):
+        variant["price"] = str(row.get("shop_price"))
+    if row.get("shop_compare_at_price") not in (None, ""):
+        variant["compareAtPrice"] = str(row.get("shop_compare_at_price"))
     if row.get("barcode") not in (None, ""):
         variant["barcode"] = str(row.get("barcode"))
     inventory_item = {"sku": row["display_sku"] or row["sku"], "tracked": True}
-    if row.get("shopify_unit_cost") not in (None, ""):
-        inventory_item["cost"] = str(row.get("shopify_unit_cost"))
-    if row.get("shopify_weight_grams") is not None:
+    if row.get("shop_unit_cost") not in (None, ""):
+        inventory_item["cost"] = str(row.get("shop_unit_cost"))
+    if row.get("shop_weight_grams") is not None:
         inventory_item["measurement"] = {
             "weight": {
                 "unit": "GRAMS",
-                "value": float(row.get("shopify_weight_grams") or 0),
+                "value": float(row.get("shop_weight_grams") or 0),
             }
         }
     variant["inventoryItem"] = inventory_item
@@ -1299,8 +1300,8 @@ def _update_shopify_product(row, product_id, variant_id):
     return {
         "product_id": product_id,
         "variant_id": variant_id,
-        "inventory_item_id": _canonical_inventory_item_id(inventory_item.get("id") or row.get("shopify_inventory_item_id")),
-        "status": (payload.get("product") or {}).get("status") or row.get("shopify_product_status"),
+        "inventory_item_id": _canonical_inventory_item_id(inventory_item.get("id") or row.get("shop_inventory_item_id")),
+        "status": (payload.get("product") or {}).get("status") or row.get("shop_product_status"),
     }
 
 
@@ -1308,8 +1309,8 @@ def _mark_product_sync_failed(cur, sku, error_text):
     cur.execute(
         """
         UPDATE items
-        SET shopify_product_sync_error = %s,
-            sync_status = 'shopify_error',
+        SET shop_product_sync_error = %s,
+            sync_status = 'shop_error',
             updated_at = NOW()
         WHERE sku = %s
         """,
@@ -1327,20 +1328,20 @@ def push_product_changes(limit=20):
             COALESCE(display_sku, sku) AS display_sku,
             name,
             barcode,
-            shopify_product_id,
-            shopify_variant_id,
-            shopify_inventory_item_id,
-            shopify_product_status,
-            shopify_description,
-            shopify_price,
-            shopify_compare_at_price,
-            shopify_unit_cost,
-            shopify_weight_grams,
-            shopify_product_sync_action,
+            shop_product_id,
+            shop_variant_id,
+            shop_inventory_item_id,
+            shop_product_status,
+            shop_description,
+            shop_price,
+            shop_compare_at_price,
+            shop_unit_cost,
+            shop_weight_grams,
+            shop_product_sync_action,
             menge,
             available
         FROM items
-        WHERE COALESCE(shopify_product_dirty, FALSE) = TRUE
+        WHERE COALESCE(shop_product_dirty, FALSE) = TRUE
         ORDER BY updated_at, sku
         LIMIT %s
         """,
@@ -1358,29 +1359,29 @@ def push_product_changes(limit=20):
             "display_sku": raw_row[1],
             "name": raw_row[2],
             "barcode": raw_row[3],
-            "shopify_product_id": raw_row[4],
-            "shopify_variant_id": raw_row[5],
-            "shopify_inventory_item_id": raw_row[6],
-            "shopify_product_status": raw_row[7],
-            "shopify_description": raw_row[8],
-            "shopify_price": raw_row[9],
-            "shopify_compare_at_price": raw_row[10],
-            "shopify_unit_cost": raw_row[11],
-            "shopify_weight_grams": raw_row[12],
-            "shopify_product_sync_action": raw_row[13],
+            "shop_product_id": raw_row[4],
+            "shop_variant_id": raw_row[5],
+            "shop_inventory_item_id": raw_row[6],
+            "shop_product_status": raw_row[7],
+            "shop_description": raw_row[8],
+            "shop_price": raw_row[9],
+            "shop_compare_at_price": raw_row[10],
+            "shop_unit_cost": raw_row[11],
+            "shop_weight_grams": raw_row[12],
+            "shop_product_sync_action": raw_row[13],
             "menge": raw_row[14],
             "available": raw_row[15],
         }
         sku = row["sku"]
         display_sku = row["display_sku"] or sku
-        action = (row.get("shopify_product_sync_action") or "").strip().lower()
+        action = (row.get("shop_product_sync_action") or "").strip().lower()
         try:
-            if action == "create" or not row.get("shopify_product_id"):
+            if action == "create" or not row.get("shop_product_id"):
                 result = _create_shopify_product(row)
                 if result.get("variant_id"):
                     result = _update_shopify_product(row, result["product_id"], result["variant_id"])
             else:
-                result = _update_shopify_product(row, row["shopify_product_id"], row["shopify_variant_id"])
+                result = _update_shopify_product(row, row["shop_product_id"], row["shop_variant_id"])
         except Exception as exc:
             _mark_product_sync_failed(cur, sku, str(exc))
             log_error("Shopify Produkt-Sync Fehler sku=%s error=%s", display_sku, shorten_text(exc))
@@ -1389,13 +1390,13 @@ def push_product_changes(limit=20):
         cur.execute(
             """
             UPDATE items
-            SET shopify_product_id = %s,
-                shopify_variant_id = %s,
-                shopify_inventory_item_id = %s,
-                shopify_product_status = %s,
-                shopify_product_dirty = FALSE,
-                shopify_product_sync_action = NULL,
-                shopify_product_sync_error = NULL,
+            SET shop_product_id = %s,
+                shop_variant_id = %s,
+                shop_inventory_item_id = %s,
+                shop_product_status = %s,
+                shop_product_dirty = FALSE,
+                shop_product_sync_action = NULL,
+                shop_product_sync_error = NULL,
                 sync_status = 'ok',
                 last_sync = NOW(),
                 updated_at = NOW()
@@ -1405,7 +1406,7 @@ def push_product_changes(limit=20):
                 result.get("product_id"),
                 result.get("variant_id"),
                 result.get("inventory_item_id"),
-                _normalize_product_status(result.get("status"), fallback=row.get("shopify_product_status")),
+                _normalize_product_status(result.get("status"), fallback=row.get("shop_product_status")),
                 sku,
             ),
         )
@@ -1519,7 +1520,7 @@ def get_all_product_variants():
         time.sleep(0.5)
 
 
-def get_shopify_locations():
+def get_shop_locations():
     query = """
     query LocationsPage($after: String) {
       locations(first: 100, after: $after) {
@@ -1562,7 +1563,7 @@ def get_shopify_locations():
 
 def build_locations_payload():
     rows = []
-    for entry in get_shopify_locations():
+    for entry in get_shop_locations():
         location_id = (entry.get("location_id") or "").strip()
         rows.append(
             {
@@ -1737,11 +1738,11 @@ def push_inventory_changes():
             COALESCE(i.display_sku, i.sku) AS display_sku,
             ili.location_id,
             ili.available,
-            i.shopify_inventory_item_id
+            i.shop_inventory_item_id
         FROM item_location_inventory ili
         JOIN items i ON i.sku = ili.sku
         WHERE ili.dirty = TRUE
-          AND i.shopify_inventory_item_id IS NOT NULL
+          AND i.shop_inventory_item_id IS NOT NULL
         """
     )
 
@@ -1833,7 +1834,7 @@ def push_inventory_changes():
             """
             UPDATE items
             SET sync_status = CASE
-                    WHEN COALESCE(shopify_product_dirty, FALSE) = TRUE THEN sync_status
+                    WHEN COALESCE(shop_product_dirty, FALSE) = TRUE THEN sync_status
                     ELSE 'pushed'
                 END,
                 last_sync = NOW(),
@@ -1849,7 +1850,7 @@ def push_inventory_changes():
 
 
 def sync_inventory_levels():
-    locations = get_shopify_locations()
+    locations = get_shop_locations()
     if not locations:
         log_warning("Keine Shopify-Locations geladen")
         return 0
@@ -1863,7 +1864,7 @@ def sync_inventory_levels():
         location_id = location["location_id"]
         cur.execute(
             """
-            INSERT INTO shopify_locations(location_id, name, fulfills_online_orders, is_active, updated_at)
+            INSERT INTO shop_locations(location_id, name, fulfills_online_orders, is_active, updated_at)
             VALUES (%s, %s, %s, %s, NOW())
             ON CONFLICT (location_id)
             DO UPDATE SET
@@ -1914,7 +1915,7 @@ def sync_inventory_levels():
                     %s,
                     NOW()
                 FROM items
-                WHERE items.shopify_inventory_item_id = %s
+                WHERE items.shop_inventory_item_id = %s
                 ON CONFLICT (sku, location_id) DO NOTHING
                 """,
                 (
@@ -1948,7 +1949,7 @@ def sync_inventory_levels():
                         ELSE ili.dirty
                     END
                 FROM items
-                WHERE items.shopify_inventory_item_id = %s
+                WHERE items.shop_inventory_item_id = %s
                   AND ili.sku = items.sku
                   AND ili.location_id = %s
                 """,
@@ -1972,7 +1973,7 @@ def sync_inventory_levels():
                 """
                 SELECT sku
                 FROM items
-                WHERE shopify_inventory_item_id = %s
+                WHERE shop_inventory_item_id = %s
                 """,
                 (inventory_item_id,),
             )
@@ -1989,7 +1990,7 @@ def sync_inventory_levels():
         """
         UPDATE items
         SET sync_status = CASE
-                WHEN COALESCE(shopify_product_dirty, FALSE) = TRUE THEN sync_status
+                WHEN COALESCE(shop_product_dirty, FALSE) = TRUE THEN sync_status
                 ELSE 'ok'
             END,
             last_sync = NOW(),
@@ -2049,17 +2050,17 @@ def sync_products():
                 unavailable,
                 committed,
                 reserved,
-                shopify_product_id,
-                shopify_variant_id,
-                shopify_inventory_item_id,
+                shop_product_id,
+                shop_variant_id,
+                shop_inventory_item_id,
                 barcode,
-                shopify_product_status,
-                shopify_description,
-                shopify_price,
-                shopify_compare_at_price,
-                shopify_unit_cost,
-                shopify_unit_cost_currency,
-                shopify_weight_grams,
+                shop_product_status,
+                shop_description,
+                shop_price,
+                shop_compare_at_price,
+                shop_unit_cost,
+                shop_unit_cost_currency,
+                shop_weight_grams,
                 sync_status,
                 last_sync,
                 updated_at
@@ -2068,11 +2069,11 @@ def sync_products():
             ON CONFLICT (sku)
             DO UPDATE SET
                 name = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.name
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.name
                     ELSE EXCLUDED.name
                 END,
                 display_sku = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.display_sku
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.display_sku
                     ELSE EXCLUDED.display_sku
                 END,
                 menge = CASE
@@ -2086,44 +2087,44 @@ def sync_products():
                 unavailable = COALESCE(items.unavailable, EXCLUDED.unavailable),
                 committed = COALESCE(items.committed, EXCLUDED.committed),
                 reserved = COALESCE(items.reserved, EXCLUDED.reserved),
-                shopify_product_id = EXCLUDED.shopify_product_id,
-                shopify_variant_id = EXCLUDED.shopify_variant_id,
-                shopify_inventory_item_id = EXCLUDED.shopify_inventory_item_id,
+                shop_product_id = EXCLUDED.shop_product_id,
+                shop_variant_id = EXCLUDED.shop_variant_id,
+                shop_inventory_item_id = EXCLUDED.shop_inventory_item_id,
                 barcode = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.barcode
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.barcode
                     ELSE EXCLUDED.barcode
                 END,
-                shopify_product_status = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_product_status
-                    ELSE EXCLUDED.shopify_product_status
+                shop_product_status = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_product_status
+                    ELSE EXCLUDED.shop_product_status
                 END,
-                shopify_description = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_description
-                    ELSE EXCLUDED.shopify_description
+                shop_description = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_description
+                    ELSE EXCLUDED.shop_description
                 END,
-                shopify_price = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_price
-                    ELSE EXCLUDED.shopify_price
+                shop_price = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_price
+                    ELSE EXCLUDED.shop_price
                 END,
-                shopify_compare_at_price = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_compare_at_price
-                    ELSE EXCLUDED.shopify_compare_at_price
+                shop_compare_at_price = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_compare_at_price
+                    ELSE EXCLUDED.shop_compare_at_price
                 END,
-                shopify_unit_cost = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_unit_cost
-                    ELSE EXCLUDED.shopify_unit_cost
+                shop_unit_cost = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_unit_cost
+                    ELSE EXCLUDED.shop_unit_cost
                 END,
-                shopify_unit_cost_currency = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_unit_cost_currency
-                    ELSE EXCLUDED.shopify_unit_cost_currency
+                shop_unit_cost_currency = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_unit_cost_currency
+                    ELSE EXCLUDED.shop_unit_cost_currency
                 END,
-                shopify_weight_grams = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_weight_grams
-                    ELSE EXCLUDED.shopify_weight_grams
+                shop_weight_grams = CASE
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_weight_grams
+                    ELSE EXCLUDED.shop_weight_grams
                 END,
                 last_sync = NOW(),
                 sync_status = CASE
-                    WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.sync_status
+                    WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.sync_status
                     ELSE 'ok'
                 END,
                 updated_at = NOW(),
@@ -2304,13 +2305,13 @@ def sync_customers():
     customers = get_all_customers()
     con = db()
     cur = con.cursor()
-    cur.execute("TRUNCATE TABLE shopify_customers")
+    cur.execute("TRUNCATE TABLE shop_customers")
 
     for customer in customers:
         default_address = customer.get("defaultAddress") or {}
         cur.execute(
             """
-            INSERT INTO shopify_customers (
+            INSERT INTO shop_customers (
                 customer_id,
                 first_name,
                 last_name,
@@ -2365,36 +2366,36 @@ def sync_orders():
     cur = con.cursor()
     cur.execute(
         """
-        DELETE FROM shopify_fulfillment_order_items foi
-        USING shopify_orders so
+        DELETE FROM shop_fulfillment_order_items foi
+        USING shop_orders so
         WHERE foi.order_id = so.order_id
           AND COALESCE(so.source, 'shopify') = 'shopify'
         """
     )
     cur.execute(
         """
-        DELETE FROM shopify_fulfillment_orders fo
-        USING shopify_orders so
+        DELETE FROM shop_fulfillment_orders fo
+        USING shop_orders so
         WHERE fo.order_id = so.order_id
           AND COALESCE(so.source, 'shopify') = 'shopify'
         """
     )
     cur.execute(
         """
-        DELETE FROM shopify_order_items oi
-        USING shopify_orders so
+        DELETE FROM shop_order_items oi
+        USING shop_orders so
         WHERE oi.order_id = so.order_id
           AND COALESCE(so.source, 'shopify') = 'shopify'
         """
     )
-    cur.execute("DELETE FROM shopify_orders WHERE COALESCE(source, 'shopify') = 'shopify'")
+    cur.execute("DELETE FROM shop_orders WHERE COALESCE(source, 'shopify') = 'shopify'")
 
     for order in orders:
         shipping = order.get("shippingAddress") or {}
 
         cur.execute(
             """
-            INSERT INTO shopify_orders (
+            INSERT INTO shop_orders (
                 order_id,
                 order_name,
                 created_at,
@@ -2433,7 +2434,7 @@ def sync_orders():
         for index, line_item in enumerate(order["lineItems"]["nodes"], start=1):
             cur.execute(
                 """
-                INSERT INTO shopify_order_items (
+                INSERT INTO shop_order_items (
                     order_id,
                     line_index,
                     order_line_item_id,
@@ -2460,7 +2461,7 @@ def sync_orders():
             if location_id:
                 cur.execute(
                     """
-                    INSERT INTO shopify_locations(location_id, name, fulfills_online_orders, is_active, updated_at)
+                    INSERT INTO shop_locations(location_id, name, fulfills_online_orders, is_active, updated_at)
                     VALUES (%s,%s,%s,%s,NOW())
                     ON CONFLICT (location_id)
                     DO UPDATE SET
@@ -2478,7 +2479,7 @@ def sync_orders():
                 )
             cur.execute(
                 """
-                INSERT INTO shopify_fulfillment_orders (
+                INSERT INTO shop_fulfillment_orders (
                     fulfillment_order_id,
                     order_id,
                     assigned_location_id,
@@ -2501,7 +2502,7 @@ def sync_orders():
         for line in fulfillment_order_items_payload:
             cur.execute(
                 """
-                INSERT INTO shopify_fulfillment_order_items (
+                INSERT INTO shop_fulfillment_order_items (
                     fulfillment_order_line_item_id,
                     fulfillment_order_id,
                     order_id,
@@ -2657,7 +2658,7 @@ def upsert_shopify_shipment(cur, order, fulfillment, tracking):
     carrier = _normalize_carrier_name(tracking.get("company"))
     parcel_number = tracking_number if tracking_number.isdigit() else None
     created_at = fulfillment.get("createdAt") or datetime.datetime.now(datetime.timezone.utc)
-    _upsert_shopify_shipment_record(
+    _upsert_shop_shipment_record(
         cur,
         carrier=carrier,
         order_id=order["id"],
@@ -2669,6 +2670,7 @@ def upsert_shopify_shipment(cur, order, fulfillment, tracking):
         fulfillment_id=fulfillment_id,
         tracking_url=tracking_url,
         created_at=created_at,
+        source="shopify",
     )
 
 
@@ -2849,7 +2851,7 @@ def create_fulfillment(order_id, tracking_number, company, tracking_url=None, no
 
 
 def claim_fulfillment_jobs(limit=20):
-    return _claim_shopify_fulfillment_jobs(
+    return _claim_shop_fulfillment_jobs(
         db,
         cursor_factory=psycopg2.extras.RealDictCursor,
         limit=limit,
@@ -2857,11 +2859,11 @@ def claim_fulfillment_jobs(limit=20):
 
 
 def mark_fulfillment_job_done(job_id, label_id, fulfillment_id, status):
-    return _mark_shopify_fulfillment_job_done(db, job_id, label_id, fulfillment_id, status)
+    return _mark_shop_fulfillment_job_done(db, job_id, label_id, fulfillment_id, status)
 
 
 def mark_fulfillment_job_failed(job_id, label_id, message):
-    return _mark_shopify_fulfillment_job_failed(db, job_id, label_id, message)
+    return _mark_shop_fulfillment_job_failed(db, job_id, label_id, message)
 
 
 def process_fulfillment_jobs(limit=20):
@@ -2902,6 +2904,16 @@ def process_fulfillment_jobs(limit=20):
     return success_count, failed_count
 
 
+def verify_shop_database():
+    con = db()
+    cur = con.cursor()
+    try:
+        assert_shop_system(cur, "shopify")
+    finally:
+        cur.close()
+        con.close()
+
+
 def run_sync_loop():
     issues = database_schema_issues()
     if issues:
@@ -2909,8 +2921,10 @@ def run_sync_loop():
             "DB Migration noetig. run_db_migrations.py ausfuehren. "
             + "; ".join(issues[:5])
         )
+    verify_shop_database()
     update_service_runtime_state(status="idle", mark_seen=True, clear_error=True)
     while True:
+        verify_shop_database()
         run_started_at = time.monotonic()
         update_service_runtime_state(status="running", mark_seen=True, mark_started=True, clear_error=True)
         log_info(
@@ -3009,6 +3023,7 @@ def main():
         print(json.dumps({"shop": result["shop"], "connected": True}, ensure_ascii=False))
         return
     if args.command == "fulfill":
+        verify_shop_database()
         result = create_fulfillment(
             order_id=args.order_id,
             tracking_number=args.tracking_number,

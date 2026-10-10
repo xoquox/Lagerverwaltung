@@ -2,11 +2,14 @@
 import json
 from pathlib import Path
 
+from shipping.shop import normalize_shop_system
+
 
 SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
 LOCAL_SETTINGS_PATH = Path(__file__).resolve().parent / "settings.local.json"
 
 DEFAULT_SETTINGS = {
+    "shop_system": "shopify",
     "db_host": "localhost",
     "db_port": 5432,
     "db_connect_timeout": 5,
@@ -60,12 +63,12 @@ DEFAULT_SETTINGS = {
     "shipping_services": ["service_flexdelivery"],
     "manual_label_default_country": "DE",
     "shipping_packaging_weight_grams": 400,
-    "shopify_location_mode": "single",
-    "shopify_tracking_mode_gls": "company",
-    "shopify_tracking_mode_post": "company_and_url",
-    "shopify_tracking_url_gls": "",
-    "shopify_tracking_url_post": "https://www.deutschepost.de/sendung/simpleQuery.html?form.sendungsnummer={tracking_number}",
-    "shopify_active_location_id": "",
+    "shop_location_mode": "single",
+    "shop_tracking_mode_gls": "company",
+    "shop_tracking_mode_post": "company_and_url",
+    "shop_tracking_url_gls": "",
+    "shop_tracking_url_post": "https://www.deutschepost.de/sendung/simpleQuery.html?form.sendungsnummer={tracking_number}",
+    "shop_active_location_id": "",
     "gls_api_url": "",
     "gls_user": "",
     "gls_password": "",
@@ -87,9 +90,21 @@ def _load_json(path):
         return json.load(handle)
 
 
+def migrate_shop_settings(raw_settings):
+    """Read legacy configuration without rewriting a user's files on startup."""
+    raw = dict(raw_settings or {})
+    for key in list(raw):
+        if key.startswith("shopify_"):
+            raw.setdefault("shop_" + key[len("shopify_"):], raw[key])
+            del raw[key]
+    if "shop_system" in raw:
+        raw["shop_system"] = normalize_shop_system(raw["shop_system"])
+    return raw
+
+
 def _normalized_settings(raw_settings):
     settings = DEFAULT_SETTINGS.copy()
-    settings.update(raw_settings or {})
+    settings.update(migrate_shop_settings(raw_settings))
     return settings
 
 
@@ -100,7 +115,7 @@ def load_settings():
             handle.write("\n")
 
     project_settings = _normalized_settings(_load_json(SETTINGS_PATH))
-    local_settings = _load_json(LOCAL_SETTINGS_PATH)
+    local_settings = migrate_shop_settings(_load_json(LOCAL_SETTINGS_PATH))
     settings = _normalized_settings(project_settings)
     settings.update(local_settings)
 

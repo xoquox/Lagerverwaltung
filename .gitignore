@@ -25,3 +25,5 @@ webspace/
 fonts/
 .codex
 .codex/
+woocommerce-sync/.env
+woocommerce-sync/logs/

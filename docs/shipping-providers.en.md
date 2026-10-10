@@ -29,7 +29,7 @@ Per-carrier fields include:
 - `label`
 - `short_label`
 - `default_format`
-- `shopify_allowed`
+- `shop_allowed`
 - `option_mode`
 - related settings fields for printer, format, tracking mode, tracking URL and optional template
 - additional settings fields for carrier-specific credentials
@@ -41,10 +41,10 @@ Shared data handling is implemented in [shipping/history.py](/home/chrisi/Lagerv
 It covers:
 
 - schema and migration for `shipping_labels`
-- schema and migration for `shopify_fulfillment_jobs`
+- schema and migration for `shop_fulfillment_jobs`
 - loading, writing and updating shipping labels
-- creating and updating Shopify fulfillment jobs
-- upserting shipments imported from Shopify
+- creating and updating shop fulfillment jobs
+- upserting shipments imported from the shop
 
 This logic is used by both the TUI and the Shopify sync process.
 
@@ -74,11 +74,11 @@ Current modes:
 
 New carriers can define their own mode or work without an extra selection dialog.
 
-## Shopify handover
+## Shop handover
 
-Carriers with `shopify_allowed=True` can be handed over to Shopify.
+Carriers with `shop_allowed=True` can be handed over to the shop through the database.
 
-The Shopify handover uses:
+The shop handover uses:
 
 - tracking number
 - carrier name

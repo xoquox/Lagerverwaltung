@@ -53,7 +53,7 @@ class OrdersDialogState:
 
 
 def order_open_hint(order):
-    location_count = int(order.get("shopify_location_count") or 0)
+    location_count = int(order.get("shop_location_count") or 0)
     if location_count > 0:
         return "[!]" if int(order.get("active_location_remaining_qty") or 0) > 0 else "   "
     status_value = (order.get("fulfillment_status") or "").strip().lower()
@@ -136,15 +136,15 @@ def build_order_detail_lines(
     internal_qty = selected_order.get("local_internal_qty") or 0
     active_location_qty = int(selected_order.get("active_location_internal_qty") or 0)
     active_location_remaining_qty = int(selected_order.get("active_location_remaining_qty") or 0)
-    shopify_location_count = int(selected_order.get("shopify_location_count") or 0)
+    shop_location_count = int(selected_order.get("shop_location_count") or 0)
     detail_lines.append(fit_text(translate("orders_detail_status", value=status), right_width - 2))
     detail_lines.append(fit_text(translate("orders_detail_payment", value=payment_status), right_width - 2))
     detail_lines.append(fit_text(translate("orders_detail_internal_qty", value=internal_qty), right_width - 2))
-    detail_lines.append(fit_text(translate("orders_detail_shopify_location", value=active_location_label), right_width - 2))
+    detail_lines.append(fit_text(translate("orders_detail_shop_location", value=active_location_label), right_width - 2))
     detail_lines.append(fit_text(translate("orders_detail_location_qty", value=active_location_qty), right_width - 2))
     detail_lines.append(fit_text(translate("orders_detail_location_open_qty", value=active_location_remaining_qty), right_width - 2))
-    if shopify_location_count > 1:
-        detail_lines.append(fit_text(translate("orders_detail_location_split", value=shopify_location_count), right_width - 2))
+    if shop_location_count > 1:
+        detail_lines.append(fit_text(translate("orders_detail_location_split", value=shop_location_count), right_width - 2))
     detail_lines.append(
         fit_text(
             translate("orders_detail_shipping_weight", grams=selected_weight_grams, kg=selected_weight_kg),
@@ -174,7 +174,7 @@ def build_order_detail_lines(
         detail_lines.append(fit_text(translate("orders_detail_positions_loading"), right_width - 2))
         return detail_lines
 
-    if not order_items and shopify_location_count > 0:
+    if not order_items and shop_location_count > 0:
         detail_lines.append(fit_text(translate("orders_detail_no_location_positions"), right_width - 2))
     for row in order_items:
         detail_lines.append(format_order_item_row(row, right_width - 2))

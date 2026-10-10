@@ -4,14 +4,19 @@
 
 # Lager-MC
 
-Terminalbasierte Lager- und Versandsoftware mit Lagerplatzpflege, Bestellansicht, Inventur, Shopify-Anbindung und Versandabwicklung.
+Terminalbasierte Lager- und Versandsoftware mit Lagerplatzpflege, Bestellansicht, Inventur, waehlbarem Shopsystem und Versandabwicklung.
+
+Shopify und WooCommerce sind ueber separate Sync-Server angebunden. Lager-MC
+kommuniziert mit dem Shop ausschliesslich ueber PostgreSQL. Der WooCommerce-Worker
+verwendet eine Datenbankbruecke in WordPress; Einrichtung und Funktionsgrenzen:
+[WooCommerce-Sync](docs/woocommerce-sync.md).
 
 Lizenz: [MIT](/home/chrisi/Lagerverwaltung/LICENSE)
 
 ## Kernfunktionen
 
 - Artikel, Lagerplaetze und Bestandsmengen pflegen
-- Bestellungen aus Shopify einlesen und im Auftragsfenster bearbeiten
+- Bestellungen aus der Shop-Datenbank einlesen und im Auftragsfenster bearbeiten
 - Picklisten, Lieferscheine und Versandlabels erzeugen
 - Versand mit GLS, Deutsche Post INTERNETMARKE und Adresslabels
 - Teilausfuehrung, Bulk-Ausfuehrung und Versandhistory
@@ -29,9 +34,11 @@ Zusaetzlich vorhanden:
 
 - `Adresslabel` fuer interne Labels ohne Carrier-API
 
-Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shopify-Anbindung.
+Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shop-Anbindung.
 
 ## Dokumentation
+
+- Shopauswahl, Migration und Sync-Vertrag: [docs/shop-systeme.md](docs/shop-systeme.md)
 
 - Bedienungsanleitung: [docs/bedienungsanleitung.md](/home/chrisi/Lagerverwaltung/docs/bedienungsanleitung.md)
 - Versand-Integrationsdoku: [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md)

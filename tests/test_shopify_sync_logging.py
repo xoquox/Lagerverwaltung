@@ -49,6 +49,22 @@ class ShopifySyncLoggingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.shopify_sync = load_shopify_sync_module()
+        cls.shopify_sync.SHOPIFY_LOCATION_ID = "67402989753"
+
+    def test_wrong_database_stops_sync_before_any_shop_api_request(self):
+        connection = mock.Mock()
+        connection.cursor.return_value.fetchone.return_value = ("woocommerce",)
+        with (
+            mock.patch.object(self.shopify_sync, "database_schema_issues", return_value=[]),
+            mock.patch.object(self.shopify_sync, "db", return_value=connection),
+            mock.patch.object(self.shopify_sync, "graphql_request") as request,
+            mock.patch.object(self.shopify_sync, "update_service_runtime_state") as heartbeat,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Shopsystem passt nicht"):
+                self.shopify_sync.run_sync_loop()
+        request.assert_not_called()
+        heartbeat.assert_not_called()
+        connection.close.assert_called_once()
 
     def test_resolve_sync_base_dir_uses_app_dir_in_repo_layout(self):
         script_path = ROOT / "shopify-sync" / "shopify_sync.py"
@@ -349,9 +365,9 @@ class ShopifySyncLoggingTests(unittest.TestCase):
                 count = self.shopify_sync.sync_customers()
 
         self.assertEqual(count, 1)
-        self.assertTrue(any("TRUNCATE TABLE shopify_customers" in query for query, _ in executed))
-        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shopify_customers" in q)
-        self.assertIn("INSERT INTO shopify_customers", insert_query)
+        self.assertTrue(any("TRUNCATE TABLE shop_customers" in query for query, _ in executed))
+        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shop_customers" in q)
+        self.assertIn("INSERT INTO shop_customers", insert_query)
         self.assertEqual(insert_params[0], "gid://shopify/Customer/1")
         self.assertEqual(insert_params[3], "Max Mustermann")
         self.assertEqual(insert_params[7], "Musterstr. 1")
@@ -402,9 +418,9 @@ class ShopifySyncLoggingTests(unittest.TestCase):
                 count = self.shopify_sync.sync_orders()
 
         self.assertEqual(count, 1)
-        self.assertFalse(any("TRUNCATE TABLE shopify_fulfillment_order_items" in query for query, _ in executed))
-        self.assertTrue(any("DELETE FROM shopify_orders WHERE COALESCE(source, 'shopify') = 'shopify'" in query for query, _ in executed))
-        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shopify_orders" in q)
+        self.assertFalse(any("TRUNCATE TABLE shop_fulfillment_order_items" in query for query, _ in executed))
+        self.assertTrue(any("DELETE FROM shop_orders WHERE COALESCE(source, 'shopify') = 'shopify'" in query for query, _ in executed))
+        insert_query, insert_params = next((q, p) for q, p in executed if "INSERT INTO shop_orders" in q)
         self.assertIn("source", insert_query)
         self.assertEqual(insert_params[5], "Firma")
         self.assertEqual(insert_query.count("%s"), len(insert_params))
@@ -568,7 +584,7 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         variant = graphql_mock.call_args_list[2].args[1]["variants"][0]
         self.assertEqual(variant["inventoryItem"]["sku"], "SKU-LOCAL")
         self.assertEqual(variant["inventoryItem"]["tracked"], True)
-        self.assertTrue(any("shopify_product_dirty = FALSE" in query for query, _ in executed))
+        self.assertTrue(any("shop_product_dirty = FALSE" in query for query, _ in executed))
         self.assertTrue(any("INSERT INTO item_location_inventory" in query for query, _ in executed))
 
     def test_sync_products_writes_graphql_variant_fields(self):
@@ -635,8 +651,8 @@ class ShopifySyncLoggingTests(unittest.TestCase):
         self.assertEqual(insert_params[16], "12.50")
         self.assertEqual(insert_params[17], "EUR")
         self.assertEqual(insert_params[18], 250)
-        self.assertIn("WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.name", insert_query)
-        self.assertIn("WHEN COALESCE(items.shopify_product_dirty, FALSE) = TRUE THEN items.shopify_price", insert_query)
+        self.assertIn("WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.name", insert_query)
+        self.assertIn("WHEN COALESCE(items.shop_product_dirty, FALSE) = TRUE THEN items.shop_price", insert_query)
 
     def test_sync_products_reconciles_existing_variant_row_before_upsert(self):
         executed = []

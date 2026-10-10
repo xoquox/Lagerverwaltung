@@ -210,8 +210,8 @@ class BundleScriptTests(unittest.TestCase):
                         "db_host": "bundle-db",
                         "shipping_active_carriers": ["free", "post"],
                         "free_label_template_path": str(free_template),
-                        "shopify_tracking_mode_post": "company_and_url",
-                        "shopify_tracking_url_post": "https://post.example/{tracking_number}",
+                        "shop_tracking_mode_post": "company_and_url",
+                        "shop_tracking_url_post": "https://post.example/{tracking_number}",
                         "shipping_label_printer_gls": "SOURCE-PRINTER",
                     }
                 ),
@@ -246,8 +246,8 @@ class BundleScriptTests(unittest.TestCase):
             imported = json.loads((target_root / "settings.local.json").read_text(encoding="utf-8"))
             self.assertEqual(imported["db_host"], "bundle-db")
             self.assertEqual(imported["shipping_active_carriers"], ["free", "post"])
-            self.assertEqual(imported["shopify_tracking_mode_post"], "company_and_url")
-            self.assertEqual(imported["shopify_tracking_url_post"], "https://post.example/{tracking_number}")
+            self.assertEqual(imported["shop_tracking_mode_post"], "company_and_url")
+            self.assertEqual(imported["shop_tracking_url_post"], "https://post.example/{tracking_number}")
             self.assertEqual(imported["shipping_label_printer_gls"], "LOCAL-PRINTER")
             self.assertTrue((target_root / "templates" / "free_label_template.html").is_file())
             self.assertEqual(
@@ -269,7 +269,7 @@ class ShippingHistorySchemaTests(unittest.TestCase):
 
 
 class ShopifySyncShippingMirrorTests(unittest.TestCase):
-    def test_shopify_sync_shipping_sources_match_shared_sources(self):
+    def test_shop_sync_shipping_sources_match_shared_sources(self):
         for relative_path in ("history.py", "schema.py"):
             with self.subTest(relative_path=relative_path):
                 shared_source = (ROOT / "shipping" / relative_path).read_text(encoding="utf-8")
@@ -300,14 +300,14 @@ class UiHelperTests(unittest.TestCase):
             {
                 "order_id": "1",
                 "order_name": "2026-1",
-                "shopify_location_count": 1,
+                "shop_location_count": 1,
                 "active_location_remaining_qty": 2,
                 "fulfillment_status": "fulfilled",
             },
             {
                 "order_id": "2",
                 "order_name": "2026-2",
-                "shopify_location_count": 0,
+                "shop_location_count": 0,
                 "active_location_remaining_qty": 0,
                 "fulfillment_status": "fulfilled",
             },
@@ -353,9 +353,9 @@ class DatabaseSchemaTests(unittest.TestCase):
         queries = "\n".join(query for query, _ in cursor.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS items", queries)
         self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS external_fulfillment", queries)
-        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_dirty", queries)
-        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_sync_action", queries)
-        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shopify_product_sync_error", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shop_product_dirty", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shop_product_sync_action", queries)
+        self.assertIn("ALTER TABLE items ADD COLUMN IF NOT EXISTS shop_product_sync_error", queries)
         self.assertIn("CREATE TABLE IF NOT EXISTS inventory_sessions", queries)
         self.assertIn("CREATE TABLE IF NOT EXISTS inventory_lines", queries)
 
@@ -403,7 +403,7 @@ class DatabaseSchemaTests(unittest.TestCase):
     def test_probe_database_ready_verbose_reports_progress(self):
         lager_mc = load_lager_mc()
         progress_calls = []
-        cursor = FakeCursor()
+        cursor = FakeCursor(fetchone_results=[{"shop_system": "shopify"}])
         con = FakeConnection(cursor)
 
         with (
@@ -473,7 +473,7 @@ class MigrationScriptTests(unittest.TestCase):
             result = script.main()
 
         self.assertEqual(result, 0)
-        apply_mock.assert_called_once_with(cursor)
+        apply_mock.assert_called_once_with(cursor, "shopify")
         self.assertTrue(connection.committed)
 
     def test_ensure_database_exists_creates_missing_database(self):
@@ -820,7 +820,7 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertEqual(rows[2]["item"]["sku"], "SKU-1")
         self.assertEqual(rows[4]["item"]["sku"], "SKU-2")
 
-    def test_format_row_marks_pending_shopify_product_sync_dirty(self):
+    def test_format_row_marks_pending_shop_product_sync_dirty(self):
         row = {
             "sku": "P189",
             "display_sku": "P189",
@@ -833,8 +833,8 @@ class LagerMcLogicTests(unittest.TestCase):
             "committed": 0,
             "available": 1,
             "dirty": False,
-            "sync_status": "shopify_error",
-            "shopify_product_dirty": True,
+            "sync_status": "shop_error",
+            "shop_product_dirty": True,
         }
 
         self.assertTrue(self.lager_mc.format_row(row).rstrip().endswith("D"))
@@ -1056,22 +1056,22 @@ class LagerMcLogicTests(unittest.TestCase):
 
             self.assertTrue(path.startswith(tmpdir))
 
-    def test_build_item_info_lines_includes_shopify_fields(self):
+    def test_build_item_info_lines_includes_shop_fields(self):
         item = {
             "sku": "A-1",
             "name": "Alpha",
             "barcode": "4012345678901",
-            "shopify_product_status": "active",
-            "shopify_price": "12.95",
-            "shopify_compare_at_price": "14.95",
-            "shopify_unit_cost": "6.20",
-            "shopify_unit_cost_currency": "EUR",
-            "shopify_weight_grams": 380,
+            "shop_product_status": "active",
+            "shop_price": "12.95",
+            "shop_compare_at_price": "14.95",
+            "shop_unit_cost": "6.20",
+            "shop_unit_cost_currency": "EUR",
+            "shop_weight_grams": 380,
             "sync_status": "ok",
             "regal": "A",
             "fach": "1",
             "platz": "3",
-            "shopify_description": "Beschreibung",
+            "shop_description": "Beschreibung",
         }
 
         lines = self.lager_mc.build_item_info_lines(item)
@@ -1090,20 +1090,20 @@ class LagerMcLogicTests(unittest.TestCase):
         item = {
             "sku": "LOCAL-1",
             "name": "Lokales Teil",
-            "shopify_product_dirty": True,
-            "shopify_product_sync_action": "create",
-            "shopify_product_sync_error": "Fehlertext",
+            "shop_product_dirty": True,
+            "shop_product_sync_action": "create",
+            "shop_product_sync_error": "Fehlertext",
         }
 
         lines = self.lager_mc.build_item_info_lines(item)
 
-        self.assertTrue(any("Shopify Uebertragung" in line for line in lines))
+        self.assertTrue(any("Shop Uebertragung" in line for line in lines))
         self.assertTrue(any("Fehlertext" in line for line in lines))
 
-    def test_clean_shopify_description_strips_html(self):
+    def test_clean_shop_description_strips_html(self):
         html_text = "<p>Text&nbsp;A</p><p>Text<br>B</p><ul><li>Punkt</li></ul>"
 
-        cleaned = self.lager_mc.clean_shopify_description(html_text)
+        cleaned = self.lager_mc.clean_shop_description(html_text)
 
         self.assertEqual(cleaned, "Text A\nText\nB\nPunkt")
 
@@ -1424,9 +1424,9 @@ class LagerMcLogicTests(unittest.TestCase):
     def test_print_log_path_uses_print_log_name(self):
         self.assertEqual(app_logging.PRINT_LOG_PATH.name, "print.log")
 
-    def test_enqueue_shopify_fulfillment_job_blocks_test_and_free_carriers(self):
-        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify gesendet werden"):
-            self.lager_mc.enqueue_shopify_fulfillment_job(
+    def test_enqueue_shop_fulfillment_job_blocks_test_and_free_carriers(self):
+        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shop gesendet werden"):
+            self.lager_mc.enqueue_shop_fulfillment_job(
                 {
                     "id": 7,
                     "order_id": "gid://shopify/Order/1",
@@ -1434,8 +1434,8 @@ class LagerMcLogicTests(unittest.TestCase):
                     "carrier": "test",
                 }
             )
-        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shopify gesendet werden"):
-            self.lager_mc.enqueue_shopify_fulfillment_job(
+        with self.assertRaisesRegex(RuntimeError, "Test- und Adresslabels duerfen nicht an Shop gesendet werden"):
+            self.lager_mc.enqueue_shop_fulfillment_job(
                 {
                     "id": 8,
                     "order_id": "gid://shopify/Order/1",
@@ -1448,10 +1448,10 @@ class LagerMcLogicTests(unittest.TestCase):
         with mock.patch.dict(
             self.lager_mc.SETTINGS,
             {
-                "shopify_tracking_url_gls": "https://gls.example/track/{tracking_number}",
-                "shopify_tracking_url_post": "https://post.example/{number}",
-                "shopify_tracking_mode_gls": "company_and_url",
-                "shopify_tracking_mode_post": "company_and_url",
+                "shop_tracking_url_gls": "https://gls.example/track/{tracking_number}",
+                "shop_tracking_url_post": "https://post.example/{number}",
+                "shop_tracking_mode_gls": "company_and_url",
+                "shop_tracking_mode_post": "company_and_url",
             },
             clear=False,
         ):
@@ -1464,10 +1464,10 @@ class LagerMcLogicTests(unittest.TestCase):
                 "https://post.example/XYZ789",
             )
             self.assertIsNone(
-                self.lager_mc._effective_tracking_url_for_shopify("free", "FREE123")
+                self.lager_mc._effective_tracking_url_for_shop("free", "FREE123")
             )
 
-    def test_partial_execution_skips_shopify_queue_for_free_labels(self):
+    def test_partial_execution_skips_shop_queue_for_free_labels(self):
         order = {"order_id": "OID-1", "order_name": "#1001"}
         selected_items = [{"selected_quantity": 1, "order_line_item_id": "line-1"}]
         created = {
@@ -1485,7 +1485,7 @@ class LagerMcLogicTests(unittest.TestCase):
             mock.patch.object(self.lager_mc, "create_shipping_label", return_value=created),
             mock.patch.object(self.lager_mc, "create_delivery_note_pdf", return_value=("/tmp/note.pdf", [])),
             mock.patch.object(self.lager_mc, "list_shipping_labels") as list_mock,
-            mock.patch.object(self.lager_mc, "enqueue_shopify_fulfillment_job_for_items") as queue_mock,
+            mock.patch.object(self.lager_mc, "enqueue_shop_fulfillment_job_for_items") as queue_mock,
             mock.patch.object(self.lager_mc, "message_box") as message_mock,
         ):
             self.lager_mc.run_partial_execution_for_order(None, order, [{"sku": "A"}])
@@ -1495,7 +1495,7 @@ class LagerMcLogicTests(unittest.TestCase):
         message_mock.assert_called_once()
         self.assertIn("OK:", message_mock.call_args.args[2])
 
-    def test_bulk_execution_skips_shopify_queue_for_free_labels(self):
+    def test_bulk_execution_skips_shop_queue_for_free_labels(self):
         orders = [{"order_id": "OID-1", "order_name": "#1001"}]
         created = {
             "label_id": 55,
@@ -1507,12 +1507,12 @@ class LagerMcLogicTests(unittest.TestCase):
             mock.patch.object(self.lager_mc, "_execution_carrier_dialog", return_value="free"),
             mock.patch.object(self.lager_mc, "_select_shipping_carrier_options", return_value=[]),
             mock.patch.object(self.lager_mc, "_bulk_print_mode_dialog", return_value="none"),
-            mock.patch.object(self.lager_mc, "_bulk_shopify_queue_mode_dialog") as queue_mode_mock,
+            mock.patch.object(self.lager_mc, "_bulk_shop_queue_mode_dialog") as queue_mode_mock,
             mock.patch.object(self.lager_mc, "calculate_order_shipping_weight", return_value=(0.5, 500)),
             mock.patch.object(self.lager_mc, "create_shipping_label", return_value=created),
             mock.patch.object(self.lager_mc, "create_delivery_note_pdf", return_value=("/tmp/note.pdf", [])),
             mock.patch.object(self.lager_mc, "list_shipping_labels") as list_mock,
-            mock.patch.object(self.lager_mc, "enqueue_shopify_fulfillment_job") as queue_mock,
+            mock.patch.object(self.lager_mc, "enqueue_shop_fulfillment_job") as queue_mock,
             mock.patch.object(self.lager_mc, "message_box") as message_mock,
         ):
             self.lager_mc.run_bulk_execution(None, orders, {"OID-1": []}, {"OID-1"})
@@ -1555,24 +1555,24 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertIn("OK:1", message_mock.call_args.args[2])
         self.assertIn("Err:1", message_mock.call_args.args[2])
 
-    def test_get_shopify_customers_snapshot_queries_local_table_and_caches_rows(self):
+    def test_get_shop_customers_snapshot_queries_local_table_and_caches_rows(self):
         fake_rows = [[{"customer_id": "gid://shopify/Customer/1", "display_name": "Max Mustermann"}]]
         cursor = FakeCursor(fetchall_results=fake_rows)
         con = FakeConnection(cursor)
 
         with mock.patch.object(self.lager_mc, "db", return_value=con):
-            self.lager_mc._SHOPIFY_CUSTOMER_CACHE = {"loaded_at": 0.0, "rows": []}
-            rows = self.lager_mc.get_shopify_customers_snapshot(force=True)
-            cached_rows = self.lager_mc.get_shopify_customers_snapshot()
+            self.lager_mc._SHOP_CUSTOMER_CACHE = {"loaded_at": 0.0, "rows": []}
+            rows = self.lager_mc.get_shop_customers_snapshot(force=True)
+            cached_rows = self.lager_mc.get_shop_customers_snapshot()
 
         self.assertEqual(len(rows), 1)
-        self.assertIn("FROM shopify_customers", cursor.executed[0][0])
+        self.assertIn("FROM shop_customers", cursor.executed[0][0])
         self.assertEqual(cached_rows, rows)
         self.assertEqual(rows[0]["display_name"], "Max Mustermann")
         self.assertEqual(len(cursor.executed), 1)
 
-    def test_search_shopify_customers_filters_snapshot_locally(self):
-        self.lager_mc._SHOPIFY_CUSTOMER_CACHE = {
+    def test_search_shop_customers_filters_snapshot_locally(self):
+        self.lager_mc._SHOP_CUSTOMER_CACHE = {
             "loaded_at": time.monotonic(),
             "rows": [
                 {
@@ -1596,8 +1596,8 @@ class LagerMcLogicTests(unittest.TestCase):
             ],
         }
 
-        with mock.patch.object(self.lager_mc, "_load_shopify_customers_snapshot") as load_mock:
-            rows = self.lager_mc.search_shopify_customers("80331", limit=25)
+        with mock.patch.object(self.lager_mc, "_load_shop_customers_snapshot") as load_mock:
+            rows = self.lager_mc.search_shop_customers("80331", limit=25)
 
         load_mock.assert_not_called()
         self.assertEqual(len(rows), 1)
@@ -1791,9 +1791,9 @@ class LagerMcLogicTests(unittest.TestCase):
 
         self.assertEqual(result, "3026-0043")
 
-    def test_custom_order_blocks_shopify_fulfillment_queue(self):
+    def test_custom_order_blocks_shop_fulfillment_queue(self):
         with self.assertRaises(RuntimeError):
-            self.lager_mc.enqueue_shopify_fulfillment_job(
+            self.lager_mc.enqueue_shop_fulfillment_job(
                 {
                     "id": 1,
                     "order_id": "custom-3026-0000",
@@ -1824,7 +1824,7 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(connection.committed)
         adjust_mock.assert_called_once_with(cursor, "SKU-1", "gid://shopify/Location/1", -2)
-        self.assertTrue(any("DELETE FROM shopify_orders" in query for query, _ in cursor.executed))
+        self.assertTrue(any("DELETE FROM shop_orders" in query for query, _ in cursor.executed))
 
     def test_shipping_service_summary_translates_for_english(self):
         with mock.patch.dict(self.lager_mc.SETTINGS, {"language": "en"}, clear=False):
@@ -1876,18 +1876,18 @@ class LagerMcLogicTests(unittest.TestCase):
         self.assertIn("FROM shipping_labels", cursor.executed[0][0])
         self.assertEqual(cursor.executed[0][1], ("OID-1",))
 
-    def test_get_latest_shopify_jobs_for_labels_queries_once(self):
+    def test_get_latest_shop_jobs_for_labels_queries_once(self):
         cursor = FakeCursor(fetchall_results=[[{"label_id": 4, "status": "done"}]])
         connection = FakeConnection(cursor)
 
         with mock.patch.object(self.lager_mc, "db", return_value=connection):
-            rows = self.lager_mc.get_latest_shopify_jobs_for_labels([4, 9])
+            rows = self.lager_mc.get_latest_shop_jobs_for_labels([4, 9])
 
         self.assertEqual(rows[4]["status"], "done")
-        self.assertIn("FROM shopify_fulfillment_jobs", cursor.executed[0][0])
+        self.assertIn("FROM shop_fulfillment_jobs", cursor.executed[0][0])
         self.assertIn("DISTINCT ON (label_id)", cursor.executed[0][0])
 
-    def test_apply_shopify_customer_to_manual_state_fills_address(self):
+    def test_apply_shop_customer_to_manual_state_fills_address(self):
         state = {
             "name": "",
             "address_extra": "",
@@ -1908,7 +1908,7 @@ class LagerMcLogicTests(unittest.TestCase):
             "email": "max@example.com",
         }
 
-        updated, country = self.lager_mc._apply_shopify_customer_to_manual_state(state, customer, "DE")
+        updated, country = self.lager_mc._apply_shop_customer_to_manual_state(state, customer, "DE")
 
         self.assertEqual(updated["name"], "Max Mustermann")
         self.assertEqual(updated["street"], "Musterstr. 1")
@@ -2321,7 +2321,7 @@ https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments
         self.assertEqual(creds["api_url"], "https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments")
 
 
-    def test_format_shopify_sync_status_label_prefers_pull_and_push_times(self):
+    def test_format_shop_sync_status_label_prefers_pull_and_push_times(self):
         row = {
             "status": "ok",
             "last_seen_at": datetime.datetime(2026, 3, 25, 20, 5, tzinfo=datetime.timezone.utc),
@@ -2329,7 +2329,7 @@ https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments
             "last_push_at": datetime.datetime(2026, 3, 25, 20, 3, tzinfo=datetime.timezone.utc),
         }
 
-        label = self.lager_mc.format_shopify_sync_status_label(
+        label = self.lager_mc.format_shop_sync_status_label(
             row=row,
             now=datetime.datetime(2026, 3, 25, 20, 5, tzinfo=datetime.timezone.utc),
         )
@@ -2338,7 +2338,7 @@ https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments
         self.assertIn("In", label)
         self.assertIn("Out", label)
 
-    def test_format_shopify_sync_status_label_marks_stale_and_error(self):
+    def test_format_shop_sync_status_label_marks_stale_and_error(self):
         row = {
             "status": "error",
             "last_seen_at": datetime.datetime(2026, 3, 25, 20, 0, tzinfo=datetime.timezone.utc),
@@ -2346,7 +2346,7 @@ https://shipit-wbm-de04.gls-group.eu:443/backend/rs/shipments
             "last_push_at": None,
         }
 
-        label = self.lager_mc.format_shopify_sync_status_label(
+        label = self.lager_mc.format_shop_sync_status_label(
             row=row,
             now=datetime.datetime(2026, 3, 25, 20, 5, tzinfo=datetime.timezone.utc),
         )

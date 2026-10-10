@@ -11,15 +11,20 @@ DESKTOP_FILE="${APPLICATIONS_DIR}/lager-mc.desktop"
 ICON_TARGET="${ICONS_DIR}/lager-mc.svg"
 BUNDLE_PATH=""
 RUN_MIGRATIONS="ask"
+SHOP_SYSTEM_VALUE=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--bundle <bundle.zip>] [--run-migrations] [--skip-migrations]
+Usage: $(basename "$0") [--shop-system <shopify|woocommerce>] [--bundle <bundle.zip>] [--run-migrations] [--skip-migrations]
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --shop-system)
+      SHOP_SYSTEM_VALUE="${2:-}"
+      shift 2
+      ;;
     --bundle)
       BUNDLE_PATH="${2:-}"
       shift 2
@@ -202,6 +207,12 @@ echo "Installiere Python-Abhaengigkeiten ..."
 
 prompt_bundle_path
 apply_bundle_if_requested
+"${VENV_DIR}/bin/python" "${PROJECT_DIR}/scripts/configure_shop.py" ${SHOP_SYSTEM_VALUE:+--shop-system "${SHOP_SYSTEM_VALUE}"}
+SELECTED_SHOP_SYSTEM="$("${VENV_DIR}/bin/python" -c 'from app_settings import load_settings; print(load_settings()["shop_system"])')"
+if [[ "${SELECTED_SHOP_SYSTEM}" == "woocommerce" ]]; then
+  "${VENV_DIR}/bin/python" -m pip install -r "${PROJECT_DIR}/woocommerce-sync/requirements.txt"
+  "${VENV_DIR}/bin/python" "${PROJECT_DIR}/scripts/configure_woocommerce_sync.py"
+fi
 maybe_run_migrations
 
 mkdir -p "${BIN_DIR}"
@@ -226,7 +237,7 @@ Exec=${LAUNCHER}
 Icon=${ICON_TARGET}
 Terminal=true
 Categories=Office;Utility;
-Keywords=Lager;Inventar;Shopify;
+Keywords=Lager;Inventar;Shopify;WooCommerce;
 StartupNotify=true
 EOF
 

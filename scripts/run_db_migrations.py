@@ -85,7 +85,11 @@ def main():
     con = connect_from_settings(settings)
     cur = con.cursor()
     try:
-        apply_app_schema(cur)
+        apply_app_schema(cur, settings.get("shop_system", "shopify"))
+        if settings.get("shop_system") == "woocommerce":
+            sys.path.insert(0, str(ROOT_DIR / "woocommerce-sync"))
+            from woo_sync.warehouse import migrate
+            migrate(cur)
         con.commit()
         issues = collect_schema_issues(cur)
         if issues:

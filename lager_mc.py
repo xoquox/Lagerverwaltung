@@ -37,7 +37,7 @@ from shipping.carriers import (
     SHIPPING_CARRIER_DEFINITIONS,
     SHIPPING_CARRIER_ORDER,
     ShippingCarrierRuntime,
-    carrier_allows_shopify as _shipping_carrier_allows_shopify,
+    carrier_allows_shop as _shipping_carrier_allows_shop,
     carrier_definition as _shipping_carrier_definition,
     carrier_field_to_code as _shipping_carrier_field_to_code,
     carrier_label as _shipping_carrier_label,
@@ -47,13 +47,13 @@ from shipping.carriers import (
     normalize_active_carriers as _normalize_active_shipping_carriers,
     shipping_active_carrier_values as _shipping_active_carrier_values,
     shipping_carrier_options as _shipping_carrier_options_impl,
-    shopify_tracking_company as _shopify_tracking_company,
+    shop_tracking_company as _shop_tracking_company,
 )
 from shipping.base import normalize_country_code as _shipping_country_code
 from shipping.history import (
     SHIPPING_LABEL_TABLE,
-    find_or_create_shopify_fulfillment_job as _find_or_create_shopify_fulfillment_job,
-    get_latest_shopify_job_for_label as _get_latest_shopify_job_for_label,
+    find_or_create_shop_fulfillment_job as _find_or_create_shop_fulfillment_job,
+    get_latest_shop_job_for_label as _get_latest_shop_job_for_label,
     get_latest_shipping_label_for_order as _get_latest_shipping_label_for_order,
     insert_shipping_label_history as _insert_shipping_label_history,
     list_shipping_labels as _list_shipping_labels,
@@ -68,6 +68,7 @@ from shipping.post import (
 from shipping.runtime import carrier_module as _shipping_carrier_module, carrier_runtime as _shipping_carrier_runtime
 from shipping import free
 from shipping.schema import apply_app_schema, collect_schema_issues
+from shipping.shop import assert_shop_system, shop_system, sync_service
 from ui_orders import (
     OrdersDialogState,
     build_order_detail_lines,
@@ -85,18 +86,18 @@ BASE_DIR = Path(__file__).resolve().parent
 LABEL_PRINT_SCRIPT = str(BASE_DIR / "label_print.py")
 POST_DIR = BASE_DIR / "post"
 POST_LABEL_DIR = POST_DIR / "labels"
-SHOPIFY_SYNC_SERVICE = "shopify-sync"
+SHOP_SYNC_SERVICE = sync_service(SETTINGS.get("shop_system"))
 _SERVICE_RUNTIME_CACHE = {"loaded_at": 0.0, "rows": {}}
 _POST_PAGE_FORMAT_CACHE = {"loaded_at": 0.0, "formats": []}
 _POST_SELECTION_CACHE = {}
 _SHIPPING_CARRIER_CACHE = "gls"
-_SHOPIFY_CUSTOMER_CACHE = {"loaded_at": 0.0, "rows": []}
+_SHOP_CUSTOMER_CACHE = {"loaded_at": 0.0, "rows": []}
 _BACKGROUND_UI_EVENTS = queue.Queue()
 _PENDING_ITEM_WRITES = {}
 _PENDING_ITEM_WRITES_LOCK = threading.Lock()
 _UNSET = object()
-_ACTIVE_SHOPIFY_LOCATION_ID = (SETTINGS.get("shopify_active_location_id") or "").strip() or None
-_ACTIVE_SHOPIFY_LOCATION_NAME = ""
+_ACTIVE_SHOP_LOCATION_ID = (SETTINGS.get("shop_active_location_id") or "").strip() or None
+_ACTIVE_SHOP_LOCATION_NAME = ""
 CUSTOM_ORDER_SOURCE = "custom"
 CUSTOM_ORDER_ID_PREFIX = "custom-"
 
@@ -173,7 +174,7 @@ ITEMS_AUTO_REFRESH_SECONDS = 10.0
 ORDERS_AUTO_REFRESH_SECONDS = 10.0
 ORDER_DETAILS_LOAD_DELAY_SECONDS = 0.25
 SERVICE_RUNTIME_CACHE_SECONDS = 120.0
-SHOPIFY_CUSTOMER_CACHE_SECONDS = 120.0
+SHOP_CUSTOMER_CACHE_SECONDS = 120.0
 
 
 COLS = [
@@ -478,7 +479,7 @@ def _resolve_pair_colors(fg_name, bg_name, fallback_fg, fallback_bg):
 def init_db():
     con = db()
     cur = con.cursor()
-    apply_app_schema(cur)
+    apply_app_schema(cur, shop_system(SETTINGS))
     con.commit()
     cur.close()
     con.close()
@@ -657,6 +658,8 @@ def _probe_database_ready_verbose(progress_callback=None):
             report(t("db_wait_connected"))
             report(t("db_wait_schema_check"))
             issues = collect_schema_issues(cur)
+            if not issues:
+                assert_shop_system(cur, shop_system(SETTINGS))
         finally:
             cur.close()
             con.close()
@@ -819,32 +822,32 @@ def _order_is_custom(order):
     )
 
 
-def _order_allows_shopify_fulfillment(order):
+def _order_allows_shop_fulfillment(order):
     return not _order_is_custom(order)
 
 
-def _active_shopify_location_id():
-    return _ACTIVE_SHOPIFY_LOCATION_ID
+def _active_shop_location_id():
+    return _ACTIVE_SHOP_LOCATION_ID
 
 
-def _shopify_location_mode():
-    mode = str(SETTINGS.get("shopify_location_mode") or DEFAULT_SETTINGS.get("shopify_location_mode") or "single").strip().lower()
+def _shop_location_mode():
+    mode = str(SETTINGS.get("shop_location_mode") or DEFAULT_SETTINGS.get("shop_location_mode") or "single").strip().lower()
     if mode not in {"single", "multi"}:
         return "single"
     return mode
 
 
-def _shopify_location_switch_enabled():
-    return _shopify_location_mode() == "multi"
+def _shop_location_switch_enabled():
+    return _shop_location_mode() == "multi"
 
 
-def _set_active_shopify_location(location_id=None, location_name=""):
-    global _ACTIVE_SHOPIFY_LOCATION_ID, _ACTIVE_SHOPIFY_LOCATION_NAME
-    _ACTIVE_SHOPIFY_LOCATION_ID = (location_id or "").strip() or None
-    _ACTIVE_SHOPIFY_LOCATION_NAME = (location_name or "").strip()
+def _set_active_shop_location(location_id=None, location_name=""):
+    global _ACTIVE_SHOP_LOCATION_ID, _ACTIVE_SHOP_LOCATION_NAME
+    _ACTIVE_SHOP_LOCATION_ID = (location_id or "").strip() or None
+    _ACTIVE_SHOP_LOCATION_NAME = (location_name or "").strip()
 
 
-def get_shopify_locations_snapshot():
+def get_shop_locations_snapshot():
     con = db()
     cur = con.cursor()
     cur.execute(
@@ -854,7 +857,7 @@ def get_shopify_locations_snapshot():
             COALESCE(NULLIF(name, ''), location_id) AS name,
             COALESCE(fulfills_online_orders, FALSE) AS fulfills_online_orders,
             COALESCE(is_active, TRUE) AS is_active
-        FROM shopify_locations
+        FROM shop_locations
         ORDER BY LOWER(COALESCE(NULLIF(name, ''), location_id)), location_id
         """
     )
@@ -864,40 +867,40 @@ def get_shopify_locations_snapshot():
     return rows
 
 
-def _resolve_active_shopify_location(locations, current_location_id=None):
+def _resolve_active_shop_location(locations, current_location_id=None):
     available = [row for row in (locations or []) if row.get("location_id")]
     if not available:
-        _set_active_shopify_location(None, "")
+        _set_active_shop_location(None, "")
         return None
-    wanted = (current_location_id or _active_shopify_location_id() or "").strip()
+    wanted = (current_location_id or _active_shop_location_id() or "").strip()
     for row in available:
         if row["location_id"] == wanted:
-            _set_active_shopify_location(row["location_id"], row.get("name") or "")
+            _set_active_shop_location(row["location_id"], row.get("name") or "")
             return row
     fallback = available[0]
-    _set_active_shopify_location(fallback["location_id"], fallback.get("name") or "")
+    _set_active_shop_location(fallback["location_id"], fallback.get("name") or "")
     return fallback
 
 
-def _cycle_shopify_location(locations, current_location_id, step):
+def _cycle_shop_location(locations, current_location_id, step):
     available = [row for row in (locations or []) if row.get("location_id")]
     if not available:
         return None
     if not current_location_id:
         target = available[0]
-        _set_active_shopify_location(target["location_id"], target.get("name") or "")
+        _set_active_shop_location(target["location_id"], target.get("name") or "")
         return target
     for index, row in enumerate(available):
         if row["location_id"] == current_location_id:
             target = available[(index + step) % len(available)]
-            _set_active_shopify_location(target["location_id"], target.get("name") or "")
+            _set_active_shop_location(target["location_id"], target.get("name") or "")
             return target
     target = available[0]
-    _set_active_shopify_location(target["location_id"], target.get("name") or "")
+    _set_active_shop_location(target["location_id"], target.get("name") or "")
     return target
 
 
-def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=SERVICE_RUNTIME_CACHE_SECONDS, force=False):
+def get_service_runtime_state(service=SHOP_SYNC_SERVICE, max_age_seconds=SERVICE_RUNTIME_CACHE_SECONDS, force=False):
     now = time.monotonic()
     cached = _SERVICE_RUNTIME_CACHE["rows"].get(service)
     if not force and cached is not None and now - _SERVICE_RUNTIME_CACHE["loaded_at"] < max_age_seconds:
@@ -939,7 +942,7 @@ def get_service_runtime_state(service=SHOPIFY_SYNC_SERVICE, max_age_seconds=SERV
             con.close()
 
 
-def _load_shopify_customers_snapshot():
+def _load_shop_customers_snapshot():
     con = db()
     cur = con.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
@@ -957,7 +960,7 @@ def _load_shopify_customers_snapshot():
             default_city,
             default_country,
             default_phone
-        FROM shopify_customers
+        FROM shop_customers
         ORDER BY COALESCE(display_name, default_name, email, customer_id)
         """
     )
@@ -967,17 +970,17 @@ def _load_shopify_customers_snapshot():
     return rows
 
 
-def get_shopify_customers_snapshot(max_age_seconds=SHOPIFY_CUSTOMER_CACHE_SECONDS, force=False):
+def get_shop_customers_snapshot(max_age_seconds=SHOP_CUSTOMER_CACHE_SECONDS, force=False):
     now = time.monotonic()
-    cached = _SHOPIFY_CUSTOMER_CACHE.get("rows") or []
-    if not force and cached and now - _SHOPIFY_CUSTOMER_CACHE.get("loaded_at", 0.0) < max_age_seconds:
+    cached = _SHOP_CUSTOMER_CACHE.get("rows") or []
+    if not force and cached and now - _SHOP_CUSTOMER_CACHE.get("loaded_at", 0.0) < max_age_seconds:
         return cached
     try:
-        rows = _load_shopify_customers_snapshot()
+        rows = _load_shop_customers_snapshot()
     except Exception:
         return cached
-    _SHOPIFY_CUSTOMER_CACHE["rows"] = rows
-    _SHOPIFY_CUSTOMER_CACHE["loaded_at"] = now
+    _SHOP_CUSTOMER_CACHE["rows"] = rows
+    _SHOP_CUSTOMER_CACHE["loaded_at"] = now
     return rows
 
 
@@ -993,7 +996,7 @@ def _format_runtime_time_short(value):
     return localized.strftime("%H:%M")
 
 
-def format_shopify_sync_status_label(row=None, now=None):
+def format_shop_sync_status_label(row=None, now=None):
     data = row if row is not None else get_service_runtime_state()
     if not data:
         return "Sync: -"
@@ -1109,21 +1112,21 @@ def get_items(filter_text=None, filter_no_location=False, filter_local=False, so
             )
         ) AS available,
         COALESCE(ili.dirty, items.dirty, FALSE) AS dirty,
-        items.shopify_variant_id,
+        items.shop_variant_id,
         items.barcode,
-        items.shopify_product_status,
-        items.shopify_description,
-        items.shopify_price,
-        items.shopify_compare_at_price,
-        items.shopify_unit_cost,
-        items.shopify_unit_cost_currency,
-        items.shopify_weight_grams,
-        COALESCE(items.shopify_product_dirty, FALSE) AS shopify_product_dirty,
-        items.shopify_product_sync_action,
-        items.shopify_product_sync_error,
+        items.shop_product_status,
+        items.shop_description,
+        items.shop_price,
+        items.shop_compare_at_price,
+        items.shop_unit_cost,
+        items.shop_unit_cost_currency,
+        items.shop_weight_grams,
+        COALESCE(items.shop_product_dirty, FALSE) AS shop_product_dirty,
+        items.shop_product_sync_action,
+        items.shop_product_sync_error,
         items.sync_status,
         COALESCE(items.external_fulfillment, FALSE) AS external_fulfillment,
-        ili.location_id AS shopify_location_id
+        ili.location_id AS shop_location_id
     FROM items
     LEFT JOIN item_location_inventory ili
         ON ili.sku = items.sku AND ili.location_id = %s
@@ -1175,21 +1178,21 @@ def _load_items_snapshot(active_location_id=None):
                 )
             ) AS available,
             COALESCE(ili.dirty, items.dirty, FALSE) AS dirty,
-            items.shopify_variant_id,
+            items.shop_variant_id,
             items.barcode,
-            items.shopify_product_status,
-            items.shopify_description,
-            items.shopify_price,
-            items.shopify_compare_at_price,
-            items.shopify_unit_cost,
-            items.shopify_unit_cost_currency,
-            items.shopify_weight_grams,
-            COALESCE(items.shopify_product_dirty, FALSE) AS shopify_product_dirty,
-            items.shopify_product_sync_action,
-            items.shopify_product_sync_error,
+            items.shop_product_status,
+            items.shop_description,
+            items.shop_price,
+            items.shop_compare_at_price,
+            items.shop_unit_cost,
+            items.shop_unit_cost_currency,
+            items.shop_weight_grams,
+            COALESCE(items.shop_product_dirty, FALSE) AS shop_product_dirty,
+            items.shop_product_sync_action,
+            items.shop_product_sync_error,
             items.sync_status,
             COALESCE(items.external_fulfillment, FALSE) AS external_fulfillment,
-            ili.location_id AS shopify_location_id
+            ili.location_id AS shop_location_id
         FROM items
         LEFT JOIN item_location_inventory ili
             ON ili.sku = items.sku AND ili.location_id = %s
@@ -1261,7 +1264,7 @@ def _filter_items_snapshot(rows, filter_text=None, filter_no_location=False, fil
 def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", payment_filter="all"):
     con = db()
     cur = con.cursor()
-    active_location_id = _active_shopify_location_id()
+    active_location_id = _active_shop_location_id()
 
     conditions = []
     params = []
@@ -1321,12 +1324,12 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
-            COALESCE(so.source, 'shopify') AS source,
+            COALESCE(so.source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) AS source,
             COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
             COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
             COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
-            COALESCE(fo_stats.location_count, 0) AS shopify_location_count
-        FROM shopify_orders so
+            COALESCE(fo_stats.location_count, 0) AS shop_location_count
+        FROM shop_orders so
         LEFT JOIN (
             SELECT
                 oi.order_id,
@@ -1336,7 +1339,7 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
                     ELSE 0
                     END
                 ) AS local_internal_qty
-            FROM shopify_order_items oi
+            FROM shop_order_items oi
             LEFT JOIN items i ON i.sku = oi.sku
             GROUP BY oi.order_id
         ) AS order_stats ON order_stats.order_id = so.order_id
@@ -1374,8 +1377,8 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
                         SUM(COALESCE(foi.remaining_quantity, 0)),
                         COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
                     ) AS remaining_quantity
-                FROM shopify_fulfillment_order_items foi
-                LEFT JOIN shopify_order_items oi
+                FROM shop_fulfillment_order_items foi
+                LEFT JOIN shop_order_items oi
                     ON oi.order_id = foi.order_id
                    AND oi.order_line_item_id = foi.order_line_item_id
                 LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
@@ -1401,7 +1404,7 @@ def get_orders(order_filter=None, only_pending=False, fulfillment_filter="all", 
 def _load_orders_snapshot():
     con = db()
     cur = con.cursor()
-    active_location_id = _active_shopify_location_id()
+    active_location_id = _active_shop_location_id()
     _execute_db_query(
         cur,
         """
@@ -1419,12 +1422,12 @@ def _load_orders_snapshot():
             so.shipping_phone,
             so.fulfillment_status,
             so.payment_status,
-            COALESCE(so.source, 'shopify') AS source,
+            COALESCE(so.source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) AS source,
             COALESCE(order_stats.local_internal_qty, 0) AS local_internal_qty,
             COALESCE(fo_stats.active_location_internal_qty, 0) AS active_location_internal_qty,
             COALESCE(fo_stats.active_location_remaining_qty, 0) AS active_location_remaining_qty,
-            COALESCE(fo_stats.location_count, 0) AS shopify_location_count
-        FROM shopify_orders so
+            COALESCE(fo_stats.location_count, 0) AS shop_location_count
+        FROM shop_orders so
         LEFT JOIN (
             SELECT
                 oi.order_id,
@@ -1434,7 +1437,7 @@ def _load_orders_snapshot():
                     ELSE 0
                     END
                 ) AS local_internal_qty
-            FROM shopify_order_items oi
+            FROM shop_order_items oi
             LEFT JOIN items i ON i.sku = oi.sku
             GROUP BY oi.order_id
         ) AS order_stats ON order_stats.order_id = so.order_id
@@ -1472,8 +1475,8 @@ def _load_orders_snapshot():
                         SUM(COALESCE(foi.remaining_quantity, 0)),
                         COALESCE(MAX(GREATEST(oi.quantity - COALESCE(oi.fulfilled_quantity, 0), 0)), SUM(COALESCE(foi.remaining_quantity, 0)))
                     ) AS remaining_quantity
-                FROM shopify_fulfillment_order_items foi
-                LEFT JOIN shopify_order_items oi
+                FROM shop_fulfillment_order_items foi
+                LEFT JOIN shop_order_items oi
                     ON oi.order_id = foi.order_id
                    AND oi.order_line_item_id = foi.order_line_item_id
                 LEFT JOIN items i ON i.sku = COALESCE(foi.sku, oi.sku)
@@ -1553,11 +1556,11 @@ def should_refresh_orders(last_refresh_at, now=None, interval_seconds=ORDERS_AUT
 def get_order_items(order_id):
     con = db()
     cur = con.cursor()
-    active_location_id = _active_shopify_location_id()
+    active_location_id = _active_shop_location_id()
     cur.execute(
         """
         SELECT COUNT(*) AS count
-        FROM shopify_fulfillment_order_items
+        FROM shop_fulfillment_order_items
         WHERE order_id = %s
         """,
         (order_id,),
@@ -1590,12 +1593,12 @@ def get_order_items(order_id):
                 COALESCE(ili.regal, i.regal) AS regal,
                 COALESCE(ili.fach, i.fach) AS fach,
                 COALESCE(ili.platz, i.platz) AS platz,
-                i.shopify_weight_grams,
+                i.shop_weight_grams,
                 COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
                 MIN(COALESCE(foi.assigned_location_id, '')) AS assigned_location_id,
                 MIN(COALESCE(foi.assigned_location_name, '')) AS assigned_location_name
-            FROM shopify_fulfillment_order_items foi
-            LEFT JOIN shopify_order_items oi
+            FROM shop_fulfillment_order_items foi
+            LEFT JOIN shop_order_items oi
                 ON oi.order_id = foi.order_id
                AND oi.order_line_item_id = foi.order_line_item_id
             LEFT JOIN items i
@@ -1610,7 +1613,7 @@ def get_order_items(order_id):
                 COALESCE(ili.regal, i.regal),
                 COALESCE(ili.fach, i.fach),
                 COALESCE(ili.platz, i.platz),
-                i.shopify_weight_grams,
+                i.shop_weight_grams,
                 COALESCE(i.external_fulfillment, FALSE)
             ORDER BY MIN(foi.assigned_location_name), MIN(foi.fulfillment_order_id), MIN(foi.fulfillment_order_line_item_id)
             """,
@@ -1630,11 +1633,11 @@ def get_order_items(order_id):
                 COALESCE(ili.regal, i.regal) AS regal,
                 COALESCE(ili.fach, i.fach) AS fach,
                 COALESCE(ili.platz, i.platz) AS platz,
-                i.shopify_weight_grams,
+                i.shop_weight_grams,
                 COALESCE(i.external_fulfillment, FALSE) AS external_fulfillment,
                 NULL::text AS assigned_location_id,
                 NULL::text AS assigned_location_name
-            FROM shopify_order_items oi
+            FROM shop_order_items oi
             LEFT JOIN items i ON i.sku = oi.sku
             LEFT JOIN item_location_inventory ili
                 ON ili.sku = i.sku AND ili.location_id = %s
@@ -1690,8 +1693,8 @@ def _next_custom_order_name(cur, now=None):
     cur.execute(
         """
         SELECT order_name
-        FROM shopify_orders
-        WHERE COALESCE(source, 'shopify') = %s
+        FROM shop_orders
+        WHERE COALESCE(source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) = %s
           AND order_name LIKE %s
         ORDER BY order_name DESC
         LIMIT 1
@@ -1778,8 +1781,8 @@ def custom_order_address_dialog(stdscr, initial=None):
                     country_code = selected_country
                 continue
             if action == "customer":
-                customer = shopify_customer_dialog(stdscr, state.get("name", ""))
-                state, country_code = _apply_shopify_customer_to_manual_state(state, customer, country_code)
+                customer = shop_customer_dialog(stdscr, state.get("name", ""))
+                state, country_code = _apply_shop_customer_to_manual_state(state, customer, country_code)
                 continue
             if action == "paste_address":
                 raw_text = manual_address_text_dialog(stdscr)
@@ -1824,7 +1827,7 @@ def custom_order_quantity_dialog(stdscr, row, current_qty):
 
 
 def custom_order_items_dialog(stdscr, initial_items=None):
-    active_location_id = _active_shopify_location_id()
+    active_location_id = _active_shop_location_id()
     rows = _filter_items_snapshot(_load_items_snapshot(active_location_id), sort_mode="sku", external_mode="hide")
     selected_qty = {row["sku"]: int(row.get("quantity") or 0) for row in (initial_items or []) if row.get("sku")}
     query = ""
@@ -1944,9 +1947,9 @@ def _load_custom_order_for_edit(order_id):
         cur.execute(
             """
             SELECT *
-            FROM shopify_orders
+            FROM shop_orders
             WHERE order_id = %s
-              AND COALESCE(source, 'shopify') = %s
+              AND COALESCE(source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) = %s
             """,
             (order_id, CUSTOM_ORDER_SOURCE),
         )
@@ -2004,10 +2007,10 @@ def _adjust_custom_order_reservation(cur, sku, location_id, delta_qty):
 
 
 def save_custom_order(address, selected_items, existing_order_id=None):
-    active_location_id = _active_shopify_location_id()
+    active_location_id = _active_shop_location_id()
     if not active_location_id:
         raise RuntimeError(t("custom_order_location_missing"))
-    active_location_name = _ACTIVE_SHOPIFY_LOCATION_NAME or active_location_id.rsplit("/", 1)[-1]
+    active_location_name = _ACTIVE_SHOP_LOCATION_NAME or active_location_id.rsplit("/", 1)[-1]
     normalized_items = []
     for item in selected_items or []:
         qty = int(item.get("quantity") or 0)
@@ -2024,8 +2027,8 @@ def save_custom_order(address, selected_items, existing_order_id=None):
             cur.execute(
                 """
                 SELECT order_id, order_name
-                FROM shopify_orders
-                WHERE order_id = %s AND COALESCE(source, 'shopify') = %s
+                FROM shop_orders
+                WHERE order_id = %s AND COALESCE(source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) = %s
                 FOR UPDATE
                 """,
                 (existing_order_id, CUSTOM_ORDER_SOURCE),
@@ -2038,7 +2041,7 @@ def save_custom_order(address, selected_items, existing_order_id=None):
             cur.execute(
                 """
                 SELECT sku, assigned_location_id, SUM(COALESCE(remaining_quantity, 0)) AS quantity
-                FROM shopify_fulfillment_order_items
+                FROM shop_fulfillment_order_items
                 WHERE order_id = %s
                 GROUP BY sku, assigned_location_id
                 """,
@@ -2046,21 +2049,21 @@ def save_custom_order(address, selected_items, existing_order_id=None):
             )
             for row in cur.fetchall():
                 _adjust_custom_order_reservation(cur, row.get("sku"), row.get("assigned_location_id"), -int(row.get("quantity") or 0))
-            cur.execute("DELETE FROM shopify_fulfillment_orders WHERE order_id = %s", (order_id,))
-            cur.execute("DELETE FROM shopify_order_items WHERE order_id = %s", (order_id,))
+            cur.execute("DELETE FROM shop_fulfillment_orders WHERE order_id = %s", (order_id,))
+            cur.execute("DELETE FROM shop_order_items WHERE order_id = %s", (order_id,))
         else:
             order_name = _next_custom_order_name(cur)
             order_id = f"{CUSTOM_ORDER_ID_PREFIX}{order_name}"
 
         cur.execute(
             """
-            INSERT INTO shopify_orders (
+            INSERT INTO shop_orders (
                 order_id, order_name, created_at, shipping_name, shipping_address1,
                 shipping_address2, shipping_zip, shipping_city, shipping_country,
                 shipping_email, shipping_phone, fulfillment_status, payment_status,
                 source, updated_at
             )
-            VALUES (%s, %s, COALESCE((SELECT created_at FROM shopify_orders WHERE order_id = %s), NOW()),
+            VALUES (%s, %s, COALESCE((SELECT created_at FROM shop_orders WHERE order_id = %s), NOW()),
                     %s, %s, %s, %s, %s, %s, %s, %s, 'unfulfilled', 'manual', %s, NOW())
             ON CONFLICT (order_id) DO UPDATE SET
                 shipping_name = EXCLUDED.shipping_name,
@@ -2094,7 +2097,7 @@ def save_custom_order(address, selected_items, existing_order_id=None):
         fulfillment_order_id = f"custom-fo-{order_name}"
         cur.execute(
             """
-            INSERT INTO shopify_fulfillment_orders (
+            INSERT INTO shop_fulfillment_orders (
                 fulfillment_order_id, order_id, assigned_location_id,
                 assigned_location_name, status, request_status, updated_at
             )
@@ -2107,7 +2110,7 @@ def save_custom_order(address, selected_items, existing_order_id=None):
             fulfillment_item_id = f"custom-foi-{order_name}-{index}"
             cur.execute(
                 """
-                INSERT INTO shopify_order_items (
+                INSERT INTO shop_order_items (
                     order_id, line_index, order_line_item_id, sku, title, quantity, fulfilled_quantity
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, 0)
@@ -2116,7 +2119,7 @@ def save_custom_order(address, selected_items, existing_order_id=None):
             )
             cur.execute(
                 """
-                INSERT INTO shopify_fulfillment_order_items (
+                INSERT INTO shop_fulfillment_order_items (
                     fulfillment_order_line_item_id, fulfillment_order_id, order_id,
                     order_line_item_id, sku, title, quantity, remaining_quantity,
                     assigned_location_id, assigned_location_name, updated_at
@@ -2152,7 +2155,7 @@ def _custom_order_execution_rows(order_items):
     for item in order_items or []:
         line_item_id = (item.get("order_line_item_id") or "").strip()
         sku = (item.get("sku") or "").strip()
-        location_id = (item.get("assigned_location_id") or _active_shopify_location_id() or "").strip()
+        location_id = (item.get("assigned_location_id") or _active_shop_location_id() or "").strip()
         if not line_item_id or not sku or not location_id:
             continue
         if "selected_quantity" in item:
@@ -2204,7 +2207,7 @@ def apply_custom_order_execution(order, order_items):
             cur.execute(
                 """
                 SELECT COALESCE(SUM(remaining_quantity), 0) AS remaining
-                FROM shopify_fulfillment_order_items
+                FROM shop_fulfillment_order_items
                 WHERE order_id = %s
                   AND order_line_item_id = %s
                 """,
@@ -2217,7 +2220,7 @@ def apply_custom_order_execution(order, order_items):
             _apply_custom_order_stock_deduction(cur, row["sku"], row["location_id"], qty)
             cur.execute(
                 """
-                UPDATE shopify_order_items
+                UPDATE shop_order_items
                 SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + %s)
                 WHERE order_id = %s
                   AND order_line_item_id = %s
@@ -2226,7 +2229,7 @@ def apply_custom_order_execution(order, order_items):
             )
             cur.execute(
                 """
-                UPDATE shopify_fulfillment_order_items
+                UPDATE shop_fulfillment_order_items
                 SET remaining_quantity = GREATEST(COALESCE(remaining_quantity, 0) - %s, 0),
                     updated_at = NOW()
                 WHERE order_id = %s
@@ -2239,7 +2242,7 @@ def apply_custom_order_execution(order, order_items):
             SELECT
                 COALESCE(SUM(quantity), 0) AS quantity,
                 COALESCE(SUM(remaining_quantity), 0) AS remaining
-            FROM shopify_fulfillment_order_items
+            FROM shop_fulfillment_order_items
             WHERE order_id = %s
             """,
             (order_id,),
@@ -2255,11 +2258,11 @@ def apply_custom_order_execution(order, order_items):
             status = "unfulfilled"
         cur.execute(
             """
-            UPDATE shopify_orders
+            UPDATE shop_orders
             SET fulfillment_status = %s,
                 updated_at = NOW()
             WHERE order_id = %s
-              AND COALESCE(source, 'shopify') = %s
+              AND COALESCE(source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) = %s
             """,
             (status, order_id, CUSTOM_ORDER_SOURCE),
         )
@@ -2283,9 +2286,9 @@ def delete_custom_order(order_id):
         cur.execute(
             """
             SELECT order_id
-            FROM shopify_orders
+            FROM shop_orders
             WHERE order_id = %s
-              AND COALESCE(source, 'shopify') = %s
+              AND COALESCE(source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) = %s
             FOR UPDATE
             """,
             (normalized_order_id, CUSTOM_ORDER_SOURCE),
@@ -2295,7 +2298,7 @@ def delete_custom_order(order_id):
         cur.execute(
             """
             SELECT sku, assigned_location_id, SUM(COALESCE(remaining_quantity, 0)) AS quantity
-            FROM shopify_fulfillment_order_items
+            FROM shop_fulfillment_order_items
             WHERE order_id = %s
             GROUP BY sku, assigned_location_id
             """,
@@ -2305,9 +2308,9 @@ def delete_custom_order(order_id):
             _adjust_custom_order_reservation(cur, row.get("sku"), row.get("assigned_location_id"), -int(row.get("quantity") or 0))
         cur.execute(
             """
-            DELETE FROM shopify_orders
+            DELETE FROM shop_orders
             WHERE order_id = %s
-              AND COALESCE(source, 'shopify') = %s
+              AND COALESCE(source, (SELECT shop_system FROM shop_configuration WHERE id = 1)) = %s
             """,
             (normalized_order_id, CUSTOM_ORDER_SOURCE),
         )
@@ -2371,7 +2374,7 @@ def get_local_fulfilled_quantities_for_order(order_id):
     cur.execute(
         """
         SELECT line_items_json
-        FROM shopify_fulfillment_jobs
+        FROM shop_fulfillment_jobs
         WHERE order_id = %s
           AND status IN ('pending', 'processing', 'done')
           AND line_items_json IS NOT NULL
@@ -2434,8 +2437,8 @@ def update_shipping_label_reprint(label_id, label_path):
     return _update_shipping_label_reprint(db, label_id, label_path)
 
 
-def get_latest_shopify_job_for_label(label_id):
-    return _get_latest_shopify_job_for_label(db, label_id)
+def get_latest_shop_job_for_label(label_id):
+    return _get_latest_shop_job_for_label(db, label_id)
 
 
 def _shipping_printer_field_map():
@@ -2495,7 +2498,7 @@ def _tracking_url_for_carrier(carrier, tracking_number):
         return template.replace("{tracking_number}", number).replace("{number}", number)
 
 
-def _shopify_tracking_mode_for_carrier(carrier):
+def _shop_tracking_mode_for_carrier(carrier):
     normalized = (carrier or "").strip().lower()
     tracking_mode_field = _shipping_carrier_setting_field(normalized, "tracking_mode")
     default_mode = _default_tracking_mode_for_carrier(normalized)
@@ -2504,8 +2507,8 @@ def _shopify_tracking_mode_for_carrier(carrier):
     return "company"
 
 
-def _effective_tracking_url_for_shopify(carrier, tracking_number, tracking_url=None):
-    mode = _shopify_tracking_mode_for_carrier(carrier)
+def _effective_tracking_url_for_shop(carrier, tracking_number, tracking_url=None):
+    mode = _shop_tracking_mode_for_carrier(carrier)
     if mode == "company_and_url":
         return (tracking_url or "").strip() or _tracking_url_for_carrier(carrier, tracking_number)
     return None
@@ -2517,19 +2520,21 @@ def _shipment_source_label(value):
         labels = {
             "local": "Lokal",
             "shopify": "Shopify",
+            "woocommerce": "WooCommerce",
         }
     else:
         labels = {
             "local": "Local",
             "shopify": "Shopify",
+            "woocommerce": "WooCommerce",
         }
     return labels.get(normalized, value or "-")
 
 
-def search_shopify_customers(search_text="", limit=100):
+def search_shop_customers(search_text="", limit=100):
     limit = max(1, int(limit))
     needle = (search_text or "").strip().casefold()
-    rows = get_shopify_customers_snapshot()
+    rows = get_shop_customers_snapshot()
     if not needle:
         return rows[:limit]
 
@@ -2550,7 +2555,7 @@ def search_shopify_customers(search_text="", limit=100):
     return filtered
 
 
-def get_latest_shopify_jobs_for_labels(label_ids):
+def get_latest_shop_jobs_for_labels(label_ids):
     normalized_ids = [int(value) for value in label_ids or [] if str(value).strip()]
     if not normalized_ids:
         return {}
@@ -2564,11 +2569,11 @@ def get_latest_shopify_jobs_for_labels(label_ids):
             status,
             attempts,
             result_message,
-            shopify_fulfillment_id,
+            shop_fulfillment_id,
             created_at,
             updated_at,
             processed_at
-        FROM shopify_fulfillment_jobs
+        FROM shop_fulfillment_jobs
         WHERE label_id = ANY(%s)
         ORDER BY label_id, created_at DESC, id DESC
         """,
@@ -2580,7 +2585,7 @@ def get_latest_shopify_jobs_for_labels(label_ids):
     return {row["label_id"]: row for row in rows}
 
 
-def _shopify_customer_dialog_label(row, width):
+def _shop_customer_dialog_label(row, width):
     name = (row.get("display_name") or row.get("default_name") or row.get("email") or "-").strip()
     address = (row.get("default_address1") or "").strip()
     postal = (row.get("default_zip") or "").strip()
@@ -2591,7 +2596,7 @@ def _shopify_customer_dialog_label(row, width):
     return _fit(line, width)
 
 
-def _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code):
+def _apply_shop_customer_to_manual_state(state, chosen_customer, country_code):
     updated = dict(state)
     if not chosen_customer:
         return updated, country_code
@@ -2612,7 +2617,7 @@ def _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code
     return updated, (customer_country or country_code)
 
 
-def shopify_customer_dialog(stdscr, search_text=""):
+def shop_customer_dialog(stdscr, search_text=""):
     query = search_text or ""
     selected = 0
     top_index = 0
@@ -2627,7 +2632,7 @@ def shopify_customer_dialog(stdscr, search_text=""):
 
     while True:
         if query != last_query:
-            rows = search_shopify_customers(query, limit=150)
+            rows = search_shop_customers(query, limit=150)
             last_query = query
 
         draw_shadow(stdscr, y, x, height, width)
@@ -2660,7 +2665,7 @@ def shopify_customer_dialog(stdscr, search_text=""):
         else:
             for row_index, row in enumerate(rows[top_index:top_index + visible_rows]):
                 real_index = top_index + row_index
-                line = _shopify_customer_dialog_label(row, width - 4)
+                line = _shop_customer_dialog_label(row, width - 4)
                 y_pos = 3 + row_index
                 if real_index == selected:
                     win.attrset(curses.color_pair(2))
@@ -2729,27 +2734,27 @@ def _shipment_summary_lines(rows, width):
     return lines
 
 
-def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
+def enqueue_shop_fulfillment_job(label_row, notify_customer=False):
     label_id = label_row.get("id")
     order_id = (label_row.get("order_id") or "").strip()
     tracking_number = (label_row.get("parcel_number") or label_row.get("track_id") or "").strip()
     carrier_code = (label_row.get("carrier") or "gls").strip()
-    carrier = _shopify_tracking_company(carrier_code)
-    tracking_url = _effective_tracking_url_for_shopify(
+    carrier = _shop_tracking_company(carrier_code)
+    tracking_url = _effective_tracking_url_for_shop(
         carrier_code,
         tracking_number,
         (label_row.get("tracking_url") or "").strip(),
     )
     if carrier_code.strip().lower() in {"test", "free"}:
-        raise RuntimeError(t("test_and_free_no_shopify"))
+        raise RuntimeError(t("test_and_free_no_shop"))
     if not order_id:
         raise RuntimeError(t("order_id_missing"))
     if _is_custom_order_id(order_id):
-        raise RuntimeError(t("custom_order_no_shopify"))
+        raise RuntimeError(t("custom_order_no_shop"))
     if not tracking_number:
         raise RuntimeError(t("track_id_missing"))
 
-    return _find_or_create_shopify_fulfillment_job(
+    return _find_or_create_shop_fulfillment_job(
         db,
         label_id=label_id,
         order_id=order_id,
@@ -2761,25 +2766,25 @@ def enqueue_shopify_fulfillment_job(label_row, notify_customer=False):
     )
 
 
-def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_customer=False):
+def enqueue_shop_fulfillment_job_for_items(label_row, selected_items, notify_customer=False):
     label_id = label_row.get("id")
     order_id = (label_row.get("order_id") or "").strip()
     tracking_number = (label_row.get("parcel_number") or label_row.get("track_id") or "").strip()
     carrier_code = (label_row.get("carrier") or "gls").strip()
-    carrier = _shopify_tracking_company(carrier_code)
-    tracking_url = _effective_tracking_url_for_shopify(
+    carrier = _shop_tracking_company(carrier_code)
+    tracking_url = _effective_tracking_url_for_shop(
         carrier_code,
         tracking_number,
         (label_row.get("tracking_url") or "").strip(),
     )
     if carrier_code.strip().lower() in {"test", "free"}:
-        raise RuntimeError(t("test_and_free_no_shopify"))
+        raise RuntimeError(t("test_and_free_no_shop"))
     if not label_id:
         raise RuntimeError(t("label_id_missing"))
     if not order_id:
         raise RuntimeError(t("order_id_missing"))
     if _is_custom_order_id(order_id):
-        raise RuntimeError(t("custom_order_no_shopify"))
+        raise RuntimeError(t("custom_order_no_shop"))
     if not tracking_number:
         raise RuntimeError(t("tracking_number_missing"))
 
@@ -2804,9 +2809,9 @@ def enqueue_shopify_fulfillment_job_for_items(label_row, selected_items, notify_
         )
 
     if not line_items:
-        raise RuntimeError(t("no_valid_shopify_fulfillment_positions"))
+        raise RuntimeError(t("no_valid_shop_fulfillment_positions"))
 
-    return _find_or_create_shopify_fulfillment_job(
+    return _find_or_create_shop_fulfillment_job(
         db,
         label_id=label_id,
         order_id=order_id,
@@ -2899,7 +2904,7 @@ def calculate_order_shipping_weight(order, order_items=None):
         if row.get("external_fulfillment"):
             continue
         quantity = order_item_remaining_qty(row)
-        item_weight = row.get("shopify_weight_grams")
+        item_weight = row.get("shop_weight_grams")
         if item_weight is None:
             continue
         try:
@@ -2923,7 +2928,7 @@ def calculate_selected_shipping_weight(selected_items):
             quantity = 0
         if quantity <= 0:
             continue
-        item_weight = row.get("shopify_weight_grams")
+        item_weight = row.get("shop_weight_grams")
         if item_weight is None:
             continue
         try:
@@ -3312,11 +3317,11 @@ def manual_address_text_dialog(stdscr):
     )
 
 
-def shopify_description_dialog(stdscr, initial_text):
+def shop_description_dialog(stdscr, initial_text):
     return multiline_text_dialog(
         stdscr,
-        t("shopify_description_edit_title"),
-        t("shopify_description_edit_footer"),
+        t("shop_description_edit_title"),
+        t("shop_description_edit_footer"),
         initial_text=initial_text,
     )
 
@@ -4284,7 +4289,7 @@ def format_row(row):
 
     if status == "local":
         status = "L"
-    elif row["dirty"] or row.get("shopify_product_dirty") or status in {"shopify_pending", "shopify_error"}:
+    elif row["dirty"] or row.get("shop_product_dirty") or status in {"shop_pending", "shop_error"}:
         status = "D"
     else:
         status = "S"
@@ -4334,7 +4339,7 @@ def _format_eur(value):
     return f"{text} EUR"
 
 
-def clean_shopify_description(value):
+def clean_shop_description(value):
     text = value or ""
     text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
     text = re.sub(r"(?i)</\s*p\s*>", "\n", text)
@@ -4355,19 +4360,19 @@ def build_item_info_lines(item):
     lines.append(t("item_info_sku", value=_display_sku_value(item)))
     lines.append(t("item_info_name", value=item.get("name") or "-"))
     lines.append(t("item_info_barcode", value=item.get("barcode") or "-"))
-    lines.append(t("item_info_shopify_status", value=item.get("shopify_product_status") or "-"))
-    lines.append(t("item_info_sales_price", value=_format_eur(item.get("shopify_price"))))
-    lines.append(t("item_info_compare_price", value=_format_eur(item.get("shopify_compare_at_price"))))
-    lines.append(t("item_info_unit_cost", value=_format_eur(item.get("shopify_unit_cost"))))
+    lines.append(t("item_info_shop_status", value=item.get("shop_product_status") or "-"))
+    lines.append(t("item_info_sales_price", value=_format_eur(item.get("shop_price"))))
+    lines.append(t("item_info_compare_price", value=_format_eur(item.get("shop_compare_at_price"))))
+    lines.append(t("item_info_unit_cost", value=_format_eur(item.get("shop_unit_cost"))))
 
-    weight_grams = item.get("shopify_weight_grams")
+    weight_grams = item.get("shop_weight_grams")
     weight_value = f"{weight_grams} g" if weight_grams is not None else "-"
     lines.append(t("item_info_weight", value=weight_value))
     lines.append(t("item_info_sync", value=item.get("sync_status") or "-"))
-    if item.get("shopify_product_dirty"):
-        lines.append(t("item_info_shopify_pending", value=item.get("shopify_product_sync_action") or "-"))
-    if item.get("shopify_product_sync_error"):
-        lines.append(t("item_info_shopify_error", value=item.get("shopify_product_sync_error") or "-"))
+    if item.get("shop_product_dirty"):
+        lines.append(t("item_info_shop_pending", value=item.get("shop_product_sync_action") or "-"))
+    if item.get("shop_product_sync_error"):
+        lines.append(t("item_info_shop_error", value=item.get("shop_product_sync_error") or "-"))
     lines.append(t("item_info_local_qty", value=item.get("menge")))
     lines.append(t("item_info_total_qty", value=item.get("gesamt_menge", item.get("menge"))))
     lines.append(
@@ -4387,7 +4392,7 @@ def item_info_dialog(stdscr, item):
     x = max(2, (w - width) // 2)
 
     info_lines = build_item_info_lines(item)
-    description_lines = clean_shopify_description(item.get("shopify_description")).splitlines()
+    description_lines = clean_shop_description(item.get("shop_description")).splitlines()
     description_top = 0
 
     footer = t("item_info_footer")
@@ -4681,7 +4686,7 @@ def draw(
     filter_text,
     show_secondary_help,
     external_mode,
-    current_shopify_location=None,
+    current_shop_location=None,
     sync_status_label=None,
     notice_text=None,
 ):
@@ -4711,8 +4716,8 @@ def draw(
 
     right_lines = [row["label"] for row in location_rows] if location_rows else [t("no_locations")]
     panel_title = t("locations_panel")
-    if current_shopify_location and current_shopify_location.get("name"):
-        panel_title = t("locations_panel_with_name", value=current_shopify_location["name"])
+    if current_shop_location and current_shop_location.get("name"):
+        panel_title = t("locations_panel_with_name", value=current_shop_location["name"])
 
     draw_panel(
         right_win,
@@ -4725,14 +4730,14 @@ def draw(
 
     stdscr.attrset(curses.color_pair(3))
 
-    if _shopify_location_switch_enabled():
+    if _shop_location_switch_enabled():
         status_key = "status_secondary_multi" if show_secondary_help else "status_primary_multi"
     else:
         status_key = "status_secondary_single" if show_secondary_help else "status_primary_single"
     status = t(status_key)
     focus = t("focus_items") if active_pane == "left" else t("focus_locations")
-    if current_shopify_location and current_shopify_location.get("name"):
-        focus += t("focus_shopify_location", value=current_shopify_location["name"])
+    if current_shop_location and current_shop_location.get("name"):
+        focus += t("focus_shop_location", value=current_shop_location["name"])
     if external_mode == "only":
         focus = focus[:-1] + t("view_external")
 
@@ -4857,7 +4862,7 @@ def _apply_item_write_db(sku, updates, location_id=None):
         if target_location_id:
             cur.execute(
                 """
-                INSERT INTO shopify_locations(location_id, name, updated_at)
+                INSERT INTO shop_locations(location_id, name, updated_at)
                 VALUES (%s, %s, NOW())
                 ON CONFLICT (location_id)
                 DO UPDATE SET updated_at = NOW()
@@ -5252,6 +5257,7 @@ def confirm_box(stdscr, title, message, default_yes=True):
 
 
 def _save_settings_checked(updated):
+    updated = {**SETTINGS, **updated}
     try:
         con = psycopg2.connect(
             host=updated["db_host"],
@@ -5263,7 +5269,16 @@ def _save_settings_checked(updated):
         )
     except psycopg2.OperationalError as exc:
         raise DatabaseUnavailableError(_summarize_db_error(exc)) from exc
-    con.close()
+    cur = con.cursor()
+    try:
+        cur.execute("SELECT to_regclass('public.shop_configuration') AS configuration_table")
+        row = cur.fetchone()
+        table = row.get("configuration_table") if isinstance(row, dict) else row[0] if row else None
+        if table:
+            assert_shop_system(cur, shop_system(updated))
+    finally:
+        cur.close()
+        con.close()
     return save_settings(updated)
 
 def _form_dialog_values(fields, values):
@@ -6213,20 +6228,20 @@ def _settings_context_select(
 ):
     if active_name == "language":
         values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
-    elif active_name == "shopify_location_mode":
-        values["shopify_location_mode"] = choice_dialog(
+    elif active_name == "shop_location_mode":
+        values["shop_location_mode"] = choice_dialog(
             stdscr,
-            t("pick_shopify_location_mode"),
+            t("pick_shop_location_mode"),
             [
-                {"value": "single", "label": t("shopify_location_mode_single")},
-                {"value": "multi", "label": t("shopify_location_mode_multi")},
+                {"value": "single", "label": t("shop_location_mode_single")},
+                {"value": "multi", "label": t("shop_location_mode_multi")},
             ],
-            values.get("shopify_location_mode", "single"),
+            values.get("shop_location_mode", "single"),
         )
-    elif active_name == "shopify_active_location_display":
-        locations = get_shopify_locations_snapshot()
+    elif active_name == "shop_active_location_display":
+        locations = get_shop_locations_snapshot()
         if not locations:
-            message_box(stdscr, t("settings_title"), t("shopify_locations_unavailable"))
+            message_box(stdscr, t("settings_title"), t("shop_locations_unavailable"))
             return values
         options = [
             {
@@ -6238,15 +6253,15 @@ def _settings_context_select(
         ]
         chosen = choice_dialog(
             stdscr,
-            t("pick_shopify_location"),
+            t("pick_shop_location"),
             options,
-            values.get("shopify_active_location_id", ""),
+            values.get("shop_active_location_id", ""),
             cancel_returns_none=True,
         )
         if chosen is not None:
-            values["shopify_active_location_id"] = chosen
+            values["shop_active_location_id"] = chosen
             selected_row = next((row for row in locations if row.get("location_id") == chosen), None)
-            values["shopify_active_location_display"] = (selected_row.get("name") if selected_row else chosen) or chosen
+            values["shop_active_location_display"] = (selected_row.get("name") if selected_row else chosen) or chosen
     elif active_name == "color_theme":
         values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
     elif active_name in {"location_regex_regal", "location_regex_fach", "location_regex_platz"}:
@@ -6395,9 +6410,9 @@ def _settings_dialog_initial_values(settings):
         "db_user": settings["db_user"],
         "db_pass": settings["db_pass"],
         "language": (settings.get("language") or DEFAULT_SETTINGS["language"]).strip().lower(),
-        "shopify_location_mode": (settings.get("shopify_location_mode") or DEFAULT_SETTINGS["shopify_location_mode"]).strip().lower(),
-        "shopify_active_location_id": (settings.get("shopify_active_location_id") or "").strip(),
-        "shopify_active_location_display": (settings.get("shopify_active_location_id") or "").strip() or "-",
+        "shop_location_mode": (settings.get("shop_location_mode") or DEFAULT_SETTINGS["shop_location_mode"]).strip().lower(),
+        "shop_active_location_id": (settings.get("shop_active_location_id") or "").strip(),
+        "shop_active_location_display": (settings.get("shop_active_location_id") or "").strip() or "-",
         "color_theme": (settings.get("color_theme") or DEFAULT_SETTINGS["color_theme"]).strip().lower(),
         "color_theme_file": settings.get("color_theme_file", ""),
         "printer_uri": settings["printer_uri"],
@@ -6444,8 +6459,8 @@ def _settings_dialog_tabs():
                 ("db_user", "field_db_user"),
                 ("db_pass", "field_db_pass"),
                 ("language", "field_language"),
-                ("shopify_location_mode", "field_shopify_location_mode"),
-                ("shopify_active_location_display", "field_shopify_active_location"),
+                ("shop_location_mode", "field_shop_location_mode"),
+                ("shop_active_location_display", "field_shop_active_location"),
                 ("color_theme", "field_theme"),
                 ("color_theme_file", "field_theme_file"),
             ],
@@ -6480,18 +6495,18 @@ def _settings_dialog_tabs():
     ]
 
 
-def _settings_apply_initial_shopify_location(values):
-    initial_locations = get_shopify_locations_snapshot()
+def _settings_apply_initial_shop_location(values):
+    initial_locations = get_shop_locations_snapshot()
     if not initial_locations:
         return
     selected_row = next(
-        (row for row in initial_locations if row.get("location_id") == values.get("shopify_active_location_id")),
+        (row for row in initial_locations if row.get("location_id") == values.get("shop_active_location_id")),
         None,
     )
     if selected_row is None:
         selected_row = initial_locations[0]
-        values["shopify_active_location_id"] = selected_row.get("location_id") or ""
-    values["shopify_active_location_display"] = selected_row.get("name") or selected_row.get("location_id") or "-"
+        values["shop_active_location_id"] = selected_row.get("location_id") or ""
+    values["shop_active_location_display"] = selected_row.get("name") or selected_row.get("location_id") or "-"
 
 
 def _settings_dialog_updated_values(values):
@@ -6503,8 +6518,8 @@ def _settings_dialog_updated_values(values):
         "db_user": values["db_user"].strip(),
         "db_pass": values["db_pass"],
         "language": values["language"].strip().lower(),
-        "shopify_location_mode": values["shopify_location_mode"].strip().lower(),
-        "shopify_active_location_id": values["shopify_active_location_id"].strip(),
+        "shop_location_mode": values["shop_location_mode"].strip().lower(),
+        "shop_active_location_id": values["shop_active_location_id"].strip(),
         "color_theme": values["color_theme"].strip().lower(),
         "color_theme_file": os.path.expanduser(values["color_theme_file"].strip()),
         "printer_uri": values["printer_uri"].strip(),
@@ -6593,8 +6608,8 @@ def _settings_validate_updated_values(stdscr, updated):
     if updated["language"] not in SUPPORTED_LANGUAGES:
         message_box(stdscr, t("error"), t("language_must_be_supported"))
         return False
-    if updated["shopify_location_mode"] not in {"single", "multi"}:
-        message_box(stdscr, t("error"), t("shopify_location_mode_invalid"))
+    if updated["shop_location_mode"] not in {"single", "multi"}:
+        message_box(stdscr, t("error"), t("shop_location_mode_invalid"))
         return False
     if updated["color_theme_file"] and not os.path.isfile(updated["color_theme_file"]):
         message_box(stdscr, t("error"), t("theme_file_missing"))
@@ -6692,7 +6707,7 @@ def settings_dialog(stdscr):
 
     values = _settings_dialog_initial_values(SETTINGS)
     tabs = _settings_dialog_tabs()
-    _settings_apply_initial_shopify_location(values)
+    _settings_apply_initial_shop_location(values)
     active_tab = 0
     active_field_by_tab = [0 for _ in tabs]
     sync_state = get_service_runtime_state(max_age_seconds=999999)
@@ -6713,7 +6728,7 @@ def settings_dialog(stdscr):
             _SERVICE_RUNTIME_LOADER.request(
                 "service_runtime_state",
                 get_service_runtime_state,
-                SHOPIFY_SYNC_SERVICE,
+                SHOP_SYNC_SERVICE,
                 SERVICE_RUNTIME_CACHE_SECONDS,
                 True,
             )
@@ -6826,8 +6841,8 @@ def settings_dialog(stdscr):
             "shipping_services_display",
             "manual_label_default_country_display",
             "shipping_active_carriers_display",
-            "shopify_active_location_display",
-            "shopify_location_mode",
+            "shop_active_location_display",
+            "shop_location_mode",
             "shipping_label_scale_mode",
             "delivery_note_scale_mode",
             "delivery_note_duplex",
@@ -6912,7 +6927,7 @@ def settings_dialog(stdscr):
             )
             if values.get(active_name, "") == previous_value and active_name not in {
                 "language",
-                "shopify_location_mode",
+                "shop_location_mode",
                 "color_theme",
                 "delivery_note_format",
                 "shipping_label_scale_mode",
@@ -6922,7 +6937,7 @@ def settings_dialog(stdscr):
                 "shipping_services_display",
                 "manual_label_default_country_display",
                 "shipping_active_carriers_display",
-                "shopify_active_location_display",
+                "shop_active_location_display",
                 *shipping_printer_fields.keys(),
                 *shipping_format_fields.keys(),
                 *shipping_scale_fields.keys(),
@@ -6949,8 +6964,8 @@ def settings_dialog(stdscr):
                 "shipping_services_display",
                 "manual_label_default_country_display",
                 "shipping_active_carriers_display",
-                "shopify_active_location_display",
-                "shopify_location_mode",
+                "shop_active_location_display",
+                "shop_location_mode",
                 "shipping_label_scale_mode",
                 "delivery_note_scale_mode",
                 "delivery_note_duplex",
@@ -6974,9 +6989,9 @@ def settings_dialog(stdscr):
     except Exception as exc:
         message_box(stdscr, t("db_error_title"), str(exc)[:56])
         return
-    _set_active_shopify_location(
-        SETTINGS.get("shopify_active_location_id"),
-        values.get("shopify_active_location_display", ""),
+    _set_active_shop_location(
+        SETTINGS.get("shop_active_location_id"),
+        values.get("shop_active_location_display", ""),
     )
     apply_color_theme(stdscr)
     message_box(stdscr, t("saved"), t("saved_settings"))
@@ -7141,7 +7156,7 @@ def change_qty(stdscr, item):
                 return
 
             if key in (curses.KEY_F2, 10, 13, "\n", "\r", curses.KEY_ENTER):
-                queue_item_write(item["sku"], qty=qty, location_id=_active_shopify_location_id())
+                queue_item_write(item["sku"], qty=qty, location_id=_active_shop_location_id())
                 return qty
 
             elif key == '+':
@@ -7212,22 +7227,22 @@ def change_location(stdscr, item):
         regal=regal,
         fach=fach,
         platz=platz,
-        location_id=_active_shopify_location_id(),
+        location_id=_active_shop_location_id(),
     )
     return {"regal": regal, "fach": fach, "platz": platz}
     
 def edit_item(stdscr, item):
-    is_local_item = (item.get("sync_status") or "") == "local" and not item.get("shopify_product_id")
-    current_status = _normalize_shopify_product_status(item.get("shopify_product_status") or "DRAFT")
+    is_local_item = (item.get("sync_status") or "") == "local" and not item.get("shop_product_id")
+    current_status = _normalize_shop_product_status(item.get("shop_product_status") or "DRAFT")
     state = {
         "sku": _display_sku_value(item),
         "name": item.get("name") or "",
         "barcode": item.get("barcode") or "",
-        "shopify_description": item.get("shopify_description") or "",
-        "shopify_price": item.get("shopify_price") or "",
-        "shopify_compare_at_price": item.get("shopify_compare_at_price") or "",
-        "shopify_unit_cost": item.get("shopify_unit_cost") or "",
-        "shopify_weight_grams": "" if item.get("shopify_weight_grams") is None else str(item.get("shopify_weight_grams")),
+        "shop_description": item.get("shop_description") or "",
+        "shop_price": item.get("shop_price") or "",
+        "shop_compare_at_price": item.get("shop_compare_at_price") or "",
+        "shop_unit_cost": item.get("shop_unit_cost") or "",
+        "shop_weight_grams": "" if item.get("shop_weight_grams") is None else str(item.get("shop_weight_grams")),
         "regal": item.get("regal") or "",
         "fach": item.get("fach") or "",
         "platz": item.get("platz") or "",
@@ -7244,17 +7259,17 @@ def edit_item(stdscr, item):
                 {"name": "name", "label": t("field_name_short"), "value": state["name"]},
                 {"name": "barcode", "label": t("field_barcode"), "value": state["barcode"]},
                 {
-                    "name": "shopify_description",
-                    "label": t("field_shopify_description"),
-                    "value": _fit(clean_shopify_description(state["shopify_description"]).replace("\n", " / "), 48),
+                    "name": "shop_description",
+                    "label": t("field_shop_description"),
+                    "value": _fit(clean_shop_description(state["shop_description"]).replace("\n", " / "), 48),
                     "read_only": True,
-                    "action": "shopify_description",
+                    "action": "shop_description",
                 },
-                {"name": "shopify_price", "label": t("field_shopify_price"), "value": state["shopify_price"]},
-                {"name": "shopify_compare_at_price", "label": t("field_shopify_compare_price"), "value": state["shopify_compare_at_price"]},
-                {"name": "shopify_unit_cost", "label": t("field_shopify_unit_cost"), "value": state["shopify_unit_cost"]},
-                {"name": "shopify_weight_grams", "label": t("field_shopify_weight"), "value": state["shopify_weight_grams"]},
-                {"name": "shopify_product_status", "label": t("field_shopify_status"), "value": _localized_shopify_product_status(current_status), "read_only": True, "action": "shopify_status"},
+                {"name": "shop_price", "label": t("field_shop_price"), "value": state["shop_price"]},
+                {"name": "shop_compare_at_price", "label": t("field_shop_compare_price"), "value": state["shop_compare_at_price"]},
+                {"name": "shop_unit_cost", "label": t("field_shop_unit_cost"), "value": state["shop_unit_cost"]},
+                {"name": "shop_weight_grams", "label": t("field_shop_weight"), "value": state["shop_weight_grams"]},
+                {"name": "shop_product_status", "label": t("field_shop_status"), "value": _localized_shop_product_status(current_status), "read_only": True, "action": "shop_status"},
                 {"name": "regal", "label": t("field_regal_short"), "value": state["regal"]},
                 {"name": "fach", "label": t("field_fach_short"), "value": state["fach"]},
                 {"name": "platz", "label": t("field_platz_short"), "value": state["platz"]},
@@ -7274,16 +7289,16 @@ def edit_item(stdscr, item):
             return
         if "__action__" in res:
             values = res.get("__values__") or {}
-            state.update({key: value for key, value in values.items() if key in state and key != "shopify_description"})
+            state.update({key: value for key, value in values.items() if key in state and key != "shop_description"})
             active = int(res.get("__active__") or 0)
-            if res["__action__"] == "shopify_status":
-                chosen_status = shopify_product_status_dialog(stdscr, current_status)
+            if res["__action__"] == "shop_status":
+                chosen_status = shop_product_status_dialog(stdscr, current_status)
                 if chosen_status:
                     current_status = chosen_status
-            elif res["__action__"] == "shopify_description":
-                description = shopify_description_dialog(stdscr, state["shopify_description"])
+            elif res["__action__"] == "shop_description":
+                description = shop_description_dialog(stdscr, state["shop_description"])
                 if description is not None:
-                    state["shopify_description"] = description
+                    state["shop_description"] = description
             continue
         break
 
@@ -7311,7 +7326,7 @@ def edit_item(stdscr, item):
         message_box(stdscr, t("error"), t("quantity_must_be_number"))
         return
 
-    weight_grams_raw = (res.get("shopify_weight_grams") or "").strip()
+    weight_grams_raw = (res.get("shop_weight_grams") or "").strip()
     weight_grams = None
     if weight_grams_raw:
         try:
@@ -7326,8 +7341,8 @@ def edit_item(stdscr, item):
     push_mode = edit_item_save_mode_dialog(stdscr, is_local_item)
     if push_mode in (None, "discard"):
         return
-    push_to_shopify = push_mode == "shopify"
-    sync_action = "create" if is_local_item and push_to_shopify else "update"
+    push_to_shop = push_mode == "shop"
+    sync_action = "create" if is_local_item and push_to_shop else "update"
     product_status = "DRAFT" if sync_action == "create" else current_status
 
     def action():
@@ -7337,24 +7352,24 @@ def edit_item(stdscr, item):
             if sku != item["sku"]:
                 cur.execute("UPDATE item_location_inventory SET sku=%s WHERE sku=%s", (sku, item["sku"]))
                 cur.execute("UPDATE inventory_lines SET sku=%s WHERE sku=%s", (sku, item["sku"]))
-                cur.execute("UPDATE shopify_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
-                cur.execute("UPDATE shopify_fulfillment_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
+                cur.execute("UPDATE shop_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
+                cur.execute("UPDATE shop_fulfillment_order_items SET sku=%s WHERE sku=%s", (sku, item["sku"]))
             cur.execute("""
                 UPDATE items
                 SET sku=%s,
                     display_sku=%s,
                     name=%s,
                     barcode=%s,
-                    shopify_description=%s,
-                    shopify_product_status=%s,
-                    shopify_price=%s,
-                    shopify_compare_at_price=%s,
-                    shopify_unit_cost=%s,
-                    shopify_weight_grams=%s,
-                    shopify_product_dirty=%s,
-                    shopify_product_sync_action=%s,
-                    shopify_product_sync_error=NULL,
-                    sync_status=CASE WHEN %s THEN 'shopify_pending' ELSE sync_status END,
+                    shop_description=%s,
+                    shop_product_status=%s,
+                    shop_price=%s,
+                    shop_compare_at_price=%s,
+                    shop_unit_cost=%s,
+                    shop_weight_grams=%s,
+                    shop_product_dirty=%s,
+                    shop_product_sync_action=%s,
+                    shop_product_sync_error=NULL,
+                    sync_status=CASE WHEN %s THEN 'shop_pending' ELSE sync_status END,
                     regal=%s,
                     fach=%s,
                     platz=%s,
@@ -7371,15 +7386,15 @@ def edit_item(stdscr, item):
                 sku,
                 res["name"].strip(),
                 res.get("barcode", "").strip() or None,
-                state["shopify_description"].strip() or None,
+                state["shop_description"].strip() or None,
                 product_status,
-                res.get("shopify_price", "").strip() or None,
-                res.get("shopify_compare_at_price", "").strip() or None,
-                res.get("shopify_unit_cost", "").strip() or None,
+                res.get("shop_price", "").strip() or None,
+                res.get("shop_compare_at_price", "").strip() or None,
+                res.get("shop_unit_cost", "").strip() or None,
                 weight_grams,
-                push_to_shopify,
-                sync_action if push_to_shopify else None,
-                push_to_shopify,
+                push_to_shop,
+                sync_action if push_to_shop else None,
+                push_to_shop,
                 regal,
                 fach,
                 platz,
@@ -7395,39 +7410,39 @@ def edit_item(stdscr, item):
     run_background_action_dialog(stdscr, t("item_save_action_title"), action, detail=t("item_save_detail"))
 
 
-def _normalize_shopify_product_status(value):
+def _normalize_shop_product_status(value):
     normalized = str(value or "DRAFT").strip().upper()
     return normalized if normalized in {"ACTIVE", "DRAFT"} else "DRAFT"
 
 
-def _localized_shopify_product_status(value):
-    normalized = _normalize_shopify_product_status(value)
+def _localized_shop_product_status(value):
+    normalized = _normalize_shop_product_status(value)
     if current_language() == "de":
         return "Aktiv" if normalized == "ACTIVE" else "Entwurf"
     return "Active" if normalized == "ACTIVE" else "Draft"
 
 
-def shopify_product_status_dialog(stdscr, current_status):
+def shop_product_status_dialog(stdscr, current_status):
     options = [
-        {"value": "DRAFT", "label": t("shopify_status_draft")},
-        {"value": "ACTIVE", "label": t("shopify_status_active")},
+        {"value": "DRAFT", "label": t("shop_status_draft")},
+        {"value": "ACTIVE", "label": t("shop_status_active")},
     ]
-    return choice_dialog(stdscr, t("shopify_status_title"), options, _normalize_shopify_product_status(current_status), cancel_returns_none=True)
+    return choice_dialog(stdscr, t("shop_status_title"), options, _normalize_shop_product_status(current_status), cancel_returns_none=True)
 
 
 def edit_item_save_mode_dialog(stdscr, is_local_item):
     if is_local_item:
         options = [
-            {"value": "shopify", "label": t("edit_item_save_shopify_draft")},
+            {"value": "shop", "label": t("edit_item_save_shop_draft")},
             {"value": "local", "label": t("edit_item_save_local")},
             {"value": "discard", "label": t("edit_item_save_discard")},
         ]
     else:
         options = [
-            {"value": "shopify", "label": t("edit_item_save_shopify")},
+            {"value": "shop", "label": t("edit_item_save_shop")},
             {"value": "discard", "label": t("edit_item_save_discard")},
         ]
-    return choice_dialog(stdscr, t("edit_item_save_title"), options, "shopify", cancel_returns_none=True)
+    return choice_dialog(stdscr, t("edit_item_save_title"), options, "shop", cancel_returns_none=True)
 
 def print_label(stdscr, item):
 
@@ -8318,13 +8333,13 @@ def _bulk_print_mode_dialog(stdscr):
     )
 
 
-def _bulk_shopify_queue_mode_dialog(stdscr):
+def _bulk_shop_queue_mode_dialog(stdscr):
     return choice_dialog(
         stdscr,
-        t("bulk_shopify_tracking_title"),
+        t("bulk_shop_tracking_title"),
         [
-            {"value": "queue", "label": t("bulk_shopify_tracking_queue")},
-            {"value": "manual", "label": t("bulk_shopify_tracking_manual")},
+            {"value": "queue", "label": t("bulk_shop_tracking_queue")},
+            {"value": "manual", "label": t("bulk_shop_tracking_manual")},
         ],
         "manual",
         cancel_returns_none=True,
@@ -8558,13 +8573,13 @@ def run_partial_execution_for_order(stdscr, order, order_items):
         if print_mode in {"both", "note"}:
             _print_delivery_note_pdf_path(order, note_path)
 
-        if created.get("label_id") is not None and _shipping_carrier_allows_shopify(carrier) and _order_allows_shopify_fulfillment(order):
+        if created.get("label_id") is not None and _shipping_carrier_allows_shop(carrier) and _order_allows_shop_fulfillment(order):
             fresh_rows = list_shipping_labels(order["order_id"])
             current_label = next((row for row in fresh_rows if row["id"] == created["label_id"]), None)
             if current_label:
-                queue_result = enqueue_shopify_fulfillment_job_for_items(current_label, selected_items, notify_customer=False)
+                queue_result = enqueue_shop_fulfillment_job_for_items(current_label, selected_items, notify_customer=False)
                 if queue_result.get("created"):
-                    update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
+                    update_shipping_label_status(created["label_id"], "SHOP_QUEUED")
         apply_custom_order_execution(order, selected_items)
         message_box(
             stdscr,
@@ -8637,10 +8652,10 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
     print_mode = _bulk_print_mode_dialog(stdscr)
     if print_mode is None:
         return
-    shopify_mode = "manual"
-    if _shipping_carrier_allows_shopify(carrier) and any(_order_allows_shopify_fulfillment(row) for row in selected_orders):
-        shopify_mode = _bulk_shopify_queue_mode_dialog(stdscr)
-        if shopify_mode is None:
+    shop_mode = "manual"
+    if _shipping_carrier_allows_shop(carrier) and any(_order_allows_shop_fulfillment(row) for row in selected_orders):
+        shop_mode = _bulk_shop_queue_mode_dialog(stdscr)
+        if shop_mode is None:
             return
 
     carrier_map = {row["order_id"]: carrier for row in selected_orders}
@@ -8679,23 +8694,23 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                         note_titles_to_print.append(f"Lieferschein {order['order_name']}")
 
                     if (
-                        shopify_mode == "queue"
+                        shop_mode == "queue"
                         and created.get("label_id") is not None
-                        and _shipping_carrier_allows_shopify(carrier)
-                        and _order_allows_shopify_fulfillment(order)
+                        and _shipping_carrier_allows_shop(carrier)
+                        and _order_allows_shop_fulfillment(order)
                     ):
                         labels_for_order = ensure_order_shipments_loaded(order["order_id"])
                         created_row = next((row for row in labels_for_order if row["id"] == created["label_id"]), None)
                         if created_row:
                             try:
-                                queue_result = enqueue_shopify_fulfillment_job(created_row, notify_customer=False)
+                                queue_result = enqueue_shop_fulfillment_job(created_row, notify_customer=False)
                             except Exception:
-                                PRINT_LOGGER.exception("Bulk Shopify Queue fehlgeschlagen order=%s", order.get("order_name"))
+                                PRINT_LOGGER.exception("Bulk Shop Queue fehlgeschlagen order=%s", order.get("order_name"))
                                 queue_failed_count += 1
                             else:
                                 if queue_result.get("created"):
                                     queued_count += 1
-                                    update_shipping_label_status(created["label_id"], "SHOPIFY_QUEUED")
+                                    update_shipping_label_status(created["label_id"], "SHOP_QUEUED")
 
                     apply_custom_order_execution(order, order_items)
                     success_count += 1
@@ -8706,11 +8721,11 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     short_error = str(exc).strip() or exc.__class__.__name__
                     last_failure_summary = f"{order.get('order_name')}: {short_error}"[:220]
                     LOGGER.exception(
-                        "Bulk-Ausfuehrung fehlgeschlagen order=%s carrier=%s print_mode=%s shopify_mode=%s",
+                        "Bulk-Ausfuehrung fehlgeschlagen order=%s carrier=%s print_mode=%s shop_mode=%s",
                         order.get("order_name"),
                         carrier,
                         print_mode,
-                        shopify_mode,
+                        shop_mode,
                     )
                     LOGGER.error(
                         "Bulk Fehler order=%s detail=%s",
@@ -8852,9 +8867,9 @@ def create_manual_shipping_label(stdscr):
                     return
                 print_mode = next_mode
             elif result["__action__"] == "customer":
-                chosen_customer = shopify_customer_dialog(stdscr)
+                chosen_customer = shop_customer_dialog(stdscr)
                 if chosen_customer:
-                    state, country_code = _apply_shopify_customer_to_manual_state(state, chosen_customer, country_code)
+                    state, country_code = _apply_shop_customer_to_manual_state(state, chosen_customer, country_code)
             elif result["__action__"] == "paste_address":
                 pasted_address = manual_address_text_dialog(stdscr)
                 if pasted_address is not None:
@@ -8970,7 +8985,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         if reload_rows:
             filter_order_id = None if show_all else (selected_order["order_id"] if selected_order else None)
             rows = list_shipping_labels(filter_order_id)
-            job_rows = get_latest_shopify_jobs_for_labels([row.get("id") for row in rows])
+            job_rows = get_latest_shop_jobs_for_labels([row.get("id") for row in rows])
             reload_rows = False
             if selected >= len(rows):
                 selected = max(0, len(rows) - 1)
@@ -9016,14 +9031,14 @@ def shipping_history_dialog(stdscr, selected_order=None):
             detail_lines.append(_fit(t("history_detail_status", value=chosen.get("status") or "-"), right_width - 2))
             detail_lines.append(_fit(t("history_detail_source", value=_shipment_source_label(chosen.get("source"))), right_width - 2))
             detail_lines.append(_fit(t("history_detail_reference", value=chosen.get("shipment_reference") or "-"), right_width - 2))
-            if chosen.get("shopify_fulfillment_id"):
-                detail_lines.append(_fit(t("history_detail_shopify_fulfillment", value=chosen.get("shopify_fulfillment_id")), right_width - 2))
+            if chosen.get("shop_fulfillment_id"):
+                detail_lines.append(_fit(t("history_detail_shop_fulfillment", value=chosen.get("shop_fulfillment_id")), right_width - 2))
             if job:
-                detail_lines.append(_fit(t("history_detail_shopify_job", status=job.get("status") or "-", attempts=job.get("attempts") or 0), right_width - 2))
+                detail_lines.append(_fit(t("history_detail_shop_job", status=job.get("status") or "-", attempts=job.get("attempts") or 0), right_width - 2))
                 if job.get("result_message"):
-                    detail_lines.append(_fit(t("history_detail_shopify_message", value=job["result_message"]), right_width - 2))
+                    detail_lines.append(_fit(t("history_detail_shop_message", value=job["result_message"]), right_width - 2))
             else:
-                detail_lines.append(_fit(t("history_detail_shopify_empty"), right_width - 2))
+                detail_lines.append(_fit(t("history_detail_shop_empty"), right_width - 2))
             detail_lines.append("")
             detail_lines.append(_fit(t("history_detail_pdf", value=chosen.get("label_path") or "-"), right_width - 2))
             if chosen.get("tracking_url"):
@@ -9097,28 +9112,28 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 reload_rows = True
         elif key == curses.KEY_F10 and chosen:
             if str(chosen.get("order_id") or "").startswith("manual-"):
-                message_box(stdscr, t("shopify_queue_title"), t("manual_labels_no_shopify_order"))
+                message_box(stdscr, t("shop_queue_title"), t("manual_labels_no_shop_order"))
                 continue
             if (chosen.get("carrier") or "").strip().lower() in {"test", "free"}:
-                message_box(stdscr, t("shopify_queue_title"), t("test_and_free_no_shopify"))
+                message_box(stdscr, t("shop_queue_title"), t("test_and_free_no_shop"))
                 continue
-            if (chosen.get("source") or "").strip().lower() == "shopify":
-                message_box(stdscr, t("shopify_queue_title"), t("shipment_from_shopify"))
+            if (chosen.get("source") or "").strip().lower() == shop_system(SETTINGS):
+                message_box(stdscr, t("shop_queue_title"), t("shipment_from_shop"))
                 continue
-            if not confirm_box(stdscr, t("shopify_confirm_title"), t("shopify_send_fulfillment_confirm", track_id=chosen["track_id"])):
+            if not confirm_box(stdscr, t("shop_confirm_title"), t("shop_send_fulfillment_confirm", track_id=chosen["track_id"])):
                 continue
             try:
-                queue_result = enqueue_shopify_fulfillment_job(chosen, notify_customer=False)
+                queue_result = enqueue_shop_fulfillment_job(chosen, notify_customer=False)
             except Exception as exc:
-                PRINT_LOGGER.exception("Shopify Queue fehlgeschlagen track=%s", chosen.get("track_id"))
-                update_shipping_label_status(chosen["id"], "SHOPIFY_QUEUE_FAILED", str(exc)[:160])
-                message_box(stdscr, t("shopify_queue_title"), f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
+                PRINT_LOGGER.exception("Shop Queue fehlgeschlagen track=%s", chosen.get("track_id"))
+                update_shipping_label_status(chosen["id"], "SHOP_QUEUE_FAILED", str(exc)[:160])
+                message_box(stdscr, t("shop_queue_title"), f"{str(exc)[:28]} {PRINT_LOG_PATH.name}"[:56])
             else:
                 if queue_result.get("created"):
-                    update_shipping_label_status(chosen["id"], "SHOPIFY_QUEUED")
-                    message_box(stdscr, t("shopify_queue_title"), t("shopify_job_queued", job_id=queue_result["job_id"]))
+                    update_shipping_label_status(chosen["id"], "SHOP_QUEUED")
+                    message_box(stdscr, t("shop_queue_title"), t("shop_job_queued", job_id=queue_result["job_id"]))
                 else:
-                    message_box(stdscr, t("shopify_queue_title"), t("shopify_job_running", job_id=queue_result["job_id"]))
+                    message_box(stdscr, t("shop_queue_title"), t("shop_job_running", job_id=queue_result["job_id"]))
                 reload_rows = True
 
 
@@ -9243,7 +9258,7 @@ def orders_dialog(stdscr):
             order_shipments,
             not (selected_order_id and selected_order_id not in order_shipments_cache),
             right_width,
-            _ACTIVE_SHOPIFY_LOCATION_NAME or _active_shopify_location_id() or "-",
+            _ACTIVE_SHOP_LOCATION_NAME or _active_shop_location_id() or "-",
             t,
             _fit,
             format_address,
@@ -9697,8 +9712,8 @@ def main(stdscr):
     filter_local = False
     sort_mode = "location"
     external_mode = "hide"
-    shopify_locations = []
-    active_shopify_location = None
+    shop_locations = []
+    active_shop_location = None
     items_snapshot = []
     last_items_snapshot_refresh_at = None
     items = []
@@ -9732,10 +9747,10 @@ def main(stdscr):
             items_snapshot_reload_pending = False
             if loader_result.get("error") is None and loader_result.get("value") is not None:
                 items_snapshot = loader_result["value"]
-                shopify_locations = get_shopify_locations_snapshot()
-                active_shopify_location = _resolve_active_shopify_location(
-                    shopify_locations,
-                    active_shopify_location["location_id"] if active_shopify_location else None,
+                shop_locations = get_shop_locations_snapshot()
+                active_shop_location = _resolve_active_shop_location(
+                    shop_locations,
+                    active_shop_location["location_id"] if active_shop_location else None,
                 )
                 last_items_snapshot_refresh_at = loader_result["loaded_at"]
                 rebuild_items_view = True
@@ -9745,7 +9760,7 @@ def main(stdscr):
             _SERVICE_RUNTIME_LOADER.request(
                 "service_runtime_state",
                 get_service_runtime_state,
-                SHOPIFY_SYNC_SERVICE,
+                SHOP_SYNC_SERVICE,
                 SERVICE_RUNTIME_CACHE_SECONDS,
                 True,
             )
@@ -9753,14 +9768,14 @@ def main(stdscr):
 
         if reload_items_snapshot:
             try:
-                shopify_locations = get_shopify_locations_snapshot()
-                active_shopify_location = _resolve_active_shopify_location(
-                    shopify_locations,
-                    active_shopify_location["location_id"] if active_shopify_location else None,
+                shop_locations = get_shop_locations_snapshot()
+                active_shop_location = _resolve_active_shop_location(
+                    shop_locations,
+                    active_shop_location["location_id"] if active_shop_location else None,
                 )
                 if not items_snapshot:
                     items_snapshot = _load_items_snapshot(
-                        active_shopify_location["location_id"] if active_shopify_location else None
+                        active_shop_location["location_id"] if active_shop_location else None
                     )
                     last_items_snapshot_refresh_at = time.monotonic()
                     rebuild_items_view = True
@@ -9768,7 +9783,7 @@ def main(stdscr):
                     _ITEMS_SNAPSHOT_LOADER.request(
                         "items_snapshot",
                         _load_items_snapshot,
-                        active_shopify_location["location_id"] if active_shopify_location else None,
+                        active_shop_location["location_id"] if active_shop_location else None,
                     )
                     items_snapshot_reload_pending = True
                 reload_items_snapshot = False
@@ -9821,8 +9836,8 @@ def main(stdscr):
             filter_text,
             show_secondary_help,
             external_mode,
-            active_shopify_location,
-            format_shopify_sync_status_label(sync_state),
+            active_shop_location,
+            format_shop_sync_status_label(sync_state),
             notice_text=(transient_notice if transient_notice and time.monotonic() < transient_notice_until else None),
         )
         if transient_notice and time.monotonic() >= transient_notice_until:
@@ -9886,14 +9901,14 @@ def main(stdscr):
             rebuild_items_view = True
 
         elif key == curses.KEY_F2:
-            if _shopify_location_switch_enabled():
-                previous_location = _cycle_shopify_location(
-                    shopify_locations,
-                    active_shopify_location["location_id"] if active_shopify_location else None,
+            if _shop_location_switch_enabled():
+                previous_location = _cycle_shop_location(
+                    shop_locations,
+                    active_shop_location["location_id"] if active_shop_location else None,
                     -1,
                 )
                 if previous_location is not None:
-                    active_shopify_location = previous_location
+                    active_shop_location = previous_location
                     left_selected = 0
                     left_top_index = 0
                     right_selected = 0
@@ -9909,14 +9924,14 @@ def main(stdscr):
                     reload_items_snapshot = True
 
         elif key == curses.KEY_F3:
-            if _shopify_location_switch_enabled():
-                next_location = _cycle_shopify_location(
-                    shopify_locations,
-                    active_shopify_location["location_id"] if active_shopify_location else None,
+            if _shop_location_switch_enabled():
+                next_location = _cycle_shop_location(
+                    shop_locations,
+                    active_shop_location["location_id"] if active_shop_location else None,
                     1,
                 )
                 if next_location is not None:
-                    active_shopify_location = next_location
+                    active_shop_location = next_location
                     left_selected = 0
                     left_top_index = 0
                     right_selected = 0
@@ -10035,10 +10050,10 @@ def main(stdscr):
 
         elif key == curses.KEY_F11 + 12:
             settings_dialog(stdscr)
-            shopify_locations = get_shopify_locations_snapshot()
-            active_shopify_location = _resolve_active_shopify_location(
-                shopify_locations,
-                (SETTINGS.get("shopify_active_location_id") or "").strip() or None,
+            shop_locations = get_shop_locations_snapshot()
+            active_shop_location = _resolve_active_shop_location(
+                shop_locations,
+                (SETTINGS.get("shop_active_location_id") or "").strip() or None,
             )
             reload_items_snapshot = True
 

@@ -7,10 +7,10 @@ Lager-MC is a terminal-based application for inventory, orders, stocktaking and 
 This manual covers:
 
 - stock management with `Shelf / Bin / Slot` location logic
-- Shopify orders
+- Shopify or WooCommerce orders
 - pick lists and delivery notes
 - shipping with GLS, Deutsche Post INTERNETMARKE and address labels
-- shipping history with reprint, cancellation and Shopify queue
+- shipping history with reprint, cancellation and shop queue
 - stocktaking with snapshots and CSV export
 
 ## Current shipping state
@@ -24,7 +24,7 @@ Also available:
 
 - `Address label` for internal labels without a carrier API
 
-The carrier structure uses central carrier definitions with shared shipping history and Shopify handover.
+The carrier structure uses central carrier definitions with shared shipping history and shop handover.
 
 Details about carrier integration points are available in [docs/shipping-providers.en.md](/home/chrisi/Lagerverwaltung/docs/shipping-providers.en.md).
 
@@ -72,7 +72,7 @@ These points are set before productive use:
 1. database connection
 2. pick list and delivery note printers
 3. shipping printers and media formats per carrier
-4. Shopify sync
+4. sync server for the selected shop system
 5. shipping credentials for GLS and POST
 
 The settings dialog is available under `Shift+F11`.
@@ -182,7 +182,7 @@ Properties:
 
 - no shipment number
 - no carrier API
-- no Shopify transfer
+- no shop transfer
 
 Address labels can be used for single shipments, manual labels and bulk execution.
 
@@ -195,7 +195,7 @@ Important functions:
 - `F3` country
 - `F4` carrier-specific selection
 - `F5` output `PDF + Print` or `PDF only`
-- `F6` load customer from the locally synchronized Shopify customer table
+- `F6` load customer from the locally synchronized shop customer table
 
 ## Shipping history
 
@@ -206,7 +206,7 @@ Important actions:
 - `F5` output the existing PDF again
 - `F6` cancel if supported by the carrier
 - `F7` reprint
-- `F10` send to Shopify
+- `F10` send to the shop
 
 Each entry shows:
 
@@ -217,7 +217,7 @@ Each entry shows:
 - reference
 - local PDF path
 - tracking URL
-- latest Shopify job
+- latest shop job
 
 ## Pick lists and delivery notes
 
@@ -278,11 +278,15 @@ Important settings in the shipping tab:
 
 - active shipping carriers
 - printer and media format per carrier
-- Shopify tracking mode per carrier
+- shop tracking mode per carrier
 - tracking URL per carrier
 - GLS credentials
 - POST credentials
 - template for address labels
+
+## Shop selection
+
+Each installation uses Shopify or WooCommerce with its own sync server. Warehouse operations read and write the local PostgreSQL database. WooCommerce setup and supported operations: [WooCommerce sync](woocommerce-sync.md).
 
 ## Shopify sync
 

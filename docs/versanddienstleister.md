@@ -29,7 +29,7 @@ Dort werden pro Carrier unter anderem gepflegt:
 - `label`
 - `short_label`
 - `default_format`
-- `shopify_allowed`
+- `shop_allowed`
 - `option_mode`
 - zugehoerige Settings-Felder fuer Drucker, Format, Tracking-Modus, Tracking-URL und optionale Vorlage
 - zusätzliche Settings-Felder fuer carrier-spezifische Zugangsdaten
@@ -41,10 +41,10 @@ Die gemeinsame Datenhaltung liegt in [shipping/history.py](/home/chrisi/Lagerver
 Abgedeckt sind dort:
 
 - Schema und Migration fuer `shipping_labels`
-- Schema und Migration fuer `shopify_fulfillment_jobs`
+- Schema und Migration fuer `shop_fulfillment_jobs`
 - Laden, Schreiben und Aktualisieren von Versandlabels
-- Anlegen und Bearbeiten von Shopify-Fulfillment-Jobs
-- Upsert von aus Shopify eingelesenen Sendungen
+- Anlegen und Bearbeiten von Shop-Fulfillment-Jobs
+- Upsert von aus dem Shop eingelesenen Sendungen
 
 Diese Logik wird sowohl von der TUI als auch vom Shopify-Sync genutzt.
 
@@ -74,11 +74,11 @@ Aktuelle Modi:
 
 Neue Carrier koennen einen eigenen Modus bekommen oder ohne Zusatzdialog arbeiten.
 
-## Shopify-Weitergabe
+## Shop-Weitergabe
 
-Carrier mit `shopify_allowed=True` koennen an Shopify uebergeben werden.
+Carrier mit `shop_allowed=True` koennen ueber die Datenbank an den Shop uebergeben werden.
 
-Die Shopify-Weitergabe arbeitet mit:
+Die Shop-Weitergabe arbeitet mit:
 
 - Tracking-Nummer
 - Carrier-Name

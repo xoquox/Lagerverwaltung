@@ -6,15 +6,20 @@ BRANCH="${LAGER_MC_BRANCH:-main}"
 TARGET_DIR="${LAGER_MC_TARGET_DIR:-${HOME}/Lagerverwaltung}"
 BUNDLE_PATH=""
 RUN_MIGRATIONS="ask"
+SHOP_SYSTEM_VALUE=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--branch <branch>] [--target <dir>] [--bundle <bundle.zip>] [--run-migrations] [--skip-migrations]
+Usage: $(basename "$0") [--shop-system <shopify|woocommerce>] [--branch <branch>] [--target <dir>] [--bundle <bundle.zip>] [--run-migrations] [--skip-migrations]
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --shop-system)
+      SHOP_SYSTEM_VALUE="${2:-}"
+      shift 2
+      ;;
     --branch)
       BRANCH="${2:-}"
       shift 2
@@ -55,6 +60,9 @@ fi
 git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${TARGET_DIR}"
 
 args=()
+if [[ -n "${SHOP_SYSTEM_VALUE}" ]]; then
+  args+=(--shop-system "${SHOP_SYSTEM_VALUE}")
+fi
 if [[ -n "${BUNDLE_PATH}" ]]; then
   args+=(--bundle "${BUNDLE_PATH}")
 fi

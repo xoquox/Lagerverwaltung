@@ -9,14 +9,15 @@ from pathlib import Path
 
 
 PORTABLE_KEYS = {
-    "db_host", "db_name", "db_user", "db_pass",
+    "db_host", "db_port", "db_name", "db_user", "db_pass",
+    "shop_system", "shop_location_mode", "shop_active_location_id",
     "language", "color_theme",
     "gls_api_url", "gls_user", "gls_password", "gls_contact_id",
     "post_api_url", "post_api_key", "post_api_secret", "post_user", "post_password", "post_partner_id",
     "shipping_active_carriers",
     "shipping_services", "shipping_packaging_weight_grams",
-    "shopify_tracking_mode_gls", "shopify_tracking_mode_post",
-    "shopify_tracking_url_gls", "shopify_tracking_url_post",
+    "shop_tracking_mode_gls", "shop_tracking_mode_post",
+    "shop_tracking_url_gls", "shop_tracking_url_post",
     "delivery_note_sender_name", "delivery_note_sender_street", "delivery_note_sender_city", "delivery_note_sender_email",
 }
 
@@ -32,7 +33,11 @@ def _load_merged_settings(root_dir):
     settings = {}
     for path in (root_dir / "settings.json", root_dir / "settings.local.json"):
         if path.exists():
-            settings.update(json.loads(path.read_text(encoding="utf-8")))
+            layer = json.loads(path.read_text(encoding="utf-8"))
+            for key in list(layer):
+                if key.startswith("shopify_"):
+                    layer.setdefault("shop_" + key[len("shopify_"):], layer.pop(key))
+            settings.update(layer)
     return settings
 
 
@@ -81,6 +86,7 @@ def create_bundle(root_dir):
     (stage_dir / "files" / "assets").mkdir(parents=True, exist_ok=True)
 
     _copy_if_exists(root_dir / "shopify-sync" / ".env", stage_dir / "files" / "shopify-sync" / ".env")
+    _copy_if_exists(root_dir / "woocommerce-sync" / ".env", stage_dir / "files" / "woocommerce-sync" / ".env")
     _copy_if_exists(root_dir / "fonts" / "bahnschrift.ttf", stage_dir / "files" / "fonts" / "bahnschrift.ttf")
     _copy_if_exists(root_dir / "fonts" / "bahnschrift-condensed.ttf", stage_dir / "files" / "fonts" / "bahnschrift-condensed.ttf")
     _copy_if_exists(root_dir / "assets" / "lager-mc.svg", stage_dir / "files" / "assets" / "lager-mc.svg")
@@ -117,7 +123,7 @@ def create_bundle(root_dir):
                 "",
                 "Enthalten sind portable/private Projektdateien wie:",
                 "- API-Zugaenge und portable Settings",
-                "- Shopify-Sync .env",
+                "- Shopify-/WooCommerce-Sync .env (falls vorhanden)",
                 "- GLS-Zugangspdf",
                 "- Fonts, Logo und ausgewaehlte Vorlagen/Theme-Dateien",
                 "",

@@ -7,10 +7,10 @@ Lager-MC ist eine terminalbasierte Anwendung fuer Lagerbestand, Bestellungen, In
 Das Handbuch beschreibt diese Bereiche:
 
 - Lagerbestand mit Lagerplatzlogik `Regal / Fach / Platz`
-- Bestellungen aus Shopify
+- Bestellungen aus Shopify oder WooCommerce
 - Picklisten und Lieferscheine
 - Versand mit GLS, Deutsche Post INTERNETMARKE und Adresslabels
-- Versandhistory mit Reprint, Storno und Shopify-Queue
+- Versandhistory mit Reprint, Storno und Shop-Queue
 - Inventur mit Snapshot und CSV-Export
 
 ## Aktueller Versandstand
@@ -24,7 +24,7 @@ Zusaetzlich vorhanden:
 
 - `Adresslabel` fuer interne Adresslabels ohne Carrier-API
 
-Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shopify-Anbindung.
+Die Carrier-Struktur verwendet zentrale Carrier-Definitionen mit gemeinsamer Versandhistory und Shop-Anbindung.
 
 Details zur Carrier-Struktur und zu den Integrationspunkten stehen in [docs/versanddienstleister.md](/home/chrisi/Lagerverwaltung/docs/versanddienstleister.md).
 
@@ -72,7 +72,7 @@ Vor dem ersten produktiven Einsatz werden diese Punkte gesetzt:
 1. Datenbankverbindung
 2. Picklisten- und Lieferschein-Drucker
 3. Versanddrucker und Formate je Carrier
-4. Shopify-Sync
+4. Sync-Server des ausgewaehlten Shopsystems
 5. Versandzugaenge fuer GLS und POST
 
 Die Einstellungen liegen unter `Shift+F11`.
@@ -182,7 +182,7 @@ Eigenschaften:
 
 - keine Sendungsnummer
 - keine Carrier-API
-- keine Shopify-Uebertragung
+- keine Shop-Uebertragung
 
 Adresslabels koennen fuer Einzelversand, manuelle Labels und Bulk-Ausfuehrung verwendet werden.
 
@@ -195,7 +195,7 @@ Wichtige Funktionen:
 - `F3` Land
 - `F4` dienstleister-spezifische Auswahl
 - `F5` Ausgabe `PDF + Drucken` oder `Nur PDF`
-- `F6` Kunde aus der lokal synchronisierten Shopify-Kundendatenbank laden
+- `F6` Kunde aus der lokal synchronisierten Shop-Kundendatenbank laden
 
 ## Versandhistory
 
@@ -206,7 +206,7 @@ Wichtige Aktionen:
 - `F5` vorhandene PDF erneut ausgeben
 - `F6` Storno, falls der Carrier das unterstuetzt
 - `F7` Reprint
-- `F10` an Shopify uebergeben
+- `F10` an den Shop uebergeben
 
 Die History zeigt pro Eintrag:
 
@@ -217,7 +217,7 @@ Die History zeigt pro Eintrag:
 - Referenz
 - lokaler PDF-Pfad
 - Tracking-URL
-- letzten Shopify-Job
+- letzten Shop-Job
 
 ## Picklisten und Lieferscheine
 
@@ -278,11 +278,15 @@ Wichtige Einstellungen im Versand-Tab:
 
 - aktive Versanddienste
 - Drucker und Formate je Carrier
-- Shopify-Tracking-Modus je Carrier
+- Shop-Tracking-Modus je Carrier
 - Tracking-URL je Carrier
 - GLS-Zugangsdaten
 - POST-Zugangsdaten
 - Vorlage fuer Adresslabels
+
+## Shopauswahl
+
+Jede Installation verwendet Shopify oder WooCommerce mit einem eigenen Sync-Server. Die Lagerfunktionen lesen und schreiben in der lokalen PostgreSQL-Datenbank. Einrichtung und Funktionsumfang fuer WooCommerce: [WooCommerce-Sync](woocommerce-sync.md).
 
 ## Shopify-Sync
 

@@ -1,11 +1,11 @@
-"""Gemeinsame SQL-Helfer fuer Versandlabel-History und Shopify-Fulfillment-Jobs."""
+"""Gemeinsame SQL-Helfer fuer Versandlabel-History und Shop-Fulfillment-Jobs."""
 
 import datetime
 import json
 
 
 SHIPPING_LABEL_TABLE = "shipping_labels"
-SHOPIFY_FULFILLMENT_JOB_TABLE = "shopify_fulfillment_jobs"
+SHOP_FULFILLMENT_JOB_TABLE = "shop_fulfillment_jobs"
 
 
 def ensure_shipping_history_schema(cur):
@@ -24,8 +24,8 @@ def ensure_shipping_history_schema(cur):
             label_path text NOT NULL DEFAULT '',
             last_error text,
             source text NOT NULL DEFAULT 'local',
-            shopify_fulfillment_id text,
-            shopify_synced_at timestamptz,
+            shop_fulfillment_id text,
+            shop_synced_at timestamptz,
             tracking_url text,
             created_at timestamptz NOT NULL DEFAULT NOW(),
             updated_at timestamptz NOT NULL DEFAULT NOW(),
@@ -44,8 +44,8 @@ def ensure_shipping_history_schema(cur):
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz")
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS cancelled_at timestamptz")
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'local'")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shopify_synced_at timestamptz")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shop_fulfillment_id text")
+    cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS shop_synced_at timestamptz")
     cur.execute(f"ALTER TABLE {SHIPPING_LABEL_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
     cur.execute(
         f"""
@@ -61,13 +61,13 @@ def ensure_shipping_history_schema(cur):
     )
     cur.execute(
         f"""
-        CREATE INDEX IF NOT EXISTS idx_shipping_labels_shopify_fulfillment
-        ON {SHIPPING_LABEL_TABLE}(shopify_fulfillment_id)
+        CREATE INDEX IF NOT EXISTS idx_shipping_labels_shop_fulfillment
+        ON {SHIPPING_LABEL_TABLE}(shop_fulfillment_id)
         """
     )
     cur.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {SHOPIFY_FULFILLMENT_JOB_TABLE} (
+        CREATE TABLE IF NOT EXISTS {SHOP_FULFILLMENT_JOB_TABLE} (
             id serial PRIMARY KEY,
             label_id integer,
             order_id text NOT NULL,
@@ -79,32 +79,32 @@ def ensure_shipping_history_schema(cur):
             status text NOT NULL DEFAULT 'pending',
             attempts integer NOT NULL DEFAULT 0,
             result_message text,
-            shopify_fulfillment_id text,
+            shop_fulfillment_id text,
             created_at timestamptz NOT NULL DEFAULT NOW(),
             updated_at timestamptz NOT NULL DEFAULT NOW(),
             processed_at timestamptz
         )
         """
     )
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS label_id integer")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS line_items_json text")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS result_message text")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS shopify_fulfillment_id text")
-    cur.execute(f"ALTER TABLE {SHOPIFY_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS processed_at timestamptz")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS label_id integer")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS tracking_url text")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS line_items_json text")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS notify_customer boolean NOT NULL DEFAULT FALSE")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS result_message text")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS shop_fulfillment_id text")
+    cur.execute(f"ALTER TABLE {SHOP_FULFILLMENT_JOB_TABLE} ADD COLUMN IF NOT EXISTS processed_at timestamptz")
     cur.execute(
         f"""
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_status_created
-        ON {SHOPIFY_FULFILLMENT_JOB_TABLE}(status, created_at)
+        CREATE INDEX IF NOT EXISTS idx_shop_fulfillment_jobs_status_created
+        ON {SHOP_FULFILLMENT_JOB_TABLE}(status, created_at)
         """
     )
     cur.execute(
         f"""
-        CREATE INDEX IF NOT EXISTS idx_shopify_fulfillment_jobs_label_created
-        ON {SHOPIFY_FULFILLMENT_JOB_TABLE}(label_id, created_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_shop_fulfillment_jobs_label_created
+        ON {SHOP_FULFILLMENT_JOB_TABLE}(label_id, created_at DESC)
         """
     )
 
@@ -128,8 +128,8 @@ def list_shipping_labels(db_factory, order_id=None, limit=400):
                 label_path,
                 last_error,
                 source,
-                shopify_fulfillment_id,
-                shopify_synced_at,
+                shop_fulfillment_id,
+                shop_synced_at,
                 tracking_url,
                 created_at,
                 updated_at,
@@ -157,8 +157,8 @@ def list_shipping_labels(db_factory, order_id=None, limit=400):
                 label_path,
                 last_error,
                 source,
-                shopify_fulfillment_id,
-                shopify_synced_at,
+                shop_fulfillment_id,
+                shop_synced_at,
                 tracking_url,
                 created_at,
                 updated_at,
@@ -213,7 +213,7 @@ def insert_shipping_label_history(
     weight_kg=1.0,
     carrier="gls",
     source="local",
-    shopify_fulfillment_id=None,
+    shop_fulfillment_id=None,
     tracking_url=None,
 ):
     con = db_factory()
@@ -231,8 +231,8 @@ def insert_shipping_label_history(
             status,
             label_path,
             source,
-            shopify_fulfillment_id,
-            shopify_synced_at,
+            shop_fulfillment_id,
+            shop_synced_at,
             tracking_url
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -247,11 +247,11 @@ def insert_shipping_label_history(
                status = EXCLUDED.status,
                label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), {SHIPPING_LABEL_TABLE}.label_path),
                source = CASE
-                   WHEN {SHIPPING_LABEL_TABLE}.source = 'local' AND EXCLUDED.source = 'shopify' THEN {SHIPPING_LABEL_TABLE}.source
+                   WHEN {SHIPPING_LABEL_TABLE}.source = 'local' AND EXCLUDED.source IN ('shopify', 'woocommerce') THEN {SHIPPING_LABEL_TABLE}.source
                    ELSE EXCLUDED.source
                END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, {SHIPPING_LABEL_TABLE}.shopify_fulfillment_id),
-               shopify_synced_at = COALESCE(EXCLUDED.shopify_synced_at, {SHIPPING_LABEL_TABLE}.shopify_synced_at),
+               shop_fulfillment_id = COALESCE(EXCLUDED.shop_fulfillment_id, {SHIPPING_LABEL_TABLE}.shop_fulfillment_id),
+               shop_synced_at = COALESCE(EXCLUDED.shop_synced_at, {SHIPPING_LABEL_TABLE}.shop_synced_at),
                tracking_url = COALESCE(EXCLUDED.tracking_url, {SHIPPING_LABEL_TABLE}.tracking_url),
                updated_at = NOW(),
                last_error = NULL
@@ -268,8 +268,8 @@ def insert_shipping_label_history(
             status,
             label_path,
             (source or "local").strip().lower() or "local",
-            shopify_fulfillment_id,
-            datetime.datetime.now() if shopify_fulfillment_id else None,
+            shop_fulfillment_id,
+            datetime.datetime.now() if shop_fulfillment_id else None,
             (tracking_url or "").strip() or None,
         ),
     )
@@ -342,7 +342,7 @@ def update_shipping_label_reprint(db_factory, label_id, label_path):
     con.close()
 
 
-def get_latest_shopify_job_for_label(db_factory, label_id):
+def get_latest_shop_job_for_label(db_factory, label_id):
     con = db_factory()
     cur = con.cursor()
     cur.execute(
@@ -357,11 +357,11 @@ def get_latest_shopify_job_for_label(db_factory, label_id):
             status,
             attempts,
             result_message,
-            shopify_fulfillment_id,
+            shop_fulfillment_id,
             created_at,
             updated_at,
             processed_at
-        FROM {SHOPIFY_FULFILLMENT_JOB_TABLE}
+        FROM {SHOP_FULFILLMENT_JOB_TABLE}
         WHERE label_id = %s
         ORDER BY created_at DESC, id DESC
         LIMIT 1
@@ -374,7 +374,7 @@ def get_latest_shopify_job_for_label(db_factory, label_id):
     return row
 
 
-def find_or_create_shopify_fulfillment_job(
+def find_or_create_shop_fulfillment_job(
     db_factory,
     *,
     label_id,
@@ -387,64 +387,69 @@ def find_or_create_shopify_fulfillment_job(
 ):
     con = db_factory()
     cur = con.cursor()
-    cur.execute(
-        f"""
-        SELECT id, status
-        FROM {SHOPIFY_FULFILLMENT_JOB_TABLE}
-        WHERE label_id = %s
-          AND status IN ('pending', 'processing')
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-        (label_id,),
-    )
-    existing = cur.fetchone()
-    if existing:
+    try:
+        if label_id is not None:
+            # Serialize creation for one label across workstations. Checking and
+            # inserting separately otherwise allows duplicate partial shipments.
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended('lager-mc:fulfillment-label:' || %s::text, 0))", (label_id,))
+        cur.execute(
+            f"""
+            SELECT id, status
+            FROM {SHOP_FULFILLMENT_JOB_TABLE}
+            WHERE label_id = %s
+              AND status IN ('pending', 'processing')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (label_id,),
+        )
+        existing = cur.fetchone()
+        if existing:
+            con.commit()
+            return {"job_id": existing["id"], "status": existing["status"], "created": False}
+
+        cur.execute(
+            f"""
+            INSERT INTO {SHOP_FULFILLMENT_JOB_TABLE} (
+                label_id,
+                order_id,
+                tracking_number,
+                tracking_url,
+                carrier,
+                line_items_json,
+                notify_customer,
+                status,
+                attempts,
+                created_at,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
+            RETURNING id, status
+            """,
+            (label_id, order_id, tracking_number, tracking_url, carrier, line_items_json, bool(notify_customer)),
+        )
+        row = cur.fetchone()
+        con.commit()
+        return {"job_id": row["id"], "status": row["status"], "created": True}
+    finally:
         cur.close()
         con.close()
-        return {"job_id": existing["id"], "status": existing["status"], "created": False}
-
-    cur.execute(
-        f"""
-        INSERT INTO {SHOPIFY_FULFILLMENT_JOB_TABLE} (
-            label_id,
-            order_id,
-            tracking_number,
-            tracking_url,
-            carrier,
-            line_items_json,
-            notify_customer,
-            status,
-            attempts,
-            created_at,
-            updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0, NOW(), NOW())
-        RETURNING id, status
-        """,
-        (label_id, order_id, tracking_number, tracking_url, carrier, line_items_json, bool(notify_customer)),
-    )
-    row = cur.fetchone()
-    con.commit()
-    cur.close()
-    con.close()
-    return {"job_id": row["id"], "status": row["status"], "created": True}
 
 
-def claim_shopify_fulfillment_jobs(db_factory, *, cursor_factory=None, limit=20):
+def claim_shop_fulfillment_jobs(db_factory, *, cursor_factory=None, limit=20):
     con = db_factory()
     cur = con.cursor(cursor_factory=cursor_factory) if cursor_factory is not None else con.cursor()
     cur.execute(
         f"""
         WITH claimed AS (
             SELECT id
-            FROM {SHOPIFY_FULFILLMENT_JOB_TABLE}
+            FROM {SHOP_FULFILLMENT_JOB_TABLE}
             WHERE status = 'pending'
             ORDER BY created_at
             FOR UPDATE SKIP LOCKED
             LIMIT %s
         )
-        UPDATE {SHOPIFY_FULFILLMENT_JOB_TABLE} j
+        UPDATE {SHOP_FULFILLMENT_JOB_TABLE} j
         SET status = 'processing',
             attempts = COALESCE(j.attempts, 0) + 1,
             updated_at = NOW()
@@ -470,7 +475,7 @@ def claim_shopify_fulfillment_jobs(db_factory, *, cursor_factory=None, limit=20)
     return rows
 
 
-def upsert_shopify_shipment(
+def upsert_shop_shipment(
     cur,
     *,
     carrier,
@@ -483,6 +488,7 @@ def upsert_shopify_shipment(
     fulfillment_id=None,
     tracking_url=None,
     created_at=None,
+    source,
 ):
     cur.execute(
         f"""
@@ -498,13 +504,13 @@ def upsert_shopify_shipment(
             label_path,
             last_error,
             source,
-            shopify_fulfillment_id,
-            shopify_synced_at,
+            shop_fulfillment_id,
+            shop_synced_at,
             tracking_url,
             created_at,
             updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, 1.0, %s, '', NULL, 'shopify', %s, NOW(), %s, %s, NOW())
+        VALUES (%s, %s, %s, %s, %s, %s, 1.0, %s, '', NULL, %s, %s, NOW(), %s, COALESCE(%s, NOW()), NOW())
         ON CONFLICT (track_id)
         DO UPDATE
            SET carrier = EXCLUDED.carrier,
@@ -516,10 +522,10 @@ def upsert_shopify_shipment(
                label_path = COALESCE(NULLIF(EXCLUDED.label_path, ''), {SHIPPING_LABEL_TABLE}.label_path),
                source = CASE
                    WHEN {SHIPPING_LABEL_TABLE}.source = 'local' THEN {SHIPPING_LABEL_TABLE}.source
-                   ELSE 'shopify'
+                   ELSE EXCLUDED.source
                END,
-               shopify_fulfillment_id = COALESCE(EXCLUDED.shopify_fulfillment_id, {SHIPPING_LABEL_TABLE}.shopify_fulfillment_id),
-               shopify_synced_at = NOW(),
+               shop_fulfillment_id = COALESCE(EXCLUDED.shop_fulfillment_id, {SHIPPING_LABEL_TABLE}.shop_fulfillment_id),
+               shop_synced_at = NOW(),
                tracking_url = COALESCE(EXCLUDED.tracking_url, {SHIPPING_LABEL_TABLE}.tracking_url),
                updated_at = NOW()
         """,
@@ -531,6 +537,7 @@ def upsert_shopify_shipment(
             tracking_number,
             parcel_number,
             status,
+            source,
             fulfillment_id,
             tracking_url,
             created_at,
@@ -553,16 +560,16 @@ def _update_label_status_from_job(cur, label_id, status, message=None):
     )
 
 
-def mark_shopify_fulfillment_job_done(db_factory, job_id, label_id, fulfillment_id, status):
+def mark_shop_fulfillment_job_done(db_factory, job_id, label_id, fulfillment_id, status):
     con = db_factory()
     cur = con.cursor()
-    cur.execute(f"SELECT order_id, line_items_json FROM {SHOPIFY_FULFILLMENT_JOB_TABLE} WHERE id = %s", (job_id,))
+    cur.execute(f"SELECT order_id, line_items_json FROM {SHOP_FULFILLMENT_JOB_TABLE} WHERE id = %s", (job_id,))
     job_row = cur.fetchone()
     cur.execute(
         f"""
-        UPDATE {SHOPIFY_FULFILLMENT_JOB_TABLE}
+        UPDATE {SHOP_FULFILLMENT_JOB_TABLE}
         SET status = 'done',
-            shopify_fulfillment_id = %s,
+            shop_fulfillment_id = %s,
             result_message = %s,
             processed_at = NOW(),
             updated_at = NOW()
@@ -574,8 +581,8 @@ def mark_shopify_fulfillment_job_done(db_factory, job_id, label_id, fulfillment_
         cur.execute(
             f"""
             UPDATE {SHIPPING_LABEL_TABLE}
-            SET shopify_fulfillment_id = COALESCE(%s, shopify_fulfillment_id),
-                shopify_synced_at = NOW(),
+            SET shop_fulfillment_id = COALESCE(%s, shop_fulfillment_id),
+                shop_synced_at = NOW(),
                 updated_at = NOW()
             WHERE id = %s
             """,
@@ -601,25 +608,25 @@ def mark_shopify_fulfillment_job_done(db_factory, job_id, label_id, fulfillment_
                 continue
             cur.execute(
                 """
-                UPDATE shopify_order_items
+                UPDATE shop_order_items
                 SET fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + %s)
                 WHERE order_id = %s
                   AND order_line_item_id = %s
                 """,
                 (qty, order_id, line_item_id),
             )
-    _update_label_status_from_job(cur, label_id, "SHOPIFY_FULFILLED", None)
+    _update_label_status_from_job(cur, label_id, "SHOP_FULFILLED", None)
     con.commit()
     cur.close()
     con.close()
 
 
-def mark_shopify_fulfillment_job_failed(db_factory, job_id, label_id, message):
+def mark_shop_fulfillment_job_failed(db_factory, job_id, label_id, message):
     con = db_factory()
     cur = con.cursor()
     cur.execute(
         f"""
-        UPDATE {SHOPIFY_FULFILLMENT_JOB_TABLE}
+        UPDATE {SHOP_FULFILLMENT_JOB_TABLE}
         SET status = 'failed',
             result_message = %s,
             processed_at = NOW(),
@@ -628,7 +635,7 @@ def mark_shopify_fulfillment_job_failed(db_factory, job_id, label_id, message):
         """,
         (message[:1000], job_id),
     )
-    _update_label_status_from_job(cur, label_id, "SHOPIFY_FAILED", message[:160])
+    _update_label_status_from_job(cur, label_id, "SHOP_FAILED", message[:160])
     con.commit()
     cur.close()
     con.close()

@@ -9,7 +9,7 @@ class ShippingCarrierDefinition:
     label: str
     short_label: str
     default_format: str = "A6"
-    shopify_allowed: bool = False
+    shop_allowed: bool = False
     option_mode: str | None = None
     printer_field: str | None = None
     printer_field_label_key: str | None = None
@@ -41,7 +41,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         label="GLS",
         short_label="GLS",
         default_format="A6",
-        shopify_allowed=True,
+        shop_allowed=True,
         option_mode="gls_services",
         printer_field="shipping_label_printer_gls",
         printer_field_label_key="field_shipping_printer_gls",
@@ -49,8 +49,8 @@ SHIPPING_CARRIER_DEFINITIONS = {
         format_field_label_key="field_shipping_format_gls",
         scale_field="shipping_label_scale_mode_gls",
         scale_field_label_key="field_shipping_scale_mode_gls",
-        tracking_mode_field="shopify_tracking_mode_gls",
-        tracking_url_field="shopify_tracking_url_gls",
+        tracking_mode_field="shop_tracking_mode_gls",
+        tracking_url_field="shop_tracking_url_gls",
         manual_option_field_label_key="manual_label_field_services",
         extra_settings_fields=(
             ("shipping_services_display", "field_shipping_services"),
@@ -65,7 +65,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         label="POST",
         short_label="POST",
         default_format="100x62",
-        shopify_allowed=True,
+        shop_allowed=True,
         option_mode="post_products",
         printer_field="shipping_label_printer_post",
         printer_field_label_key="field_shipping_printer_post",
@@ -73,8 +73,8 @@ SHIPPING_CARRIER_DEFINITIONS = {
         format_field_label_key="field_shipping_format_post",
         scale_field="shipping_label_scale_mode_post",
         scale_field_label_key="field_shipping_scale_mode_post",
-        tracking_mode_field="shopify_tracking_mode_post",
-        tracking_url_field="shopify_tracking_url_post",
+        tracking_mode_field="shop_tracking_mode_post",
+        tracking_url_field="shop_tracking_url_post",
         manual_option_field_label_key="manual_label_field_post_product",
         extra_settings_fields=(
             ("post_api_url", "field_post_api_url"),
@@ -90,7 +90,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         label="Adresslabel",
         short_label="ADR",
         default_format="A6",
-        shopify_allowed=False,
+        shop_allowed=False,
         option_mode=None,
         printer_field="shipping_label_printer_free",
         printer_field_label_key="field_shipping_printer_free",
@@ -106,7 +106,7 @@ SHIPPING_CARRIER_DEFINITIONS = {
         label="TEST",
         short_label="TEST",
         default_format="A6",
-        shopify_allowed=False,
+        shop_allowed=False,
         option_mode=None,
     ),
 }
@@ -141,9 +141,9 @@ def configurable_carrier_codes(include_test=False):
     return codes
 
 
-def carrier_allows_shopify(carrier):
+def carrier_allows_shop(carrier):
     definition = carrier_definition(carrier)
-    return bool(definition and definition.shopify_allowed)
+    return bool(definition and definition.shop_allowed)
 
 
 def carrier_option_mode(carrier):
@@ -202,7 +202,7 @@ def default_tracking_mode_for_carrier(carrier):
     return "company_and_url" if normalize_carrier_code(carrier) == "post" else "company"
 
 
-def shopify_tracking_company(carrier):
+def shop_tracking_company(carrier):
     normalized = normalize_carrier_code(carrier)
     if normalized == "gls":
         return "GLS"

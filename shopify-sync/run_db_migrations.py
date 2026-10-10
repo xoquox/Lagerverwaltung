@@ -88,9 +88,9 @@ def _column_type(cur, table_name, column_name):
 def apply_legacy_gid_type_fixes(cur):
     """Altbestand: numerische Shopify-ID-Spalten auf text (GID) umstellen."""
     targets = [
-        ("items", "shopify_product_id"),
-        ("items", "shopify_variant_id"),
-        ("items", "shopify_inventory_item_id"),
+        ("items", "shop_product_id"),
+        ("items", "shop_variant_id"),
+        ("items", "shop_inventory_item_id"),
     ]
     changed = []
     for table_name, column_name in targets:

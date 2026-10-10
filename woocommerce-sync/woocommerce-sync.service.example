@@ -1,0 +1,21 @@
+[Unit]
+Description=Lager-MC WooCommerce database sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lager-sync
+Group=lager-sync
+WorkingDirectory=/opt/lager-mc
+ExecStart=/opt/lager-mc/.venv/bin/python /opt/lager-mc/woocommerce-sync/woocommerce_sync.py run
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
