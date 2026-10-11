@@ -254,6 +254,12 @@ Teilausfuehrung liegt in der Auftragsansicht auf `F6`.
 
 Hier wird pro Position die Menge festgelegt. Danach folgt derselbe Versandablauf wie bei einer normalen Ausfuehrung.
 
+### Darstellung
+
+Das Farbschema `Commander (Blau)` verwendet blaue Arbeitsflaechen, helle Schrift, einen durchgehenden tuerkisen Kopfbalken und gelbe Tabellenueberschriften. Die aktive Auswahl ist tuerkis hinterlegt; die Auswahl im anderen Panel bleibt auf blauem Hintergrund hervorgehoben. Die Synchronisationskennzeichen zeigen synchronisierte Artikel gruen, ausstehende Aenderungen gelb, Fehler rot und lokale Artikel cyan. Die Kennzeichen `S`, `D` und `L` bleiben erhalten. Tastenkuerzel sind in der Fusszeile separat hervorgehoben.
+
+Das Farbschema wird unter `Shift+F11` im Tab `Allgemein` gewaehlt.
+
 ## Einstellungen
 
 Die Einstellungen liegen auf `Shift+F11`.

@@ -254,6 +254,12 @@ Partial execution is available in the order view under `F6`.
 
 The quantity is set per position. The remaining flow matches the normal shipping workflow.
 
+### Appearance
+
+The `Commander (Blue)` colour scheme uses blue work areas, bright text, a full-width cyan header bar and yellow table headings. The active selection has a cyan background; the selection in the other panel is highlighted on the blue background. Sync indicators are green for synchronised items, yellow for pending changes, red for errors and cyan for local items. The `S`, `D` and `L` indicators remain visible. Keyboard shortcuts are highlighted separately in the footer.
+
+The colour scheme is selected under `Shift+F11` in the `General` tab.
+
 ## Settings
 
 Settings are available under `Shift+F11`.

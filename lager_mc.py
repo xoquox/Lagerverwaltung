@@ -187,12 +187,12 @@ COLS = [
 
 BASE_THEMES = {
     "blue": {
-        "pair_1_fg": "white",
+        "pair_1_fg": "brightwhite",
         "pair_1_bg": "blue",
         "pair_2_fg": "black",
         "pair_2_bg": "cyan",
         "pair_3_fg": "black",
-        "pair_3_bg": "white",
+        "pair_3_bg": "cyan",
     },
     "green": {
         "pair_1_fg": "black",
@@ -278,6 +278,19 @@ CUSTOM_COLOR_RGB = {
     "brightwhite": (1000, 1000, 1000),
 }
 CUSTOM_COLOR_IDS = {}
+UI_COLOR_ROLES = {
+    "heading": 4, "border": 5, "inactive": 6, "success": 7,
+    "warning": 8, "error": 9, "status": 10, "key": 11, "topbar": 12,
+}
+_UI_ROLE_PAIRS = {}
+FOOTER_KEY_PATTERN = re.compile(
+    r"(?<![\w+])(?:(?:Shift|Ctrl|Alt)\+)*(?:F(?:1[0-2]|[1-9])|Tab|Enter|Esc|ESC|Space)(?![\w+])"
+)
+
+
+def ui_attr(role, bold=False):
+    return curses.color_pair(_UI_ROLE_PAIRS.get(role, 1)) | (curses.A_BOLD if bold else 0)
+
 THEME_KEY_SET = {
     "pair_1_fg",
     "pair_1_bg",
@@ -372,7 +385,10 @@ def load_custom_themes_from_file(path):
         if not theme_name:
             continue
         if _is_valid_theme_map(theme):
-            custom[theme_name] = {key: str(theme[key]).strip().lower() for key in THEME_KEY_SET}
+            keys = THEME_KEY_SET | {
+                f"{role}_{component}" for role in UI_COLOR_ROLES for component in ("fg", "bg")
+            }
+            custom[theme_name] = {key: str(theme[key]).strip().lower() for key in keys if key in theme}
         else:
             LOGGER.warning("Theme '%s' in %s ist unvollstaendig und wird ignoriert.", name, candidate)
     return custom
@@ -396,6 +412,12 @@ def get_all_themes():
 
 def _color_from_name(name):
     color_name = (name or "white").lower()
+    bright_colors = {
+        "brightblack": 8, "brightred": 9, "brightgreen": 10, "brightyellow": 11,
+        "brightblue": 12, "brightmagenta": 13, "brightcyan": 14, "brightwhite": 15,
+    }
+    if color_name in bright_colors and int(getattr(curses, "COLORS", 0)) >= 16:
+        return bright_colors[color_name]
     custom_id = _custom_color_id(color_name)
     if custom_id is not None:
         return custom_id
@@ -458,6 +480,29 @@ def apply_color_theme(stdscr):
     curses.init_pair(1, pair_1[0], pair_1[1])
     curses.init_pair(2, pair_2[0], pair_2[1])
     curses.init_pair(3, pair_3[0], pair_3[1])
+    defaults = {
+        "heading": ("brightyellow", theme["pair_1_bg"]),
+        "border": ("brightcyan", theme["pair_1_bg"]),
+        "inactive": ("white" if get_active_theme_name() == "blue" else theme["pair_1_fg"], theme["pair_1_bg"]),
+        "success": ("brightgreen", theme["pair_1_bg"]),
+        "warning": ("brightyellow", theme["pair_1_bg"]),
+        "error": ("brightred", theme["pair_1_bg"]),
+        "status": (theme["pair_1_fg"], "black"),
+        "key": ("brightwhite", "black"),
+        "topbar": ("brightwhite", theme["pair_2_bg"]),
+    }
+    _UI_ROLE_PAIRS.clear()
+    for role, pair in UI_COLOR_ROLES.items():
+        fg, bg = defaults[role]
+        if get_active_theme_name() == "mono":
+            fg, bg = theme["pair_1_fg"], theme["pair_1_bg"]
+        colors = _resolve_pair_colors(
+            theme.get(f"{role}_fg", fg), theme.get(f"{role}_bg", bg),
+            fallback_fg=theme["pair_1_fg"], fallback_bg=theme["pair_1_bg"],
+        )
+        if pair < int(getattr(curses, "COLOR_PAIRS", 0)):
+            curses.init_pair(pair, *colors)
+            _UI_ROLE_PAIRS[role] = pair
     stdscr.bkgd(" ", curses.color_pair(1))
 
 
@@ -465,7 +510,9 @@ def _resolve_pair_colors(fg_name, bg_name, fallback_fg, fallback_bg):
     fg = _color_from_name(fg_name)
     bg = _color_from_name(bg_name)
     if fg == bg:
-        return _color_from_name(fallback_fg), _color_from_name(fallback_bg)
+        fg, bg = _color_from_name(fallback_fg), _color_from_name(fallback_bg)
+        if fg == bg:
+            fg = curses.COLOR_BLACK if bg != curses.COLOR_BLACK else curses.COLOR_WHITE
     return fg, bg
 
 
@@ -1753,7 +1800,7 @@ def custom_order_items_dialog(stdscr, initial_items=None):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("custom_order_items_title"))
         prompt = t("search_prompt")
         input_width = max(1, width - len(prompt) - 4)
@@ -2544,7 +2591,7 @@ def shop_customer_dialog(stdscr, search_text=""):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("customer_select_title"))
 
         prompt = t("search_prompt")
@@ -3150,7 +3197,7 @@ def multiline_text_dialog(stdscr, title, footer, initial_text=""):
         with visible_cursor():
             while True:
                 win.erase()
-                win.box()
+                draw_window_border(win)
                 win.addstr(0, 2, f" {title} ")
                 content_width = width - 4
                 content_height = height - 4
@@ -3627,7 +3674,7 @@ def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("shipping_services_title"))
 
         visible_rows = max(1, height - 4)
@@ -4092,7 +4139,7 @@ def _location_regex_options_dialog(stdscr, field_name, values):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {t('regex_options_title', label=_location_regex_field_label(field_name))} ")
 
         regex_label = t("field_regex_pattern")
@@ -4306,7 +4353,7 @@ def item_info_dialog(stdscr, item):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("item_info_title"))
 
         for index, line in enumerate(info_lines):
@@ -4487,9 +4534,11 @@ def draw_footer_line(win, y, x, width, text):
     width = max(0, int(width))
     if width <= 0:
         return
+    visible = _scrolling_footer_slice(text, width)
     try:
-        win.addstr(y, x, " " * width)
-        win.addstr(y, x, _scrolling_footer_slice(text, width))
+        win.addstr(y, x, visible, curses.color_pair(3))
+        for match in FOOTER_KEY_PATTERN.finditer(visible):
+            win.addstr(y, x + match.start(), match.group(), ui_attr("key", bold=True))
     except curses.error:
         return
 
@@ -4514,12 +4563,19 @@ def _safe_addstr(win, y, x, text, attr=None):
         return
 
 
+def draw_window_border(win, active=False):
+    win.attrset(ui_attr("border", bold=active))
+    win.box()
+    win.attrset(curses.color_pair(1))
+
+
 def draw_panel(win, title, lines, selected, top_index, active):
     h, w = win.getmaxyx()
     max_rows = max(0, h - 4)
 
+    win.bkgd(" ", curses.color_pair(1))
     win.erase()
-    win.box()
+    draw_window_border(win, active=active)
     panel_title = f" {title} "
 
     if active:
@@ -4527,7 +4583,7 @@ def draw_panel(win, title, lines, selected, top_index, active):
         _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)])
         win.attrset(curses.color_pair(1))
     else:
-        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)], curses.A_BOLD)
+        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)], ui_attr("border"))
 
     visible = lines[top_index:top_index + max_rows]
 
@@ -4536,7 +4592,7 @@ def draw_panel(win, title, lines, selected, top_index, active):
         idx = top_index + i
 
         if idx == selected:
-            win.attrset(curses.color_pair(2))
+            win.attrset(curses.color_pair(2) if active else ui_attr("inactive", bold=True))
             _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
             win.attrset(curses.color_pair(1))
         else:
@@ -4549,8 +4605,9 @@ def draw_items_panel(win, items, selected, top_index, active):
     h, w = win.getmaxyx()
     max_rows = max(0, h - 5)
 
+    win.bkgd(" ", curses.color_pair(1))
     win.erase()
-    win.box()
+    draw_window_border(win, active=active)
     panel_title = f" {t('items_panel')} "
 
     if active:
@@ -4558,9 +4615,9 @@ def draw_items_panel(win, items, selected, top_index, active):
         _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)])
         win.attrset(curses.color_pair(1))
     else:
-        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)], curses.A_BOLD)
+        _safe_addstr(win, 0, 2, panel_title[: max(0, w - 4)], ui_attr("border"))
 
-    _safe_addstr(win, 2, 1, format_header()[: max(0, w - 2)].ljust(max(0, w - 2)), curses.A_BOLD)
+    _safe_addstr(win, 2, 1, format_header()[: max(0, w - 2)].ljust(max(0, w - 2)), ui_attr("heading", bold=True))
 
     visible = items[top_index:top_index + max_rows]
 
@@ -4570,11 +4627,17 @@ def draw_items_panel(win, items, selected, top_index, active):
         idx = top_index + i
 
         if idx == selected:
-            win.attrset(curses.color_pair(2))
+            win.attrset(curses.color_pair(2) if active else ui_attr("inactive", bold=True))
             _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
             win.attrset(curses.color_pair(1))
         else:
             _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
+            status_x = 1 + sum(width + 1 for _, width in COLS[:-1])
+            role = ("error" if row.get("sync_status") == "shop_error" else
+                    "warning" if row.get("dirty") or row.get("shop_product_dirty") or row.get("sync_status") == "shop_pending" else
+                    "border" if row.get("sync_status") == "local" else "success")
+            if status_x < w - 1:
+                _safe_addstr(win, y, status_x, line[status_x - 1:status_x + 1], ui_attr(role, bold=True))
 
     win.refresh()
 
@@ -4598,11 +4661,13 @@ def draw(
 
     stdscr.attrset(curses.color_pair(1))
     stdscr.erase()
+    stdscr.attrset(ui_attr("border"))
     stdscr.box()
-    _safe_addstr(stdscr, 0, 2, f" {t('app_title')} ")
+    _safe_addstr(stdscr, 0, 0, " " * w, ui_attr("topbar"))
+    _safe_addstr(stdscr, 0, 2, f" {t('app_title')} ", ui_attr("topbar", bold=True))
     version_label = f" v{APP_VERSION} "
     version_x = max(2, w - len(version_label) - 2)
-    _safe_addstr(stdscr, 0, version_x, version_label[: max(0, w - version_x - 1)])
+    _safe_addstr(stdscr, 0, version_x, version_label[: max(0, w - version_x - 1)], ui_attr("topbar"))
     inner_width = w - 4
     left_width = max(40, int(inner_width * 0.62))
     left_width = min(left_width, inner_width - 24)
@@ -4632,7 +4697,7 @@ def draw(
         active_pane == "right",
     )
 
-    stdscr.attrset(curses.color_pair(3))
+    stdscr.attrset(ui_attr("status"))
 
     if _shop_location_switch_enabled():
         status_key = "status_secondary_multi" if show_secondary_help else "status_primary_multi"
@@ -4648,9 +4713,9 @@ def draw(
     try:
         stdscr.addstr(h-2, 0, " " * max(0, w - 1))
         if notice_text:
-            stdscr.addstr(h-2, 0, notice_text[: max(0, w - 1)])
+            stdscr.addstr(h-2, 0, notice_text[: max(0, w - 1)], ui_attr("warning", bold=True))
         elif filter_text:
-            stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[: max(0, w - 1)])
+            stdscr.addstr(h-2, 0, t("filter_prefix", value=filter_text)[: max(0, w - 1)], ui_attr("heading", bold=True))
         else:
             stdscr.addstr(h-2, 0, focus[: max(0, w - 1)])
     except curses.error:
@@ -4659,7 +4724,8 @@ def draw(
     sync_x = max(0, w - len(sync_label) - 1)
     if sync_x > 4:
         try:
-            stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)])
+            role = "error" if " ERR" in sync_label else "warning" if sync_label.startswith("Sync!") or sync_label == "Sync: -" else "success"
+            stdscr.addstr(h-2, sync_x, sync_label[: max(0, w - sync_x - 1)], ui_attr(role, bold=True))
         except curses.error:
             pass
 
@@ -5026,7 +5092,7 @@ def wait_for_pending_item_writes_dialog(stdscr):
         draw_shadow(stdscr, y, x, height, width)
         win = curses.newwin(height, width, y, x)
         win.bkgd(" ", curses.color_pair(1))
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {t('pending_writes_title')} ")
         for index, line in enumerate(lines):
             _safe_addstr(win, 2 + index, 2, _fit(line, width - 4))
@@ -5068,7 +5134,7 @@ def message_box(stdscr, title, message):
 
     win = curses.newwin(height, width, y, x)
     win.bkgd(" ", curses.color_pair(1))
-    win.box()
+    draw_window_border(win)
 
     win.addstr(0, 2, f" {title} ")
     win.addstr(2, 2, message[:width-4])
@@ -5104,7 +5170,7 @@ def run_background_action_dialog(stdscr, title, action, detail="Bitte warten..."
         draw_shadow(stdscr, y, x, height, width)
         win = curses.newwin(height, width, y, x)
         win.bkgd(" ", curses.color_pair(1))
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {title} ")
         win.addstr(2, 2, _fit(detail, width - 6))
         win.addstr(4, 2, f"{spinner[frame % len(spinner)]}".ljust(width - 4))
@@ -5133,7 +5199,7 @@ def confirm_box(stdscr, title, message, default_yes=True):
     win = curses.newwin(height, width, y, x)
     win.keypad(True)
     win.bkgd(" ", curses.color_pair(1))
-    win.box()
+    draw_window_border(win)
 
     win.addstr(0, 2, f" {title} ")
     win.addstr(2, 2, message[:width-4])
@@ -5255,7 +5321,7 @@ def form_dialog(
     with visible_cursor():
         while True:
             win.erase()
-            win.box()
+            draw_window_border(win)
             win.addstr(0, 2, f" {title} ")
 
             for i, field in enumerate(fields):
@@ -5423,7 +5489,7 @@ def search_dialog(stdscr, initial):
         while True:
 
             win.erase()
-            win.box()
+            draw_window_border(win)
 
             win.addstr(0, 2, f" {t('search')} ")
 
@@ -5634,7 +5700,7 @@ def cups_printer_dialog(stdscr, current_printer):
             win.keypad(True)
             win.bkgd(" ", curses.color_pair(1))
             win.erase()
-            win.box()
+            draw_window_border(win)
             win.addstr(0, 2, f" {t('printer_dialog')} ")
 
             visible_rows = max(1, height - 4)
@@ -5735,7 +5801,7 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {title} ")
 
         visible_rows = max(1, height - 4)
@@ -5791,7 +5857,7 @@ def toggle_choice_dialog(stdscr, title, options, selected_values, footer_text=No
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {title} ")
 
         visible_rows = max(1, height - 4)
@@ -6657,7 +6723,7 @@ def settings_dialog(stdscr):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {t('settings')} ")
         sync_version = ((sync_state or {}).get("version") or "-").strip() or "-"
         sync_label = f" Sync {sync_version} "
@@ -6685,7 +6751,7 @@ def settings_dialog(stdscr):
             row = 3 + idx
             if str(name).startswith("_heading_"):
                 label = str(label_key)
-                win.attrset(curses.color_pair(2))
+                win.attrset(ui_attr("heading", bold=True))
                 win.addstr(row, 2, _fit(f"[{label}]", width - 4))
                 win.attrset(curses.color_pair(1))
             else:
@@ -7028,7 +7094,7 @@ def change_qty(stdscr, item):
         while True:
 
             win.erase()
-            win.box()
+            draw_window_border(win)
 
             win.addstr(0, 2, t("qty_dialog_title"))
 
@@ -7560,7 +7626,7 @@ def directory_dialog(stdscr, current_path="", title=None):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {title} ")
         win.addstr(1, 2, _fit(str(current), width - 4))
 
@@ -7671,7 +7737,7 @@ def file_dialog(stdscr, current_path="", title=None, extensions=None):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {title} ")
         win.addstr(1, 2, _fit(str(current_dir), width - 4))
 
@@ -8276,7 +8342,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("bulk_per_order_title"))
 
         visible_rows = max(1, height - 4)
@@ -8372,7 +8438,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("partial_execution_window_title", order=order.get("order_name") or ""))
 
         list_height = height - 4
@@ -8910,7 +8976,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         title = t("history_title_all") if show_all else t("history_title_order")
         win.addstr(0, 2, title)
 
@@ -9139,7 +9205,7 @@ def orders_dialog(stdscr):
         win.timeout(200)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, t("orders_title"))
 
         left_width = max(34, int((width - 3) * 0.42))
@@ -9506,7 +9572,7 @@ def inventory_dialog(stdscr):
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
-        win.box()
+        draw_window_border(win)
         win.addstr(0, 2, f" {session['session_name']} ")
 
         visible_width = width - 4
