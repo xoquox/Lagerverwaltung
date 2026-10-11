@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import curses
+import curses.panel
 import csv
 import datetime
 import address_label
@@ -20,6 +21,7 @@ import textwrap
 import time
 import threading
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -185,82 +187,87 @@ COLS = [
 ]
 
 
+def _theme(base, selection, footer, **roles):
+    colors = {"pair_1": base, "pair_2": selection, "pair_3": footer, **roles}
+    return {f"{role}_{part}": color for role, pair in colors.items()
+            for part, color in zip(("fg", "bg"), pair)}
+
+
 BASE_THEMES = {
-    "blue": {
-        "pair_1_fg": "brightwhite",
-        "pair_1_bg": "blue",
-        "pair_2_fg": "black",
-        "pair_2_bg": "cyan",
-        "pair_3_fg": "black",
-        "pair_3_bg": "cyan",
-    },
-    "green": {
-        "pair_1_fg": "black",
-        "pair_1_bg": "green",
-        "pair_2_fg": "black",
-        "pair_2_bg": "yellow",
-        "pair_3_fg": "black",
-        "pair_3_bg": "white",
-    },
-    "mono": {
-        "pair_1_fg": "white",
-        "pair_1_bg": "black",
-        "pair_2_fg": "black",
-        "pair_2_bg": "white",
-        "pair_3_fg": "white",
-        "pair_3_bg": "black",
-    },
-    "megatrends": {
-        "pair_1_fg": "brightyellow",
-        "pair_1_bg": "blue",
-        "pair_2_fg": "blue",
-        "pair_2_bg": "brightwhite",
-        "pair_3_fg": "brightblack",
-        "pair_3_bg": "black",
-    },
-    "smoth": {
-        "pair_1_fg": "white",
-        "pair_1_bg": "brightblue",
-        "pair_2_fg": "brightblue",
-        "pair_2_bg": "brightwhite",
-        "pair_3_fg": "brightblue",
-        "pair_3_bg": "blue",
-    },
-    "norton": {
-        "pair_1_fg": "brightcyan",
-        "pair_1_bg": "blue",
-        "pair_2_fg": "brightcyan",
-        "pair_2_bg": "black",
-        "pair_3_fg": "brightwhite",
-        "pair_3_bg": "black",
-    },
-    "gold-standard": {
-        "pair_1_fg": "brightyellow",
-        "pair_1_bg": "brown",
-        "pair_2_fg": "brown",
-        "pair_2_bg": "brightyellow",
-        "pair_3_fg": "brown",
-        "pair_3_bg": "black",
-    },
-    "subtile": {
-        "pair_1_fg": "brightwhite",
-        "pair_1_bg": "white",
-        "pair_2_fg": "brightblack",
-        "pair_2_bg": "white",
-        "pair_3_fg": "white",
-        "pair_3_bg": "brightblack",
-    },
-    "monokai": {
-        "pair_1_fg": "brightwhite",
-        "pair_1_bg": "brightblack",
-        "pair_2_fg": "brightwhite",
-        "pair_2_bg": "white",
-        "pair_3_fg": "white",
-        "pair_3_bg": "black",
-    },
+    "blue": _theme(
+        ("brightwhite", "blue"), ("black", "cyan"), ("black", "cyan"),
+        heading=("brightyellow", "blue"), border=("brightcyan", "blue"),
+        inactive=("white", "blue"), success=("brightgreen", "blue"),
+        warning=("brightyellow", "blue"), error=("brightred", "blue"),
+        status=("white", "black"), key=("brightwhite", "black"), topbar=("black", "cyan"),
+    ),
+    "green": _theme(
+        ("brightgreen", "black"), ("black", "green"), ("black", "green"),
+        heading=("brightwhite", "black"), border=("green", "black"),
+        inactive=("green", "black"), success=("brightgreen", "black"),
+        warning=("brightyellow", "black"), error=("brightred", "black"),
+        status=("green", "black"), key=("brightgreen", "black"), topbar=("black", "green"),
+    ),
+    "mono": _theme(
+        ("white", "black"), ("black", "white"), ("black", "white"),
+        heading=("white", "black"), border=("white", "black"),
+        inactive=("white", "black"), success=("white", "black"),
+        warning=("white", "black"), error=("white", "black"),
+        status=("white", "black"), key=("white", "black"), topbar=("black", "white"),
+    ),
+    "megatrends": _theme(
+        ("blue", "lightgray"), ("brightwhite", "blue"), ("brightwhite", "blue"),
+        heading=("blue", "lightgray"), border=("blue", "lightgray"),
+        inactive=("black", "lightgray"), success=("green", "lightgray"),
+        warning=("brown", "lightgray"), error=("red", "lightgray"),
+        status=("black", "lightgray"), key=("brightyellow", "blue"), topbar=("brightwhite", "blue"),
+    ),
+    "smoth": _theme(
+        ("brightwhite", "blue"), ("black", "lightgray"), ("black", "lightgray"),
+        heading=("brightwhite", "blue"), border=("lightgray", "blue"),
+        inactive=("white", "blue"), success=("brightgreen", "blue"),
+        warning=("brightyellow", "blue"), error=("brightred", "blue"),
+        status=("white", "black"), key=("brightwhite", "blue"), topbar=("blue", "lightgray"),
+    ),
+    "norton": _theme(
+        ("brightcyan", "blue"), ("black", "cyan"), ("black", "cyan"),
+        heading=("brightyellow", "blue"), border=("cyan", "blue"),
+        inactive=("cyan", "blue"), success=("brightgreen", "blue"),
+        warning=("brightyellow", "blue"), error=("brightred", "blue"),
+        status=("cyan", "blue"), key=("brightwhite", "black"), topbar=("black", "cyan"),
+    ),
+    "gold-standard": _theme(
+        ("brightyellow", "black"), ("black", "yellow"), ("black", "yellow"),
+        heading=("brightwhite", "black"), border=("brown", "black"),
+        inactive=("yellow", "black"), success=("brightgreen", "black"),
+        warning=("brightyellow", "black"), error=("brightred", "black"),
+        status=("yellow", "black"), key=("brightyellow", "black"), topbar=("black", "yellow"),
+    ),
+    "subtile": _theme(
+        ("black", "lightgray"), ("brightwhite", "blue"), ("black", "lightgray"),
+        heading=("blue", "lightgray"), border=("darkgray", "lightgray"),
+        inactive=("blue", "lightgray"), success=("green", "lightgray"),
+        warning=("brown", "lightgray"), error=("red", "lightgray"),
+        status=("black", "lightgray"), key=("brightwhite", "blue"), topbar=("brightwhite", "blue"),
+    ),
+    "monokai": _theme(
+        ("monokai-text", "monokai-background"), ("monokai-background", "monokai-green"),
+        ("monokai-background", "monokai-cyan"),
+        heading=("monokai-yellow", "monokai-background"), border=("monokai-cyan", "monokai-background"),
+        inactive=("monokai-cyan", "monokai-background"), success=("monokai-green", "monokai-background"),
+        warning=("monokai-yellow", "monokai-background"), error=("monokai-pink", "monokai-background"),
+        status=("monokai-text", "monokai-background"), key=("monokai-text", "monokai-background"),
+        topbar=("monokai-background", "monokai-cyan"),
+    ),
 }
 
 CUSTOM_COLOR_RGB = {
+    "monokai-background": (153, 157, 133),
+    "monokai-text": (973, 973, 949),
+    "monokai-green": (651, 886, 180),
+    "monokai-yellow": (902, 859, 455),
+    "monokai-pink": (976, 149, 447),
+    "monokai-cyan": (400, 851, 937),
     "brown": (680, 340, 0),
     "darkgray": (350, 350, 350),
     "darkgrey": (350, 350, 350),
@@ -299,6 +306,49 @@ THEME_KEY_SET = {
     "pair_3_fg",
     "pair_3_bg",
 }
+
+
+
+_DIALOG_FRAMES = []
+
+
+def modal_dialog(function):
+    @wraps(function)
+    def wrapped(stdscr, *args, **kwargs):
+        try:
+            active = not curses.isendwin()
+        except curses.error:
+            active = False
+        if not active:
+            return function(stdscr, *args, **kwargs)
+        frame = {"panel": None}
+        _DIALOG_FRAMES.append(frame)
+        try:
+            return function(stdscr, *args, **kwargs)
+        finally:
+            panel = frame["panel"]
+            if panel is not None:
+                panel.hide()
+            _DIALOG_FRAMES.pop()
+            try:
+                stdscr.touchwin()
+                stdscr.noutrefresh()
+                curses.panel.update_panels()
+                curses.doupdate()
+            except curses.error:
+                pass
+    return wrapped
+
+
+def _new_dialog_window(height, width, y, x):
+    win = curses.newwin(height, width, y, x)
+    if _DIALOG_FRAMES:
+        frame = _DIALOG_FRAMES[-1]
+        old_panel = frame["panel"]
+        if old_panel is not None:
+            old_panel.hide()
+        frame["panel"] = curses.panel.new_panel(win)
+    return win
 
 
 def current_language():
@@ -423,6 +473,12 @@ def _color_from_name(name):
         return custom_id
 
     return {
+        "monokai-background": curses.COLOR_BLACK,
+        "monokai-text": curses.COLOR_WHITE,
+        "monokai-green": curses.COLOR_GREEN,
+        "monokai-yellow": curses.COLOR_YELLOW,
+        "monokai-pink": curses.COLOR_MAGENTA,
+        "monokai-cyan": curses.COLOR_CYAN,
         "black": curses.COLOR_BLACK,
         "red": curses.COLOR_RED,
         "green": curses.COLOR_GREEN,
@@ -452,18 +508,29 @@ def _color_from_name(name):
 def _custom_color_id(color_name):
     if color_name not in CUSTOM_COLOR_RGB:
         return None
-    if color_name in CUSTOM_COLOR_IDS:
-        return CUSTOM_COLOR_IDS[color_name]
-
-    can_customize = bool(getattr(curses, "can_change_color", lambda: False)())
     color_slots = int(getattr(curses, "COLORS", 0) or 0)
-    if not can_customize or color_slots < 32:
+    if color_slots >= 256:
+        # Use fixed xterm colours even when terminfo advertises palette changes.
+        # A terminal can lose/reject those changes during subsequent redraws.
+        rgb = CUSTOM_COLOR_RGB[color_name]
+        levels = (0, 95, 135, 175, 215, 255)
+        candidates = [
+            (16 + 36 * r + 6 * g + b, (levels[r], levels[g], levels[b]))
+            for r in range(6) for g in range(6) for b in range(6)
+        ] + [(232 + i, (8 + 10 * i,) * 3) for i in range(24)]
+        return min(candidates, key=lambda entry: sum(
+            (actual * 1000 / 255 - wanted) ** 2 for actual, wanted in zip(entry[1], rgb)
+        ))[0]
+    can_customize = bool(getattr(curses, "can_change_color", lambda: False)())
+    if not can_customize:
         return None
-
+    if color_slots < 32:
+        return None
+    if color_name in CUSTOM_COLOR_IDS and CUSTOM_COLOR_IDS[color_name] < color_slots:
+        return CUSTOM_COLOR_IDS[color_name]
     next_id = 16 + len(CUSTOM_COLOR_IDS)
     if next_id >= color_slots:
         return None
-
     try:
         curses.init_color(next_id, *CUSTOM_COLOR_RGB[color_name])
     except curses.error:
@@ -472,8 +539,12 @@ def _custom_color_id(color_name):
     return next_id
 
 
-def apply_color_theme(stdscr):
-    theme = get_all_themes()[get_active_theme_name()]
+def apply_color_theme(stdscr, theme_name=None):
+    themes = get_all_themes()
+    name = (theme_name or SETTINGS.get("color_theme") or "blue").strip().lower()
+    if name not in themes:
+        name = "blue"
+    theme = themes[name]
     pair_1 = _resolve_pair_colors(theme["pair_1_fg"], theme["pair_1_bg"], fallback_fg="white", fallback_bg="blue")
     pair_2 = _resolve_pair_colors(theme["pair_2_fg"], theme["pair_2_bg"], fallback_fg="black", fallback_bg="cyan")
     pair_3 = _resolve_pair_colors(theme["pair_3_fg"], theme["pair_3_bg"], fallback_fg="black", fallback_bg="white")
@@ -483,7 +554,7 @@ def apply_color_theme(stdscr):
     defaults = {
         "heading": ("brightyellow", theme["pair_1_bg"]),
         "border": ("brightcyan", theme["pair_1_bg"]),
-        "inactive": ("white" if get_active_theme_name() == "blue" else theme["pair_1_fg"], theme["pair_1_bg"]),
+        "inactive": (theme["pair_1_fg"], theme["pair_1_bg"]),
         "success": ("brightgreen", theme["pair_1_bg"]),
         "warning": ("brightyellow", theme["pair_1_bg"]),
         "error": ("brightred", theme["pair_1_bg"]),
@@ -494,7 +565,7 @@ def apply_color_theme(stdscr):
     _UI_ROLE_PAIRS.clear()
     for role, pair in UI_COLOR_ROLES.items():
         fg, bg = defaults[role]
-        if get_active_theme_name() == "mono":
+        if name == "mono":
             fg, bg = theme["pair_1_fg"], theme["pair_1_bg"]
         colors = _resolve_pair_colors(
             theme.get(f"{role}_fg", fg), theme.get(f"{role}_bg", bg),
@@ -504,6 +575,7 @@ def apply_color_theme(stdscr):
             curses.init_pair(pair, *colors)
             _UI_ROLE_PAIRS[role] = pair
     stdscr.bkgd(" ", curses.color_pair(1))
+    stdscr.touchwin()
 
 
 def _resolve_pair_colors(fg_name, bg_name, fallback_fg, fallback_bg):
@@ -1777,6 +1849,7 @@ def custom_order_quantity_dialog(stdscr, row, current_qty):
     return max(0, qty)
 
 
+@modal_dialog
 def custom_order_items_dialog(stdscr, initial_items=None):
     active_location_id = _active_shop_location_id()
     rows = _filter_items_snapshot(_load_items_snapshot(active_location_id), sort_mode="sku", external_mode="hide")
@@ -1796,7 +1869,7 @@ def custom_order_items_dialog(stdscr, initial_items=None):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -2568,6 +2641,7 @@ def _apply_shop_customer_to_manual_state(state, chosen_customer, country_code):
     return updated, (customer_country or country_code)
 
 
+@modal_dialog
 def shop_customer_dialog(stdscr, search_text=""):
     query = search_text or ""
     selected = 0
@@ -2587,7 +2661,7 @@ def shop_customer_dialog(stdscr, search_text=""):
             last_query = query
 
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -3178,6 +3252,7 @@ def _apply_parsed_address_to_manual_state(state, parsed, current_country):
     return updated, country
 
 
+@modal_dialog
 def multiline_text_dialog(stdscr, title, footer, initial_text=""):
     h, w = stdscr.getmaxyx()
     width = min(max(72, int(w * 0.72)), w - 4)
@@ -3188,7 +3263,7 @@ def multiline_text_dialog(stdscr, title, footer, initial_text=""):
     cursor = len(text)
 
     draw_shadow(stdscr, y, x, height, width)
-    win = curses.newwin(height, width, y, x)
+    win = _new_dialog_window(height, width, y, x)
     win.keypad(True)
     win.timeout(300)
     win.bkgd(" ", curses.color_pair(1))
@@ -3658,6 +3733,7 @@ def _shipping_services_summary(service_codes):
     return ", ".join(labels)
 
 
+@modal_dialog
 def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False):
     selected_codes = set(_normalize_shipping_services(current_services))
     selected = 0
@@ -3670,7 +3746,7 @@ def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -4116,6 +4192,7 @@ def _location_field_normalizers():
     }
 
 
+@modal_dialog
 def _location_regex_options_dialog(stdscr, field_name, values):
     regex_key = f"location_regex_{field_name}"
     ignore_case_key = f"location_regex_ignore_case_{field_name}"
@@ -4135,7 +4212,7 @@ def _location_regex_options_dialog(stdscr, field_name, values):
 
     while True:
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -4335,6 +4412,7 @@ def build_item_info_lines(item):
     return lines
 
 
+@modal_dialog
 def item_info_dialog(stdscr, item):
     h, w = stdscr.getmaxyx()
     width = min(max(84, int(w * 0.8)), w - 4)
@@ -4349,7 +4427,7 @@ def item_info_dialog(stdscr, item):
     footer = t("item_info_footer")
     while True:
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -4664,7 +4742,7 @@ def draw(
     stdscr.attrset(ui_attr("border"))
     stdscr.box()
     _safe_addstr(stdscr, 0, 0, " " * w, ui_attr("topbar"))
-    _safe_addstr(stdscr, 0, 2, f" {t('app_title')} ", ui_attr("topbar", bold=True))
+    _safe_addstr(stdscr, 0, 2, f" {t('app_title')} ", ui_attr("topbar"))
     version_label = f" v{APP_VERSION} "
     version_x = max(2, w - len(version_label) - 2)
     _safe_addstr(stdscr, 0, version_x, version_label[: max(0, w - version_x - 1)], ui_attr("topbar"))
@@ -5068,6 +5146,7 @@ def pending_item_write_exit_dialog(stdscr):
     return choice_dialog(stdscr, t("pending_writes_title"), options, "wait", cancel_returns_none=True) or "cancel"
 
 
+@modal_dialog
 def wait_for_pending_item_writes_dialog(stdscr):
     spinner = ["|", "/", "-", "\\"]
     frame = 0
@@ -5090,7 +5169,7 @@ def wait_for_pending_item_writes_dialog(stdscr):
         x = max(2, (w - width) // 2)
 
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.bkgd(" ", curses.color_pair(1))
         draw_window_border(win)
         win.addstr(0, 2, f" {t('pending_writes_title')} ")
@@ -5120,6 +5199,7 @@ def _update_item_snapshot_location(rows, sku, regal, fach, platz):
     return None
 
 
+@modal_dialog
 def message_box(stdscr, title, message):
 
     h, w = stdscr.getmaxyx()
@@ -5132,7 +5212,7 @@ def message_box(stdscr, title, message):
 
     draw_shadow(stdscr, y, x, height, width)
 
-    win = curses.newwin(height, width, y, x)
+    win = _new_dialog_window(height, width, y, x)
     win.bkgd(" ", curses.color_pair(1))
     draw_window_border(win)
 
@@ -5144,6 +5224,7 @@ def message_box(stdscr, title, message):
     key = stdscr.get_wch()
 
 
+@modal_dialog
 def run_background_action_dialog(stdscr, title, action, detail="Bitte warten..."):
     state = {"done": False, "result": None, "error": None}
 
@@ -5168,7 +5249,7 @@ def run_background_action_dialog(stdscr, title, action, detail="Bitte warten..."
         x = w // 2 - width // 2
 
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.bkgd(" ", curses.color_pair(1))
         draw_window_border(win)
         win.addstr(0, 2, f" {title} ")
@@ -5183,6 +5264,7 @@ def run_background_action_dialog(stdscr, title, action, detail="Bitte warten..."
     return state["result"]
 
 
+@modal_dialog
 def confirm_box(stdscr, title, message, default_yes=True):
 
     h, w = stdscr.getmaxyx()
@@ -5196,7 +5278,7 @@ def confirm_box(stdscr, title, message, default_yes=True):
     draw_shadow(stdscr, y, x, height, width)
     curses.flushinp()
 
-    win = curses.newwin(height, width, y, x)
+    win = _new_dialog_window(height, width, y, x)
     win.keypad(True)
     win.bkgd(" ", curses.color_pair(1))
     draw_window_border(win)
@@ -5269,6 +5351,7 @@ def _form_dialog_submit_result(fields, values, active, submit_keys, default_subm
     return None
 
 
+@modal_dialog
 def form_dialog(
     stdscr,
     title,
@@ -5288,7 +5371,7 @@ def form_dialog(
     y = max(1, (h - height) // 2)
     x = max(2, (w - width) // 2)
     draw_shadow(stdscr, y, x, height, width)
-    win = curses.newwin(height, width, y, x)
+    win = _new_dialog_window(height, width, y, x)
     win.keypad(True)
     win.bkgd(" ", curses.color_pair(1))
 
@@ -5468,6 +5551,7 @@ def form_dialog(
                     values[active] = candidate
                     cursor_positions[active] = pos + 1
 
+@modal_dialog
 def search_dialog(stdscr, initial):
     h, w = stdscr.getmaxyx()
 
@@ -5479,7 +5563,7 @@ def search_dialog(stdscr, initial):
 
     draw_shadow(stdscr, y, x, height, width)
 
-    win = curses.newwin(height, width, y, x)
+    win = _new_dialog_window(height, width, y, x)
     win.keypad(True)
     win.bkgd(" ", curses.color_pair(1))
 
@@ -5666,6 +5750,7 @@ def cups_media_dialog(stdscr, printer_name, current_value, title):
     return choice_dialog(stdscr, title, options, current_value)
 
 
+@modal_dialog
 def cups_printer_dialog(stdscr, current_printer):
     selected_name = current_printer.strip()
 
@@ -5696,7 +5781,7 @@ def cups_printer_dialog(stdscr, current_printer):
 
             draw_shadow(stdscr, y, x, height, width)
 
-            win = curses.newwin(height, width, y, x)
+            win = _new_dialog_window(height, width, y, x)
             win.keypad(True)
             win.bkgd(" ", curses.color_pair(1))
             win.erase()
@@ -5781,6 +5866,7 @@ def get_theme_options():
     return options
 
 
+@modal_dialog
 def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=False):
     selected = 0
     for index, option in enumerate(options):
@@ -5797,7 +5883,7 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
         x = max(2, (w - width) // 2)
 
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -5841,6 +5927,7 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
             return options[selected]["value"]
 
 
+@modal_dialog
 def toggle_choice_dialog(stdscr, title, options, selected_values, footer_text=None):
     selected_set = {str(value) for value in (selected_values or [])}
     selected = 0
@@ -5853,7 +5940,7 @@ def toggle_choice_dialog(stdscr, title, options, selected_values, footer_text=No
         x = max(2, (w - width) // 2)
 
         draw_shadow(stdscr, y, x, height, width)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -6234,6 +6321,7 @@ def _settings_context_select(
             values["shop_active_location_display"] = (selected_row.get("name") if selected_row else chosen) or chosen
     elif active_name == "color_theme":
         values["color_theme"] = choice_dialog(stdscr, t("pick_theme"), get_theme_options(), values["color_theme"])
+        apply_color_theme(stdscr, theme_name=values["color_theme"])
     elif active_name in {"location_regex_regal", "location_regex_fach", "location_regex_platz"}:
         values = _location_regex_options_dialog(stdscr, active_name.rsplit("_", 1)[-1], values)
     elif active_name in {
@@ -6663,6 +6751,14 @@ def _settings_validate_updated_values(stdscr, updated):
 
 
 def settings_dialog(stdscr):
+    try:
+        return _settings_dialog(stdscr)
+    finally:
+        apply_color_theme(stdscr)
+
+
+@modal_dialog
+def _settings_dialog(stdscr):
     global SETTINGS
     try:
         curses.curs_set(1)
@@ -6719,7 +6815,7 @@ def settings_dialog(stdscr):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -7070,6 +7166,7 @@ def add_item(stdscr):
 
     run_background_action_dialog(stdscr, t("add_item_title"), action, detail=t("item_save_detail"))
 
+@modal_dialog
 def change_qty(stdscr, item):
     current_qty = int(item["menge"])
     qty = current_qty
@@ -7084,7 +7181,7 @@ def change_qty(stdscr, item):
 
     draw_shadow(stdscr, y, x, height, width)
 
-    win = curses.newwin(height, width, y, x)
+    win = _new_dialog_window(height, width, y, x)
     win.keypad(True)
     win.bkgd(" ", curses.color_pair(1))
 
@@ -7605,6 +7702,7 @@ def get_pdf_output_dir():
     return str(output_dir)
 
 
+@modal_dialog
 def directory_dialog(stdscr, current_path="", title=None):
     title = title or t("directory_select_title")
     base = (current_path or "").strip()
@@ -7622,7 +7720,7 @@ def directory_dialog(stdscr, current_path="", title=None):
         height = min(22, h - 2)
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -7712,6 +7810,7 @@ def directory_dialog(stdscr, current_path="", title=None):
             selected = 0
 
 
+@modal_dialog
 def file_dialog(stdscr, current_path="", title=None, extensions=None):
     title = title or t("file_select_title")
     base = (current_path or "").strip()
@@ -7733,7 +7832,7 @@ def file_dialog(stdscr, current_path="", title=None, extensions=None):
         height = min(24, h - 2)
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -8322,6 +8421,7 @@ def _bulk_shop_queue_mode_dialog(stdscr):
     )
 
 
+@modal_dialog
 def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
     if not selected_orders:
         return current_map
@@ -8338,7 +8438,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -8406,6 +8506,7 @@ def _execution_carrier_dialog(stdscr, current_carrier=None):
     return chosen
 
 
+@modal_dialog
 def select_partial_items_dialog(stdscr, order, order_items):
     editable = []
     for row in order_items:
@@ -8434,7 +8535,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -8949,6 +9050,7 @@ def _format_shipping_history_line(row, width):
     return _fit(text, width)
 
 
+@modal_dialog
 def shipping_history_dialog(stdscr, selected_order=None):
     selected = 0
     top_index = 0
@@ -8972,7 +9074,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()
@@ -9113,6 +9215,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
                 reload_rows = True
 
 
+@modal_dialog
 def orders_dialog(stdscr):
     try:
         curses.curs_set(0)
@@ -9200,7 +9303,7 @@ def orders_dialog(stdscr):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.timeout(200)
         win.bkgd(" ", curses.color_pair(1))
@@ -9529,6 +9632,7 @@ def inventory_count_dialog(stdscr, line):
     return parse_int_or_error(stdscr, ist_raw, t("field_ist_short"))
 
 
+@modal_dialog
 def inventory_dialog(stdscr):
     session = get_active_inventory_session()
     if session is None:
@@ -9568,7 +9672,7 @@ def inventory_dialog(stdscr):
         y = max(1, (h - height) // 2)
         x = max(2, (w - width) // 2)
 
-        win = curses.newwin(height, width, y, x)
+        win = _new_dialog_window(height, width, y, x)
         win.keypad(True)
         win.bkgd(" ", curses.color_pair(1))
         win.erase()

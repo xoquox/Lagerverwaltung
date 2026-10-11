@@ -254,15 +254,27 @@ Teilausfuehrung liegt in der Auftragsansicht auf `F6`.
 
 Hier wird pro Position die Menge festgelegt. Danach folgt derselbe Versandablauf wie bei einer normalen Ausfuehrung.
 
-### Darstellung
-
-Das Farbschema `Commander (Blau)` verwendet blaue Arbeitsflaechen, helle Schrift, einen durchgehenden tuerkisen Kopfbalken und gelbe Tabellenueberschriften. Die aktive Auswahl ist tuerkis hinterlegt; die Auswahl im anderen Panel bleibt auf blauem Hintergrund hervorgehoben. Die Synchronisationskennzeichen zeigen synchronisierte Artikel gruen, ausstehende Aenderungen gelb, Fehler rot und lokale Artikel cyan. Die Kennzeichen `S`, `D` und `L` bleiben erhalten. Tastenkuerzel sind in der Fusszeile separat hervorgehoben.
-
-Das Farbschema wird unter `Shift+F11` im Tab `Allgemein` gewaehlt.
-
 ## Einstellungen
 
 Die Einstellungen liegen auf `Shift+F11`.
+
+### Darstellung
+
+Das Farbschema wird im Tab `Allgemein` mit `Enter` oder `F6` gewaehlt. Die Auswahl erscheint als Vorschau in den Einstellungen. `F2` speichert sie; `F9` oder `Esc` stellt das gespeicherte Farbschema wieder her.
+
+| Farbschema | Darstellung |
+| --- | --- |
+| Commander (Blau) | Blaue Arbeitsflaeche, tuerkiser Kopfbalken und Auswahl, gelbe Ueberschriften |
+| Gruen | Gruene Schrift auf Schwarz mit gruener Auswahl und Kopfleiste |
+| Monochrom | Schwarz und Weiss mit invertierter Auswahl und Kopfleiste |
+| Megatrends (DOS) | Graue Arbeitsflaeche, blaue Schrift und blaue Auswahl nach BIOS-Stil |
+| Smoth (DOS) | Blaue Arbeitsflaeche mit hellgrauer Auswahl und Kopfleiste |
+| Norton (DOS) | Cyanfarbene Schrift und Rahmen auf Blau, tuerkise Auswahl und Kopfleiste |
+| Gold Standard (DOS) | Gelbe Schrift auf Schwarz mit goldener Auswahl und Kopfleiste |
+| Subtile (DOS) | Helle Arbeitsflaeche mit dunkler Schrift und blauen Akzenten |
+| Monokai | Dunkle Arbeitsflaeche, helle Schrift, gruene Auswahl und cyanfarbene Kopfleiste |
+
+Produktnummer und Name verwenden dieselbe Textfarbe. Die Synchronisationskennzeichen unterscheiden Erfolg, ausstehende Aenderungen, Fehler und lokale Artikel durch themeabhaengige Farben. Die Kennzeichen `S`, `D` und `L` bleiben erhalten. Tastenkuerzel sind in der Fusszeile separat hervorgehoben. Eigene Theme-Dateien mit den bisherigen sechs Farbwerten bleiben verwendbar.
 
 Tab-Struktur:
 

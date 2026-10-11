@@ -254,15 +254,27 @@ Partial execution is available in the order view under `F6`.
 
 The quantity is set per position. The remaining flow matches the normal shipping workflow.
 
-### Appearance
-
-The `Commander (Blue)` colour scheme uses blue work areas, bright text, a full-width cyan header bar and yellow table headings. The active selection has a cyan background; the selection in the other panel is highlighted on the blue background. Sync indicators are green for synchronised items, yellow for pending changes, red for errors and cyan for local items. The `S`, `D` and `L` indicators remain visible. Keyboard shortcuts are highlighted separately in the footer.
-
-The colour scheme is selected under `Shift+F11` in the `General` tab.
-
 ## Settings
 
 Settings are available under `Shift+F11`.
+
+### Appearance
+
+The colour scheme is selected in the `General` tab with `Enter` or `F6`. The selection is previewed in settings. `F2` saves it; `F9` or `Esc` restores the saved scheme.
+
+| Colour scheme | Appearance |
+| --- | --- |
+| Commander (Blue) | Blue work area, cyan header and selection, yellow headings |
+| Green | Green text on black with green selection and header |
+| Monochrome | Black and white with inverted selection and header |
+| Megatrends (DOS) | Gray work area, blue text and blue selection inspired by BIOS screens |
+| Smoth (DOS) | Blue work area with light gray selection and header |
+| Norton (DOS) | Cyan text and borders on blue with cyan selection and header |
+| Gold Standard (DOS) | Yellow text on black with gold selection and header |
+| Subtile (DOS) | Light work area with dark text and blue accents |
+| Monokai | Dark work area, bright text, green selection and cyan header |
+
+Product numbers and names share the same text colour. Sync indicators distinguish success, pending changes, errors and local items using theme-specific colours. The `S`, `D` and `L` indicators remain visible. Keyboard shortcuts are highlighted separately in the footer. Custom theme files using the original six colour values remain supported.
 
 Tabs:
 
