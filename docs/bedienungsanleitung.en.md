@@ -130,7 +130,7 @@ Important actions:
 - `F6` partial execution
 - `F7` bulk execution
 - `F8` shipping history
-- `F10` pick list
+- `Shift+F10` pick list
 - `F11` delivery note
 
 ## Shipping
@@ -223,7 +223,7 @@ Each entry shows:
 
 Pick lists and delivery notes are started from the order view.
 
-- `F10` pick list
+- `Shift+F10` pick list
 - `F11` delivery note
 
 Available delivery note output modes:
@@ -256,11 +256,23 @@ The quantity is set per position. The remaining flow matches the normal shipping
 
 ## Settings
 
+The top menu bar offers `File`, `Article`, `View`, `Orders`, `Extras` and `Help`. `F10` or a mouse click opens a menu. `Left`/`Right` switches menus, `Up`/`Down` selects enabled entries, `Enter` executes and `Esc` or `F9` closes. Disabled actions require the appropriate view or selection. The order view uses `Shift+F10` for picklists.
+
+`File → Exit` closes Lager-MC and checks pending database writes. `Extras` contains stocktake, settings, print settings, keyboard shortcuts and sync status. `Help` offers the shortcut overview, user manual and version information.
+
+Mouse control is selected under `General → Mouse control → On/Off` and saved with `F2`. Mouse events are used when provided by the terminal; keyboard controls remain available independently. Clicking selects items, locations or orders and switches the active item panel. Double-clicking an item or location entry opens item details. The wheel navigates the list under the pointer; in the right order panel it scrolls order details. Clicking `[ ]` or double-clicking an order row marks it for bulk execution.
+
+Menus, choice lists, printer selection, settings tabs and keyboard assignments support clicks. The wheel moves selection and scrolls long settings lists. Clicking a text field positions the cursor. Visible footer buttons execute their displayed actions.
+
+Keyboard shortcuts are configured under `Extras → Keyboard shortcuts` or the `General` settings tab. `Tab` switches between items with a single shop location, items with multiple shop locations and orders. `Enter` or `F6` selects a key; `Menu only` removes its assignment. Duplicate assignments are rejected. `F5` restores defaults for the displayed view. `F2` accepts; `F9` or `Esc` discards changes. When opened from settings, the settings dialog's `F2` saves the accepted assignments. `F10` remains reserved for the menu. Subdialogs retain their navigation and save keys.
+
+Menu entries, the shortcut overview and the footer show configured shortcuts. The key lists in this manual describe the default assignments.
+
 Settings are available under `Shift+F11`.
 
 ### Appearance
 
-The colour scheme is selected in the `General` tab with `Enter` or `F6`. The selection is previewed in settings. `F2` saves it; `F9` or `Esc` restores the saved scheme.
+The colour scheme is selected in the `General` tab with `Enter` or `F6`. The selection is previewed in settings. `F2` saves it; `F9` or `Esc` restores the saved scheme. Validation errors keep the dialog open with the entered values. A label printer is optional; its model and label format are required when a printer URI is set.
 
 | Colour scheme | Appearance |
 | --- | --- |
@@ -291,6 +303,12 @@ Important keys:
 - `F2` save
 - `F6` opens the matching selection for the current field
 - `F7` starts a test page for the current printer/media field
+
+The `Printers` tab offers one-sided, long-edge duplex and short-edge duplex printing for delivery notes and pick/inventory lists. Shipping labels are printed one-sided. Duplex delivery notes are submitted as separate jobs during bulk execution so each order starts on its own sheet.
+
+The `Delivery note` tab selects item sorting with `Enter` or `F6`: shop order sequence, storage location, name, SKU or weight. All criteria except shop order sequence support ascending and descending sorting. Location and SKU numbers use natural ordering; missing values stay at the end. External stock items remain excluded. Sorting applies to PDF export, individual printing and bulk printing.
+
+`F7` uses the selected print options before saving. Duplex tests include a front and reverse page. General shipping media and scaling are available in the `Printers` tab; the driver media code `PCard100x148` is handled separately from PDF dimensions. Delivery note PDFs use the selected page size; PDF templates are fitted proportionally.
 
 Important settings in the shipping tab:
 

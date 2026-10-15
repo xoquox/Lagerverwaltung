@@ -42,17 +42,8 @@ def _normalized_address_lines(address):
 
 
 def _css_page_size(page_size):
-    normalized = (page_size or "A6").strip()
-    compact = normalized.upper().replace(" ", "")
-    if compact in {"A4", "A5", "A6"}:
-        return compact
-    if compact in {"100X62", "62X100"}:
-        return "100mm 62mm"
-    if compact.endswith("MM") and "X" in compact:
-        width, height = compact.replace("MM", "").split("X", 1)
-        if width.isdigit() and height.isdigit():
-            return f"{width}mm {height}mm"
-    return normalized
+    width, height = _page_dimensions_points(page_size)
+    return f"{width:.4f}pt {height:.4f}pt"
 
 
 def _load_html_template(template_path):
@@ -133,20 +124,25 @@ def _default_address_label_template():
 def _page_dimensions_points(page_size):
     normalized = (page_size or "A6").strip().upper().replace(" ", "")
     predefined = {
+        "A3": (841.89, 1190.55),
         "A4": (595.28, 841.89),
         "A5": (419.53, 595.28),
         "A6": (297.64, 419.53),
+        "LETTER": (612, 792),
+        "LEGAL": (612, 1008),
+        "TABLOID": (792, 1224),
         "100X62": (_mm_to_pt(100), _mm_to_pt(62)),
-        "62X100": (_mm_to_pt(100), _mm_to_pt(62)),
+        "62X100": (_mm_to_pt(62), _mm_to_pt(100)),
     }
     if normalized in predefined:
         return predefined[normalized]
-    match = re.fullmatch(r"(\d+)X(\d+)(MM)?", normalized)
+    match = re.fullmatch(r"(?:PCARD|CUSTOM\.)?(\d+(?:\.\d+)?)X(\d+(?:\.\d+)?)(MM)?", normalized)
     if match:
-        width_mm = int(match.group(1))
-        height_mm = int(match.group(2))
-        return (_mm_to_pt(width_mm), _mm_to_pt(height_mm))
-    return predefined["A6"]
+        width_mm = float(match.group(1))
+        height_mm = float(match.group(2))
+        if width_mm > 0 and height_mm > 0:
+            return (_mm_to_pt(width_mm), _mm_to_pt(height_mm))
+    raise ValueError(f"Unbekannte PDF-Seitengroesse: {page_size}")
 
 
 def _mm_to_pt(value_mm):

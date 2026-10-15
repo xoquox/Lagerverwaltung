@@ -3,11 +3,13 @@ import base64
 import datetime
 from html import escape
 import math
+from decimal import Decimal, InvalidOperation
 import re
 import struct
 from string import Template
 import urllib.request
 import zlib
+from address_label import _page_dimensions_points, _css_page_size
 from pathlib import Path
 
 try:
@@ -29,8 +31,50 @@ DEFAULT_SENDER = {
 }
 
 
-def build_delivery_note_rows(order_items):
-    return [row for row in order_items if not row.get("external_fulfillment")]
+DELIVERY_NOTE_SORT_MODES = (
+    "order", "location_asc", "location_desc", "name_asc", "name_desc",
+    "sku_asc", "sku_desc", "weight_asc", "weight_desc",
+)
+
+
+def normalize_delivery_note_sort(value):
+    return value if value in DELIVERY_NOTE_SORT_MODES else "order"
+
+
+def _natural_sort_key(value):
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in re.split(r"(\d+)", str(value or ""))
+    )
+
+
+def build_delivery_note_rows(order_items, sort_mode="order"):
+    rows = [row for row in order_items if not row.get("external_fulfillment")]
+    mode = normalize_delivery_note_sort(sort_mode)
+    if mode == "order":
+        return rows
+    field, direction = mode.rsplit("_", 1)
+
+    def key(row):
+        if field == "location":
+            values = [row.get(k) for k in ("regal", "fach", "platz")]
+            return tuple(_natural_sort_key(v) for v in values) if any(values) else None
+        if field == "weight":
+            try:
+                weight = Decimal(str(row.get("shop_weight_grams")))
+                return weight if weight.is_finite() and weight >= 0 else None
+            except (InvalidOperation, ValueError):
+                return None
+        value = row.get("title" if field == "name" else "sku")
+        return _natural_sort_key(value) if str(value or "").strip() else None
+
+    # Missing values stay at the end in both directions; ties retain shop order.
+    keyed = [(key(row), row) for row in rows]
+    present = sorted(
+        (entry for entry in keyed if entry[0] is not None),
+        key=lambda entry: entry[0], reverse=direction == "desc",
+    )
+    return [row for _, row in present] + [row for value, row in keyed if value is None]
 
 
 def format_delivery_note_location(row):
@@ -64,12 +108,12 @@ def format_delivery_address_lines(order):
     return lines or ["Keine Lieferadresse"]
 
 
-def build_delivery_note_pdf(template_path, output_path, order, order_items, sender=None, logo_source=""):
+def build_delivery_note_pdf(template_path, output_path, order, order_items, sender=None, logo_source="", page_size="A4"):
     rows = build_delivery_note_rows(order_items)
     if _should_use_html_renderer(template_path):
-        _build_delivery_note_pdf_html(template_path, output_path, order, rows, sender=sender, logo_source=logo_source)
+        _build_delivery_note_pdf_html(template_path, output_path, order, rows, sender=sender, logo_source=logo_source, page_size=page_size)
         return Path(output_path)
-    return _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sender=sender, logo_source=logo_source)
+    return _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sender=sender, logo_source=logo_source, page_size=page_size)
 
 
 def _should_use_html_renderer(template_path):
@@ -83,7 +127,7 @@ def _should_use_html_renderer(template_path):
     return suffix in {"", ".html", ".htm"}
 
 
-def _build_delivery_note_pdf_html(template_path, output_path, order, rows, sender=None, logo_source=""):
+def _build_delivery_note_pdf_html(template_path, output_path, order, rows, sender=None, logo_source="", page_size="A4"):
     sender_data = _normalized_sender(sender)
     order_name = order.get("order_name") or "-"
     created_at = order.get("created_at")
@@ -109,6 +153,7 @@ def _build_delivery_note_pdf_html(template_path, output_path, order, rows, sende
         address_html="".join(f"<div>{escape(line)}</div>" for line in format_delivery_address_lines(order)),
         items_html=items_html,
     )
+    rendered += f"<style>@page {{ size: {_css_page_size(page_size)}; }}</style>"
     HTML(string=rendered, base_url=str(Path(__file__).resolve().parent)).write_pdf(output_path)
 
 
@@ -292,7 +337,7 @@ def _detect_image_mime(image_bytes):
     raise ValueError("Logo-Format nicht unterstuetzt (erwartet PNG/JPG/GIF/WEBP).")
 
 
-def _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sender=None, logo_source=""):
+def _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sender=None, logo_source="", page_size="A4"):
     template_bytes = _load_template_bytes(template_path)
     objects = _parse_pdf_objects(template_bytes)
     regular_font_obj_id = max(objects) + 1
@@ -313,9 +358,9 @@ def _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sen
     )
     objects[3] = _build_pages_object([6], resources_body)
     objects[5] = _build_info_object()
-    objects[6] = _build_page_object(7)
+    objects[6] = _build_page_object(7, page_size)
     objects[7] = _build_stream_object(
-        build_delivery_note_content_stream(order, rows, 1, 1, sender=sender, has_logo=bool(logo_info), logo_info=logo_info)
+        _fit_page_content(build_delivery_note_content_stream(order, rows, 1, 1, sender=sender, has_logo=bool(logo_info), logo_info=logo_info), page_size)
     )
 
     if rows:
@@ -331,9 +376,9 @@ def _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sen
             content_obj_id = 7 if page_index == 0 else next_obj_id + 1
             page_ids.append(page_obj_id)
             page_rows = rows[page_index * MAX_DELIVERY_NOTE_ITEMS : (page_index + 1) * MAX_DELIVERY_NOTE_ITEMS]
-            objects[page_obj_id] = _build_page_object(content_obj_id)
+            objects[page_obj_id] = _build_page_object(content_obj_id, page_size)
             objects[content_obj_id] = _build_stream_object(
-                build_delivery_note_content_stream(
+                _fit_page_content(build_delivery_note_content_stream(
                     order,
                     page_rows,
                     page_index + 1,
@@ -341,7 +386,7 @@ def _build_delivery_note_pdf_legacy(template_path, output_path, order, rows, sen
                     sender=sender,
                     has_logo=bool(logo_info),
                     logo_info=logo_info,
-                )
+                ), page_size)
             )
             if page_index > 0:
                 next_obj_id += 2
@@ -697,10 +742,21 @@ def _build_pages_object(page_ids, resources_body):
     )
 
 
-def _build_page_object(content_obj_id):
+def _fit_page_content(content, page_size):
+    width, height = _page_dimensions_points(page_size)
+    if page_size == "A4":
+        return content
+    scale = min(width / 595.28, height / 841.89)
+    x = (width - 595.28 * scale) / 2
+    y = (height - 841.89 * scale) / 2
+    return f"q\n{scale:.8f} 0 0 {scale:.8f} {x:.8f} {y:.8f} cm\n" + content + "\nQ"
+
+
+def _build_page_object(content_obj_id, page_size="A4"):
+    width, height = _page_dimensions_points(page_size)
     return (
         b"<< /Type /Page\n"
-        + f"/MediaBox {MEDIA_BOX}\n".encode("ascii")
+        + f"/MediaBox [0 0 {width:.3f} {height:.3f}]\n".encode("ascii")
         + b"/Parent 3 0 R\n"
         + f"/Contents {content_obj_id} 0 R\n".encode("ascii")
         + b">>"

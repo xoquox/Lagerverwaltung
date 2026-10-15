@@ -1368,7 +1368,7 @@ class LagerMcLogicTests(unittest.TestCase):
             clear=False,
         ):
             self.assertEqual(self.lager_mc._shipping_format_for_carrier("free"), "A5")
-            self.assertEqual(self.lager_mc._shipping_format_for_carrier("post"), "100x62")
+            self.assertEqual(self.lager_mc._shipping_format_for_carrier("post"), "62x100")
 
     def test_cups_label_print_options_include_media_pagesize_and_scaling_flags(self):
         self.assertEqual(
@@ -1794,7 +1794,7 @@ class LagerMcLogicTests(unittest.TestCase):
             self.assertEqual(self.lager_mc.t("db_wait_footer"), "Enter Retry  F2 Settings  F9 Exit")
             self.assertEqual(
                 self.lager_mc.t("orders_footer"),
-                " Space Mark  A All  F1 Open  F2 Status  F3 Payment  F4 Jump  F5 Shipping Label  Shift+F5 Manual  F6 Partial  F7 Bulk  F8 Shipping History  F9 Back  F10 Picklist  F11 Delivery Note  F12 Custom  E Edit  D Delete ",
+                " Space Mark  A All  F1 Open  F2 Status  F3 Payment  F4 Jump  F5 Shipping Label  Shift+F5 Manual  F6 Partial  F7 Bulk  F8 Shipping History  F9 Back  Shift+F10 Picklist  F10 Menu  F11 Delivery Note  F12 Custom  E Edit  D Delete ",
             )
 
     def test_custom_order_number_starts_new_year_sequence(self):

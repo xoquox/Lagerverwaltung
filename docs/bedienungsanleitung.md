@@ -130,7 +130,7 @@ Wichtige Aktionen:
 - `F6` Teilausfuehrung
 - `F7` Bulk-Ausfuehrung
 - `F8` Versandhistory
-- `F10` Pickliste
+- `Shift+F10` Pickliste
 - `F11` Lieferschein
 
 ## Versand
@@ -223,7 +223,7 @@ Die History zeigt pro Eintrag:
 
 Picklisten und Lieferscheine werden aus der Auftragsansicht gestartet.
 
-- `F10` Pickliste
+- `Shift+F10` Pickliste
 - `F11` Lieferschein
 
 Beim Lieferschein stehen diese Ausgabemodi zur Verfuegung:
@@ -256,11 +256,23 @@ Hier wird pro Position die Menge festgelegt. Danach folgt derselbe Versandablauf
 
 ## Einstellungen
 
+Die Menueleiste am oberen Bildschirmrand bietet `Datei`, `Artikel`, `Ansicht`, `Auftraege`, `Extras` und `Hilfe`. `F10` oder ein Mausklick oeffnet ein Menue. `Links`/`Rechts` wechselt das Menue, `Hoch`/`Runter` die ausfuehrbaren Eintraege, `Enter` fuehrt aus und `Esc` oder `F9` schliesst. Ausgegraute Aktionen benoetigen eine passende Ansicht oder Auswahl. In der Auftragsansicht liegt die Pickliste auf `Shift+F10`.
+
+`Datei → Beenden` beendet Lager-MC; offene Datenbankschreibvorgaenge werden dabei beruecksichtigt. `Extras` enthaelt Inventur, Einstellungen, Druckeinstellungen, Tastaturbelegung und Sync-Status. `Hilfe` zeigt Tastenuebersicht, Bedienungsanleitung und Versionsinformationen.
+
+Die Maussteuerung wird im Tab `Allgemein` mit `Maussteuerung → Ein/Aus` gewaehlt und mit `F2` gespeichert. Die Maus wird verwendet, wenn das Terminal Mausereignisse liefert; die Tastaturbedienung ist unabhaengig davon verfuegbar. Ein Klick waehlt Artikel, Lagerplaetze oder Auftraege aus und wechselt den aktiven Artikelbereich. Ein Doppelklick auf einen Artikel oder Lagerplatzeintrag oeffnet die Artikelinformationen. Das Mausrad navigiert durch die Liste unter dem Mauszeiger; im rechten Auftragsbereich scrollt es die Details. Ein Klick auf `[ ]` oder ein Doppelklick auf die Auftragszeile markiert einen Auftrag fuer die Sammelausfuehrung.
+
+Menues, Auswahllisten, Druckerauswahl, Einstellungstabs und die Tastaturbelegung lassen sich anklicken. Das Mausrad bewegt die Auswahl; lange Einstellungslisten scrollen mit. In Textfeldern setzt ein Klick den Cursor. Sichtbare Tastenfelder in der Fussleiste fuehren die angezeigte Aktion aus.
+
+Die Tastaturbelegung wird unter `Extras → Tastaturbelegung` oder im Tab `Allgemein` der Einstellungen bearbeitet. `Tab` wechselt zwischen Artikelansicht mit einem Standort, Artikelansicht mit mehreren Standorten und Auftragsansicht. `Enter` oder `F6` waehlt eine Taste; `Nur Menue` entfernt die Tastenzuweisung. Doppelte Belegungen werden abgewiesen. `F5` stellt fuer die angezeigte Ansicht die Standardbelegung wieder her. `F2` uebernimmt, `F9` oder `Esc` verwirft die Aenderungen. Beim Aufruf aus den Einstellungen speichert deren `F2` die uebernommene Belegung. `F10` bleibt fuer das Menue reserviert. Unterdialoge behalten ihre Bedien- und Speichertasten.
+
+Menueeintraege, Tastenuebersicht und Fussleiste zeigen die eingestellten Tastenkombinationen. Die Tastenlisten im Handbuch beschreiben die Standardbelegung.
+
 Die Einstellungen liegen auf `Shift+F11`.
 
 ### Darstellung
 
-Das Farbschema wird im Tab `Allgemein` mit `Enter` oder `F6` gewaehlt. Die Auswahl erscheint als Vorschau in den Einstellungen. `F2` speichert sie; `F9` oder `Esc` stellt das gespeicherte Farbschema wieder her.
+Das Farbschema wird im Tab `Allgemein` mit `Enter` oder `F6` gewaehlt. Die Auswahl erscheint als Vorschau in den Einstellungen. `F2` speichert sie; `F9` oder `Esc` stellt das gespeicherte Farbschema wieder her. Bei einem Pruefungsfehler bleibt der Dialog mit den eingegebenen Werten geoeffnet. Ein Etikettendrucker ist optional; Modell und Labelformat sind bei eingetragener Drucker-URI erforderlich.
 
 | Farbschema | Darstellung |
 | --- | --- |
@@ -291,6 +303,12 @@ Wichtige Bedienung:
 - `F2` Speichern
 - `F6` oeffnet die passende Auswahl zum aktuellen Feld
 - `F7` startet eine Testseite fuer das aktuelle Drucker-/Format-Feld
+
+Im Tab `Drucker` stehen fuer Lieferscheine sowie Pick-/Inventurlisten die Duplexoptionen `Einseitig`, `Duplex lange Kante` und `Duplex kurze Kante` zur Auswahl. Versandlabels werden einseitig ausgegeben. Bei Duplex werden Lieferscheine im Sammelablauf als getrennte Druckauftraege ausgegeben, damit jede Bestellung auf einem eigenen Blatt beginnt.
+
+Im Tab `Lieferschein` wird die Positionssortierung mit `Enter` oder `F6` gewaehlt: Bestellreihenfolge, Lagerplatz, Name, SKU oder Gewicht. Alle Kriterien ausser Bestellreihenfolge bieten auf- und absteigende Sortierung. Lagerplaetze und SKUs werden mit Zahlenvergleich sortiert; fehlende Werte stehen am Ende. Extern gelagerte Positionen bleiben ausgeschlossen. Die Auswahl gilt fuer PDF-Export, Einzel- und Sammeldruck.
+
+`F7` verwendet die im Dialog ausgewaehlten Druckoptionen auch vor dem Speichern. Ein Duplex-Test erzeugt Vorder- und Rueckseite. Allgemeines Versandformat und allgemeine Skalierung stehen im Tab `Drucker`; das Treiberformat `PCard100x148` bleibt vom PDF-Seitenmass getrennt. Lieferschein-PDFs werden im ausgewaehlten Format erzeugt; PDF-Vorlagen werden proportional eingepasst.
 
 Wichtige Einstellungen im Versand-Tab:
 

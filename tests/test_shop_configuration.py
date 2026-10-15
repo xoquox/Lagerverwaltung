@@ -72,6 +72,8 @@ class ShopConfigurationTests(unittest.TestCase):
             "lager_mc.py",
             "ui_orders.py",
             "ui_settings.py",
+            "ui_menu.py",
+            "ui_mouse.py",
             "shipping/shop.py",
         ):
             source = (ROOT / filename).read_text()

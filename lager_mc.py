@@ -29,7 +29,12 @@ from address_label import build_address_label_pdf
 from app_logging import MAIN_LOG_PATH, PRINT_LOG_PATH, get_logger
 from app_settings import DEFAULT_SETTINGS, load_settings, save_settings
 from app_version import APP_VERSION
-from delivery_note import build_delivery_note_pdf, build_delivery_note_rows
+from delivery_note import (
+    DELIVERY_NOTE_SORT_MODES,
+    build_delivery_note_pdf,
+    build_delivery_note_rows,
+    normalize_delivery_note_sort,
+)
 from languages import COUNTRY_NAMES, COUNTRY_ORDER, SUPPORTED_LANGUAGES, TRANSLATIONS
 from post.internetmarke_client import InternetmarkeClient
 from post.product_catalog import find_post_product, list_post_base_products
@@ -71,10 +76,14 @@ from ui_orders import (
     build_orders_footer,
 )
 from ui_settings import TextInputState, collect_editable_field_names, resolve_active_field
+import ui_menu as menu_model
+import ui_mouse as mouse_model
 
 locale.setlocale(locale.LC_ALL, "")
 
 SETTINGS = load_settings()
+_MENU_EXIT_REQUESTED = False
+_MOUSE_FOOTER_TARGETS = []
 LOGGER = get_logger("lager_mc")
 PRINT_LOGGER = get_logger("print")
 BASE_DIR = Path(__file__).resolve().parent
@@ -893,7 +902,7 @@ def database_connection_dialog(stdscr, error_text):
             message = t("db_wait_auto_continue")
             _request_database_probe(loader, force=True)
             continue
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return False
 
 
@@ -1598,7 +1607,7 @@ def get_order_items(order_id):
         cur.execute(
             f"""
             SELECT
-                MIN(foi.fulfillment_order_line_item_id) AS line_index,
+                MIN(oi.line_index) AS line_index,
                 COALESCE(foi.order_line_item_id, oi.order_line_item_id) AS order_line_item_id,
                 COALESCE(foi.sku, oi.sku) AS sku,
                 COALESCE(MAX(foi.title), MAX(oi.title), '-') AS title,
@@ -1638,7 +1647,7 @@ def get_order_items(order_id):
                 COALESCE(ili.platz, i.platz),
                 i.shop_weight_grams,
                 COALESCE(i.external_fulfillment, FALSE)
-            ORDER BY MIN(foi.assigned_location_name), MIN(foi.fulfillment_order_id), MIN(foi.fulfillment_order_line_item_id)
+            ORDER BY MIN(oi.line_index) NULLS LAST, MIN(foi.fulfillment_order_line_item_id)
             """,
             params,
         )
@@ -1909,7 +1918,7 @@ def custom_order_items_dialog(stdscr, initial_items=None):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return None
         if key == curses.KEY_F2:
             picked = []
@@ -2707,7 +2716,7 @@ def shop_customer_dialog(stdscr, search_text=""):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return None
         if key == curses.KEY_DOWN:
             if rows:
@@ -2888,14 +2897,14 @@ def _resolve_post_page_format_id(client, desired_format):
                 score += 10
             if address_possible:
                 score += 5
-        elif compact == "A4":
+        elif compact == "a4":
             if "A4" in name.upper():
                 score += 100
             if item_type == "REGULARPAGE":
                 score += 10
             if address_possible:
                 score += 5
-        elif compact == "A5":
+        elif compact == "a5":
             if "A5" in name.upper():
                 score += 100
             if item_type == "LABELPRINTER":
@@ -3297,7 +3306,7 @@ def multiline_text_dialog(stdscr, title, footer, initial_text=""):
                     key = win.get_wch()
                 except curses.error:
                     continue
-                if key in (27, curses.KEY_F9):
+                if key in (27, "\x1b", curses.KEY_F9):
                     return None
                 if key == curses.KEY_F2:
                     return text
@@ -3353,7 +3362,11 @@ def shop_description_dialog(stdscr, initial_text):
 
 
 def _merge_pdf_files(pdf_paths, output_path):
-    valid_paths = [str(Path(path)) for path in pdf_paths if path and os.path.isfile(path)]
+    paths = [str(Path(path)) for path in pdf_paths if path]
+    for path in paths:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"PDF fehlt: {Path(path).name}")
+    valid_paths = paths
     if not valid_paths:
         raise RuntimeError(t("pdf_merge_no_files"))
     if len(valid_paths) == 1:
@@ -3409,7 +3422,7 @@ def _normalize_shipping_label_format(value):
     if compact in {"A4", "A5", "A6"}:
         return compact
     if compact in {"100X62", "62X100"}:
-        return "100x62"
+        return "100x62" if compact == "100X62" else "62x100"
     return raw
 
 
@@ -3549,7 +3562,7 @@ def _print_test_summary_line(context):
     return " | ".join(parts)
 
 
-def _build_simple_test_page_pdf(title, lines=None, page_size="A4"):
+def _build_simple_test_page_pdf(title, lines=None, page_size="A4", two_sided=False):
     width, height = address_label._page_dimensions_points(page_size)
     margin = 36
     text_lines = [str(title or "Testseite").strip() or "Testseite"]
@@ -3579,6 +3592,17 @@ def _build_simple_test_page_pdf(title, lines=None, page_size="A4"):
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         f"<< /Length {len(content)} >>\nstream\n{content.decode('latin-1')}\nendstream",
     ]
+    if two_sided:
+        objects[1] = "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>"
+        reverse_content = content.decode("latin-1").replace(
+            address_label._pdf_escape(text_lines[0]),
+            address_label._pdf_escape(t("print_test_backside")), 1
+        ).encode("latin-1", errors="replace")
+        objects.extend([
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2f} {height:.2f}] "
+            "/Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>",
+            f"<< /Length {len(reverse_content)} >>\nstream\n{reverse_content.decode('latin-1')}\nendstream",
+        ])
     pdf = "%PDF-1.4\n"
     offsets = []
     for index, obj in enumerate(objects, start=1):
@@ -3626,16 +3650,19 @@ def _run_lp_command(cmd, *, print_kind, printer, title, source_path=None, extra=
     return result
 
 
-def _print_test_page_to_printer(stdscr, printer, title, page_size="A4", lines=None):
+def _print_test_page_to_printer(stdscr, printer, title, page_size="A4", lines=None, print_options=None):
     if not (printer or "").strip():
         message_box(stdscr, t("error"), t("no_printer_for_test_page"))
         return False
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
         temp_path = handle.name
     try:
-        Path(temp_path).write_bytes(_build_simple_test_page_pdf(title, lines=lines, page_size=page_size))
+        Path(temp_path).write_bytes(_build_simple_test_page_pdf(
+            title, lines=lines, page_size=page_size,
+            two_sided=_normalize_duplex_mode((print_options or {}).get("duplex_mode")) != "off",
+        ))
         cmd = ["lp", "-d", printer, "-t", title]
-        cmd.extend(_cups_label_print_options(page_size))
+        cmd.extend(_cups_print_options(page_size, **(print_options or {})))
         cmd.append(temp_path)
         _run_lp_command(
             cmd,
@@ -3645,6 +3672,9 @@ def _print_test_page_to_printer(stdscr, printer, title, page_size="A4", lines=No
             source_path=temp_path,
             extra=f"page_size={page_size}",
         )
+    except ValueError as exc:
+        message_box(stdscr, t("print_error_title"), str(exc)[:56])
+        return False
     except FileNotFoundError:
         PRINT_LOGGER.exception("lp nicht verfuegbar fuer Testseite printer=%s title=%s", printer, title)
         message_box(stdscr, t("print_error_title"), t("lp_unavailable"))
@@ -3779,7 +3809,7 @@ def shipping_services_dialog(stdscr, current_services, cancel_returns_none=False
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             if cancel_returns_none:
                 return None
             return _normalize_shipping_services(current_services)
@@ -4265,7 +4295,7 @@ def _location_regex_options_dialog(stdscr, field_name, values):
 
         key = win.get_wch()
 
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return values
         if key == curses.KEY_F2:
             values[regex_key] = pattern.strip()
@@ -4582,13 +4612,13 @@ def draw_shadow(stdscr, y, x, h, w):
     return
 
 
-def _scrolling_footer_slice(text, width):
+def _scrolling_footer_slice(text, width, with_offset=False):
     width = max(0, int(width))
     if width <= 0:
-        return ""
+        return ("", 0) if with_offset else ""
     text = str(text or "")
     if len(text) <= width:
-        return text.ljust(width)
+        return (text.ljust(width), 0) if with_offset else text.ljust(width)
     gap = "   "
     cycle = text + gap
     scroll_speed = 1.0
@@ -4605,14 +4635,30 @@ def _scrolling_footer_slice(text, width):
     else:
         offset = min(scroll_frames - 1, int((phase - start_pause) * scroll_speed))
     window = cycle[offset:] + cycle[:offset] + cycle
-    return window[:width]
+    return (window[:width], offset) if with_offset else window[:width]
 
 
 def draw_footer_line(win, y, x, width, text):
+    global _MOUSE_FOOTER_TARGETS
+    _MOUSE_FOOTER_TARGETS = []
     width = max(0, int(width))
     if width <= 0:
         return
-    visible = _scrolling_footer_slice(text, width)
+    visible, offset = _scrolling_footer_slice(text, width, with_offset=True)
+    try:
+        origin_y, origin_x = win.getbegyx()
+        originals = {match.start(): match.group() for match in FOOTER_KEY_PATTERN.finditer(str(text))}
+        matches = list(FOOTER_KEY_PATTERN.finditer(visible))
+        cycle_length = len(str(text)) + 3
+        for index, match in enumerate(matches):
+            source_position = (offset + match.start()) % cycle_length
+            token = match.group()
+            key = mouse_model.footer_key(token)
+            if key is not None and originals.get(source_position) == token:
+                end = matches[index+1].start() if index+1 < len(matches) else len(visible)
+                _MOUSE_FOOTER_TARGETS.append((origin_y+y, origin_x+x+match.start(), origin_x+x+end, key))
+    except (AttributeError, TypeError, ValueError, curses.error):
+        pass
     try:
         win.addstr(y, x, visible, curses.color_pair(3))
         for match in FOOTER_KEY_PATTERN.finditer(visible):
@@ -4647,7 +4693,7 @@ def draw_window_border(win, active=False):
     win.attrset(curses.color_pair(1))
 
 
-def draw_panel(win, title, lines, selected, top_index, active):
+def draw_panel(win, title, lines, selected, top_index, active, *, refresh=True):
     h, w = win.getmaxyx()
     max_rows = max(0, h - 4)
 
@@ -4676,7 +4722,8 @@ def draw_panel(win, title, lines, selected, top_index, active):
         else:
             _safe_addstr(win, y, 1, line[: max(0, w - 2)].ljust(max(0, w - 2)))
 
-    win.refresh()
+    if refresh:
+        win.refresh()
 
 
 def draw_items_panel(win, items, selected, top_index, active):
@@ -4719,6 +4766,335 @@ def draw_items_panel(win, items, selected, top_index, active):
 
     win.refresh()
 
+
+def _configure_mouse():
+    try:
+        mask = mouse_model.mouse_mask() if SETTINGS.get("mouse_enabled", True) else 0
+        available, _ = curses.mousemask(mask)
+        return bool(available)
+    except (curses.error, AttributeError):
+        return False
+
+
+def _mouse_footer_key(event):
+    if event and event.clicked:
+        return next((key for y, left, right, key in _MOUSE_FOOTER_TARGETS
+                     if event.y == y and left <= event.x < right), None)
+    return None
+
+
+def _menu_context():
+    return "items_multi" if _shop_location_switch_enabled() else "items"
+
+
+def _menu_positions(width):
+    entries = []
+    x = 1
+    for index, (name, _) in enumerate(menu_model.MENUS):
+        label = f" {t('menu_' + name)} "
+        if x + len(label) >= width:
+            break
+        entries.append((index, x, label))
+        x += len(label) + 1
+    return entries
+
+
+def draw_menu_bar(stdscr, active=None):
+    _, width = stdscr.getmaxyx()
+    _safe_addstr(stdscr, 0, 0, " " * width, ui_attr("topbar"))
+    entries = _menu_positions(width)
+    for index, x, label in entries:
+        _safe_addstr(stdscr, 0, x, label, curses.color_pair(2) if index == active else ui_attr("topbar"))
+    right_label = f" v{APP_VERSION} "
+    last_x = entries[-1][1] + len(entries[-1][2]) if entries else 0
+    if width - len(right_label) - 1 > last_x + 1:
+        _safe_addstr(stdscr, 0, width - len(right_label) - 1, right_label, ui_attr("topbar"))
+
+
+def _menu_mouse_index(stdscr, event=None):
+    event = event or mouse_model.read_event()
+    if not event or not event.clicked or event.y != 0:
+        return None
+    for index, left, label in _menu_positions(stdscr.getmaxyx()[1]):
+        if left <= event.x < left + len(label):
+            return index
+    return None
+
+
+def _menu_cursor_hidden(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            previous = curses.curs_set(0)
+        except curses.error:
+            previous = None
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if previous is not None:
+                try:
+                    curses.curs_set(previous)
+                except curses.error:
+                    pass
+    return wrapped
+
+
+@modal_dialog
+@_menu_cursor_hidden
+def menu_bar_dialog(stdscr, context, selected=None, initial_menu=0):
+    group = initial_menu
+    current = 0
+    top = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        if height < 6 or width < 24:
+            return None
+        positions = _menu_positions(width)
+        visible_groups = [index for index, _, _ in positions]
+        if group not in visible_groups:
+            group = visible_groups[-1]
+        _, actions = menu_model.MENUS[group]
+        enabled = [index for index, action in enumerate(actions) if action and menu_model.action_available(action, context, selected)]
+        if current not in enabled:
+            current = enabled[0] if enabled else 0
+        rows = min(len(actions), height - 4)
+        top = clamp_top_index(current, top, rows)
+        labels = [t('menu_action_' + action) if action else '' for action in actions]
+        popup_width = min(width - 2, max(30, max(map(len, labels), default=10) + 20))
+        menu_x = next(x for index, x, _ in positions if index == group)
+        popup_x = min(menu_x, width - popup_width - 1)
+        draw_menu_bar(stdscr, active=group)
+        stdscr.noutrefresh()
+        win = _new_dialog_window(rows + 2, popup_width, 1, popup_x)
+        win.keypad(True)
+        win.bkgd(' ', curses.color_pair(1))
+        win.erase()
+        draw_window_border(win)
+        for row, index in enumerate(range(top, min(len(actions), top + rows)), start=1):
+            action = actions[index]
+            if action is None:
+                _safe_addstr(win, row, 1, '─' * (popup_width - 2), ui_attr('border'))
+                continue
+            shortcut = menu_model.action_key(action, context, SETTINGS.get('keyboard_bindings'))
+            label = labels[index]
+            line = _fit(label, max(1, popup_width - len(shortcut) - 5)).ljust(popup_width - len(shortcut) - 3) + shortcut
+            attr = curses.color_pair(2) if index == current and index in enabled else curses.color_pair(1)
+            if index not in enabled:
+                attr |= curses.A_DIM
+            _safe_addstr(win, row, 1, line.ljust(popup_width - 2), attr)
+        curses.panel.update_panels()
+        win.refresh()
+        key = win.get_wch()
+        if key in (27, "\x1b", curses.KEY_F9, menu_model.MENU_KEY):
+            return None
+        if key in (curses.KEY_LEFT, curses.KEY_RIGHT, '\t'):
+            position = visible_groups.index(group)
+            group = visible_groups[(position + (-1 if key == curses.KEY_LEFT else 1)) % len(visible_groups)]
+            current, top = 0, 0
+        elif key in (curses.KEY_DOWN, curses.KEY_UP) and enabled:
+            current = enabled[(enabled.index(current) + (1 if key == curses.KEY_DOWN else -1)) % len(enabled)]
+        elif key in (10, 13, '\n', '\r', curses.KEY_ENTER) and current in enabled:
+            return actions[current]
+        elif key == curses.KEY_MOUSE:
+            event = mouse_model.read_event()
+            if not event:
+                continue
+            if event.kind == "wheel" and enabled:
+                position = enabled.index(current)
+                current = enabled[max(0, min(len(enabled)-1, position+event.step))]
+                continue
+            if not event.clicked:
+                continue
+            if event.y == 0:
+                for index, left, label in positions:
+                    if left <= event.x < left + len(label):
+                        group, current, top = index, 0, 0
+                        break
+            elif popup_x < event.x < popup_x + popup_width - 1 and 1 < event.y <= rows + 1:
+                index = top + event.y - 2
+                if index in enabled:
+                    return actions[index]
+            else:
+                return None
+
+
+@modal_dialog
+@_menu_cursor_hidden
+def keybindings_dialog(stdscr, saved):
+    from copy import deepcopy
+    draft = deepcopy(saved) if isinstance(saved, dict) else {}
+    view, selected, top = 0, 0, 0
+    while True:
+        context = menu_model.CONTEXTS[view]
+        bindings = menu_model.effective_bindings(context, draft)
+        actions = list(bindings)
+        height, width = stdscr.getmaxyx()
+        if height < 8 or width < 30:
+            return None
+        popup_width = min(84, width - 4)
+        popup_height = min(len(actions) + 6, height - 2)
+        rows = popup_height - 5
+        selected = min(selected, len(actions) - 1)
+        top = clamp_top_index(selected, top, rows)
+        popup_y, popup_x = max(1, (height-popup_height)//2), (width-popup_width)//2
+        win = _new_dialog_window(popup_height, popup_width, popup_y, popup_x)
+        win.keypad(True)
+        win.bkgd(' ', curses.color_pair(1))
+        win.erase()
+        draw_window_border(win)
+        _safe_addstr(win, 0, 2, t('menu_action_keybindings'), ui_attr('heading', bold=True))
+        view_ranges = []
+        column = 2
+        for index, name in enumerate(menu_model.CONTEXTS):
+            label = f" {t('keys_short_' + name)} "
+            view_ranges.append((column, column+len(label), index))
+            _safe_addstr(win, 1, column, label, curses.color_pair(2) if index == view else ui_attr('heading'))
+            column += len(label)+1
+        for row, index in enumerate(range(top, min(len(actions), top + rows)), start=2):
+            action = actions[index]
+            label = t('menu_action_' + action)
+            key = bindings[action] or t('keys_unassigned')
+            line = _fit(label, popup_width-22).ljust(popup_width-21) + key
+            _safe_addstr(win, row, 1, line.ljust(popup_width-2), curses.color_pair(2) if index == selected else curses.color_pair(1))
+        draw_footer_line(win, popup_height-2, 1, popup_width-2, t('keys_footer'))
+        win.refresh()
+        key = win.get_wch()
+        if key == curses.KEY_MOUSE:
+            event = mouse_model.read_event()
+            if not mouse_model.inside(event, popup_y, popup_x, popup_height, popup_width):
+                continue
+            footer_key = _mouse_footer_key(event)
+            if footer_key is not None:
+                key = footer_key
+            elif event.kind == "wheel":
+                selected = move_selection(actions, selected, event.step)
+                continue
+            elif event.clicked and event.y == popup_y+1:
+                for left, right, index in view_ranges:
+                    if popup_x+left <= event.x < popup_x+right:
+                        view, selected, top = index, 0, 0
+                        break
+                continue
+            else:
+                index = mouse_model.list_index(event, y=popup_y, x=popup_x, width=popup_width,
+                    first_row=2, rows=rows, top=top, count=len(actions))
+                if index is None:
+                    continue
+                selected = index
+                key = curses.KEY_F6
+        if key in (27, "\x1b", curses.KEY_F9):
+            return None
+        if key == curses.KEY_F2:
+            return draft
+        if key in ('\t', curses.KEY_BTAB):
+            view = (view + (-1 if key == curses.KEY_BTAB else 1)) % len(menu_model.CONTEXTS)
+            selected, top = 0, 0
+        elif key == curses.KEY_F5:
+            draft.pop(context, None)
+        elif key in (curses.KEY_DOWN, curses.KEY_UP):
+            selected = (selected + (1 if key == curses.KEY_DOWN else -1)) % len(actions)
+        elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            selected = max(0, min(len(actions)-1, selected + (rows if key == curses.KEY_NPAGE else -rows)))
+        elif key in (10, 13, '\n', '\r', curses.KEY_ENTER, curses.KEY_F6):
+            action = actions[selected]
+            options = [{'value':'', 'label':t('keys_unassigned')}]
+            for name in menu_model.KEY_NAMES:
+                owner = next((a for a, value in bindings.items() if value == name and a != action), None)
+                label = name + (f"  ({t('menu_action_' + owner)})" if owner else '')
+                options.append({'value':name, 'label':label})
+            chosen = choice_dialog(stdscr, t('menu_action_' + action), options, bindings[action], cancel_returns_none=True)
+            if chosen is not None:
+                try:
+                    draft = menu_model.assign_binding(draft, context, action, chosen)
+                except ValueError as exc:
+                    message_box(stdscr, t('menu_action_keybindings'), t('keys_conflict', action=t('menu_action_' + str(exc))))
+
+
+@modal_dialog
+@_menu_cursor_hidden
+def menu_info_dialog(stdscr, title, lines):
+    top = 0
+    while True:
+        height, width = stdscr.getmaxyx()
+        popup_height = min(max(7, len(lines) + 4), height-2)
+        popup_width = min(86, width-4)
+        if popup_height < 5 or popup_width < 20:
+            return
+        rows = popup_height - 4
+        wrapped = [part for line in lines for part in (textwrap.wrap(str(line), width=popup_width-4, replace_whitespace=False) or [''])]
+        popup_y, popup_x = max(1, (height-popup_height)//2), (width-popup_width)//2
+        win = _new_dialog_window(popup_height, popup_width, popup_y, popup_x)
+        win.keypad(True)
+        win.bkgd(' ', curses.color_pair(1))
+        win.erase()
+        draw_window_border(win)
+        _safe_addstr(win, 0, 2, title, ui_attr('heading', bold=True))
+        for row, line in enumerate(wrapped[top:top+rows], start=2):
+            _safe_addstr(win, row, 2, str(line)[:popup_width-4])
+        draw_footer_line(win, popup_height-2, 1, popup_width-2, t('menu_info_footer'))
+        win.refresh()
+        key = win.get_wch()
+        if key == curses.KEY_MOUSE:
+            event = mouse_model.read_event()
+            if not mouse_model.inside(event, popup_y, popup_x, popup_height, popup_width):
+                continue
+            footer_key = _mouse_footer_key(event)
+            if footer_key is not None:
+                key = footer_key
+            elif event.kind == "wheel":
+                top = max(0, min(max(0, len(wrapped)-rows), top+event.step))
+                continue
+            else:
+                continue
+        if key in (27, "\x1b", curses.KEY_F9, 10, 13, '\n', '\r', curses.KEY_ENTER):
+            return
+        if key in (curses.KEY_DOWN, curses.KEY_UP):
+            top = max(0, min(max(0, len(wrapped)-rows), top + (1 if key == curses.KEY_DOWN else -1)))
+        elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+            top = max(0, min(max(0, len(wrapped)-rows), top + (rows if key == curses.KEY_NPAGE else -rows)))
+
+
+def _common_menu_action(stdscr, action, context):
+    global SETTINGS
+    if action == 'inventory':
+        inventory_dialog(stdscr)
+    elif action in {'settings', 'print_settings'}:
+        settings_dialog(stdscr, initial_tab=2 if action == 'print_settings' else 0)
+    elif action == 'keybindings':
+        draft = keybindings_dialog(stdscr, SETTINGS.get('keyboard_bindings'))
+        if draft is not None:
+            updated = dict(SETTINGS, keyboard_bindings=draft)
+            try:
+                SETTINGS = run_background_action_dialog(stdscr, t('settings_save_title'), lambda: _save_settings_checked(updated))
+            except Exception as exc:
+                LOGGER.exception("Tastaturbelegung konnte nicht gespeichert werden")
+                message_box(stdscr, t('menu_action_keybindings'), str(exc)[:56])
+    elif action == 'help':
+        lines = [t('menu_help_navigation'), 'F10  ' + t('menu_open')]
+        for command, key in menu_model.effective_bindings(context, SETTINGS.get('keyboard_bindings')).items():
+            if key:
+                lines.append(f"{key:<12} {t('menu_action_' + command)}")
+        menu_info_dialog(stdscr, t('menu_action_help'), lines)
+    elif action == 'usage':
+        language = (SETTINGS.get("language") or "de").lower()
+        filename = 'bedienungsanleitung.en.md' if language == 'en' else 'bedienungsanleitung.md'
+        path = BASE_DIR / 'docs' / filename
+        if path.is_file():
+            lines = [re.sub(r'^#+\s*', '', line).replace('`', '') for line in path.read_text(encoding='utf-8').splitlines()]
+        else:
+            lines = [t('menu_help_navigation'), t('menu_manual_missing')]
+        menu_info_dialog(stdscr, t('menu_action_usage'), lines)
+    elif action == 'about':
+        menu_info_dialog(stdscr, t('menu_action_about'), [t('app_title'), f'Version {APP_VERSION}', f"{t('menu_shop_system')}: {shop_system(SETTINGS)}"])
+    elif action == 'sync_status':
+        state = get_service_runtime_state(force=True) or {}
+        fields = ('status', 'version', 'last_seen_at', 'last_pull_at', 'last_push_at', 'last_error')
+        lines = [f"{t('menu_sync_'+field)}: {state.get(field) or '-'}" for field in fields]
+        menu_info_dialog(stdscr, t('menu_action_sync_status'), lines)
+    else:
+        return False
+    return True
+
 def draw(
     stdscr,
     items,
@@ -4741,23 +5117,10 @@ def draw(
     stdscr.erase()
     stdscr.attrset(ui_attr("border"))
     stdscr.box()
-    _safe_addstr(stdscr, 0, 0, " " * w, ui_attr("topbar"))
-    _safe_addstr(stdscr, 0, 2, f" {t('app_title')} ", ui_attr("topbar"))
-    version_label = f" v{APP_VERSION} "
-    version_x = max(2, w - len(version_label) - 2)
-    _safe_addstr(stdscr, 0, version_x, version_label[: max(0, w - version_x - 1)], ui_attr("topbar"))
-    inner_width = w - 4
-    left_width = max(40, int(inner_width * 0.62))
-    left_width = min(left_width, inner_width - 24)
-    right_width = inner_width - left_width - 1
-
-    if right_width < 20:
-        left_width = max(30, inner_width - 21)
-        right_width = inner_width - left_width - 1
-
-    panel_height = max(6, h - 4)
-    left_win = stdscr.derwin(panel_height, left_width, 1, 2)
-    right_win = stdscr.derwin(panel_height, right_width, 1, 3 + left_width)
+    draw_menu_bar(stdscr)
+    left_rect, right_rect = mouse_model.item_panels(h, w)
+    left_win = stdscr.derwin(*left_rect[2:], *left_rect[:2])
+    right_win = stdscr.derwin(*right_rect[2:], *right_rect[:2])
 
     draw_items_panel(left_win, items, left_selected, left_top_index, active_pane == "left")
 
@@ -4781,7 +5144,7 @@ def draw(
         status_key = "status_secondary_multi" if show_secondary_help else "status_primary_multi"
     else:
         status_key = "status_secondary_single" if show_secondary_help else "status_primary_single"
-    status = t(status_key)
+    status = menu_model.remap_footer(t(status_key), _menu_context(), SETTINGS.get("keyboard_bindings"))
     focus = t("focus_items") if active_pane == "left" else t("focus_locations")
     if current_shop_location and current_shop_location.get("name"):
         focus += t("focus_shop_location", value=current_shop_location["name"])
@@ -5448,7 +5811,7 @@ def form_dialog(
             finally:
                 win.timeout(-1)
 
-            if key in (27, curses.KEY_F9):
+            if key in (27, "\x1b", curses.KEY_F9):
                 return None
 
             for action in extra_actions:
@@ -5600,7 +5963,7 @@ def search_dialog(stdscr, initial):
             if key in (10, 13, '\n', '\r', curses.KEY_ENTER):
                 return value.strip()
 
-            if key in (27, curses.KEY_F9):
+            if key in (27, "\x1b", curses.KEY_F9):
                 return initial
 
             if key in (curses.KEY_BACKSPACE, 127, 8, '\x7f', '\b'):
@@ -5817,15 +6180,30 @@ def cups_printer_dialog(stdscr, current_printer):
                     win.addstr(y_pos, 1, line[:width - 2].ljust(width - 2))
 
             detail = options[selected]["detail"] if options else ""
-            footer = t("printer_reload_footer")
-            if detail:
-                footer = _fit(detail, width - 4)
-            win.addstr(height - 2, 2, footer[:width - 4])
+            footer = t("printer_reload_footer") + (f" | {detail}" if detail else "")
+            draw_footer_line(win, height - 2, 2, width - 4, footer)
             win.refresh()
 
             key = win.get_wch()
+            if key == curses.KEY_MOUSE:
+                event = mouse_model.read_event()
+                if not mouse_model.inside(event, y, x, height, width):
+                    continue
+                footer_key = _mouse_footer_key(event)
+                if footer_key is not None:
+                    key = footer_key
+                elif event.kind == "wheel":
+                    selected = move_selection(options, selected, event.step)
+                    continue
+                else:
+                    index = mouse_model.list_index(event, y=y, x=x, width=width,
+                        first_row=2, rows=visible_rows, top=top_index, count=len(options))
+                    if index is None:
+                        continue
+                    selected = index
+                    key = "\n"
 
-            if key in (27, curses.KEY_F9):
+            if key in (27, "\x1b", curses.KEY_F9):
                 return current_printer
             if key == curses.KEY_F5:
                 break
@@ -5907,11 +6285,28 @@ def choice_dialog(stdscr, title, options, current_value, cancel_returns_none=Fal
             else:
                 win.addstr(y_pos, 1, _fit(line, width - 2))
 
-        win.addstr(height - 2, 2, t("pick_cancel")[: width - 4])
+        draw_footer_line(win, height - 2, 2, width - 4, t("pick_cancel"))
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key == curses.KEY_MOUSE:
+            event = mouse_model.read_event()
+            if not mouse_model.inside(event, y, x, height, width):
+                continue
+            footer_key = _mouse_footer_key(event)
+            if footer_key is not None:
+                key = footer_key
+            elif event.kind == "wheel":
+                selected = move_selection(options, selected, event.step)
+                continue
+            else:
+                index = mouse_model.list_index(event, y=y, x=x, width=width,
+                    first_row=2, rows=visible_rows, top=top_index, count=len(options))
+                if index is None:
+                    continue
+                selected = index
+                key = "\n"
+        if key in (27, "\x1b", curses.KEY_F9):
             if cancel_returns_none:
                 return None
             return current_value
@@ -5970,7 +6365,7 @@ def toggle_choice_dialog(stdscr, title, options, selected_values, footer_text=No
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return None
         if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return [option["value"] for option in options if str(option["value"]) in selected_set]
@@ -6095,6 +6490,7 @@ def post_product_dialog(stdscr, current_selection=None, scope="domestic"):
 def _shipping_printer_tab_fields():
     fields = [
         ("picklist_printer", "field_picklist_printer"),
+        ("picklist_duplex", "field_picklist_duplex"),
         ("delivery_note_printer", "field_delivery_printer"),
         ("delivery_note_format", "field_delivery_format"),
         ("delivery_note_scale_mode", "field_delivery_scale_mode"),
@@ -6107,7 +6503,11 @@ def _shipping_printer_tab_fields():
         printer_label_key = definition.get("printer_field_label_key")
         if printer_field and printer_label_key:
             fields.append((printer_field, printer_label_key))
-    fields.append(("shipping_label_printer", "field_shipping_printer_fallback"))
+    fields.extend([
+        ("shipping_label_printer", "field_shipping_printer_fallback"),
+        ("shipping_label_format", "field_shipping_format"),
+        ("shipping_label_scale_mode", "field_shipping_scale_mode"),
+    ])
     return fields
 
 
@@ -6153,7 +6553,8 @@ def _shipping_settings_initial_values():
         ),
         "shipping_label_printer": SETTINGS.get("shipping_label_printer", ""),
         "shipping_label_output_dir": SETTINGS.get("shipping_label_output_dir", ""),
-        "shipping_label_format": (SETTINGS.get("shipping_label_format") or "A6").strip().upper(),
+        "shipping_label_format": _normalize_shipping_label_format(SETTINGS.get("shipping_label_format") or "A6"),
+        "shipping_label_scale_mode": _normalize_scale_mode(SETTINGS.get("shipping_label_scale_mode", "none")),
         "shipping_services": _normalize_shipping_services(SETTINGS.get("shipping_services", [])),
         "shipping_services_display": _shipping_services_summary(SETTINGS.get("shipping_services", [])),
         "manual_label_default_country": _manual_label_default_country(),
@@ -6197,12 +6598,13 @@ def _shipping_settings_initial_values():
 
 
 def _settings_print_test_context(active_name, values, shipping_printer_fields, shipping_format_fields, shipping_scale_fields):
-    if active_name == "picklist_printer":
+    if active_name in {"picklist_printer", "picklist_duplex"}:
         printer = (values.get("picklist_printer") or "").strip()
         return {
             "printer": printer,
             "page_size": "A4",
             "title": t("print_test_picklist_title"),
+            "print_options": {"duplex_mode": _normalize_duplex_mode(values.get("picklist_duplex", "off"))},
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_type", value=t("print_test_type_picklist")),
@@ -6219,6 +6621,7 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
             "printer": printer,
             "page_size": page_size,
             "title": t("print_test_delivery_note_title"),
+            "print_options": {"scale_mode": scale_mode, "duplex_mode": duplex_mode, "color_mode": color_mode},
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_format", value=page_size),
@@ -6228,7 +6631,7 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
                 t("print_test_line_type", value=t("print_test_type_delivery_note")),
             ],
         }
-    if active_name == "shipping_label_printer":
+    if active_name in {"shipping_label_printer", "shipping_label_format", "shipping_label_scale_mode"}:
         printer = (values.get("shipping_label_printer") or "").strip()
         page_size = _normalize_shipping_label_format(values.get("shipping_label_format", "A6"))
         scale_mode = _normalize_scale_mode(values.get("shipping_label_scale_mode", "none"))
@@ -6236,6 +6639,7 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
             "printer": printer,
             "page_size": page_size,
             "title": t("print_test_shipping_label_title"),
+            "print_options": {"scale_mode": scale_mode},
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_format", value=page_size),
@@ -6243,7 +6647,7 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
                 t("print_test_line_type", value=t("print_test_type_shipping_label_fallback")),
             ],
         }
-    if active_name in {"shipping_label_format", *shipping_printer_fields.keys(), *shipping_format_fields.keys(), *shipping_scale_fields.keys()}:
+    if active_name in {*shipping_printer_fields.keys(), *shipping_format_fields.keys(), *shipping_scale_fields.keys()}:
         carrier_code = (
             shipping_printer_fields.get(active_name)
             or shipping_format_fields.get(active_name)
@@ -6263,6 +6667,7 @@ def _settings_print_test_context(active_name, values, shipping_printer_fields, s
             "printer": printer,
             "page_size": page_size,
             "title": t("print_test_carrier_title", carrier=_shipping_carrier_label(carrier_code)),
+            "print_options": {"scale_mode": scale_mode},
             "lines": [
                 t("print_test_line_printer", value=printer or "-"),
                 t("print_test_line_format", value=page_size),
@@ -6283,7 +6688,14 @@ def _settings_context_select(
     shipping_template_fields,
     shipping_tracking_mode_fields,
 ):
-    if active_name == "language":
+    if active_name == "mouse_enabled":
+        values[active_name] = choice_dialog(stdscr, t("field_mouse_enabled"),
+            [{"value":True, "label":t("mouse_on")}, {"value":False, "label":t("mouse_off")}], values.get(active_name, True))
+    elif active_name == "keyboard_bindings_display":
+        chosen = keybindings_dialog(stdscr, values.get("keyboard_bindings"))
+        if chosen is not None:
+            values["keyboard_bindings"] = chosen
+    elif active_name == "language":
         values["language"] = choice_dialog(stdscr, t("pick_language"), get_language_options(), values["language"])
     elif active_name == "shop_location_mode":
         values["shop_location_mode"] = choice_dialog(
@@ -6341,10 +6753,10 @@ def _settings_context_select(
             values[active_name],
             f"{_shipping_carrier_label(carrier_code)} {t('formats_title')}",
         )
-    elif active_name == "delivery_note_format":
+    elif active_name in {"delivery_note_format", "shipping_label_format"}:
         values[active_name] = cups_media_dialog(
             stdscr,
-            values.get("delivery_note_printer", ""),
+            values.get("delivery_note_printer" if active_name == "delivery_note_format" else "shipping_label_printer", ""),
             values[active_name],
             f"{t('delivery_note_title')} {t('formats_title')}",
         )
@@ -6378,7 +6790,7 @@ def _settings_context_select(
             ],
             _normalize_scale_mode(values.get(active_name, "none")),
         )
-    elif active_name == "delivery_note_duplex":
+    elif active_name in {"delivery_note_duplex", "picklist_duplex"}:
         values[active_name] = choice_dialog(
             stdscr,
             t("pick_delivery_note_duplex"),
@@ -6388,6 +6800,12 @@ def _settings_context_select(
                 {"value": "short", "label": t("delivery_note_duplex_short")},
             ],
             _normalize_duplex_mode(values.get(active_name, "off")),
+        )
+    elif active_name == "delivery_note_sort":
+        values[active_name] = choice_dialog(
+            stdscr, t("field_delivery_sort"),
+            [{"value": mode, "label": t(f"delivery_sort_{mode}")} for mode in DELIVERY_NOTE_SORT_MODES],
+            normalize_delivery_note_sort(values.get(active_name)),
         )
     elif active_name == "delivery_note_color_mode":
         values[active_name] = choice_dialog(
@@ -6473,6 +6891,9 @@ def _settings_dialog_initial_values(settings):
         "shop_active_location_display": (settings.get("shop_active_location_id") or "").strip() or "-",
         "color_theme": (settings.get("color_theme") or DEFAULT_SETTINGS["color_theme"]).strip().lower(),
         "color_theme_file": settings.get("color_theme_file", ""),
+        "keyboard_bindings": settings.get("keyboard_bindings", {}),
+        "mouse_enabled": bool(settings.get("mouse_enabled", True)),
+        "keyboard_bindings_display": t("menu_action_keybindings"),
         "printer_uri": settings["printer_uri"],
         "printer_model": settings["printer_model"],
         "label_size": settings["label_size"],
@@ -6488,6 +6909,8 @@ def _settings_dialog_initial_values(settings):
         "location_regex_normalize_case_fach": str(settings.get("location_regex_normalize_case_fach", DEFAULT_SETTINGS["location_regex_normalize_case_fach"])),
         "location_regex_normalize_case_platz": str(settings.get("location_regex_normalize_case_platz", DEFAULT_SETTINGS["location_regex_normalize_case_platz"])),
         "picklist_printer": settings["picklist_printer"],
+        "picklist_duplex": _normalize_duplex_mode(settings.get("picklist_duplex", "off")),
+        "delivery_note_sort": normalize_delivery_note_sort(settings.get("delivery_note_sort")),
         "delivery_note_printer": settings["delivery_note_printer"],
         "delivery_note_format": _normalize_shipping_label_format(settings.get("delivery_note_format", DEFAULT_SETTINGS.get("delivery_note_format", "A4"))),
         "delivery_note_scale_mode": _normalize_scale_mode(settings.get("delivery_note_scale_mode", DEFAULT_SETTINGS.get("delivery_note_scale_mode", "none"))),
@@ -6521,6 +6944,8 @@ def _settings_dialog_tabs():
                 ("shop_active_location_display", "field_shop_active_location"),
                 ("color_theme", "field_theme"),
                 ("color_theme_file", "field_theme_file"),
+                ("keyboard_bindings_display", "menu_action_keybindings"),
+                ("mouse_enabled", "field_mouse_enabled"),
             ],
         },
         {
@@ -6541,6 +6966,7 @@ def _settings_dialog_tabs():
         {
             "title_key": "settings_tab_delivery_note",
             "fields": [
+                ("delivery_note_sort", "field_delivery_sort"),
                 ("pdf_output_dir", "field_pdf_dir"),
                 ("delivery_note_template_path", "field_template"),
                 ("delivery_note_logo_source", "field_logo"),
@@ -6580,6 +7006,8 @@ def _settings_dialog_updated_values(values):
         "shop_active_location_id": values["shop_active_location_id"].strip(),
         "color_theme": values["color_theme"].strip().lower(),
         "color_theme_file": os.path.expanduser(values["color_theme_file"].strip()),
+        "keyboard_bindings": values.get("keyboard_bindings", {}),
+        "mouse_enabled": bool(values.get("mouse_enabled", True)),
         "printer_uri": values["printer_uri"].strip(),
         "printer_model": values["printer_model"].strip(),
         "label_size": values["label_size"].strip(),
@@ -6595,6 +7023,8 @@ def _settings_dialog_updated_values(values):
         "location_regex_normalize_case_fach": str(values.get("location_regex_normalize_case_fach", "none")).strip().lower(),
         "location_regex_normalize_case_platz": str(values.get("location_regex_normalize_case_platz", "none")).strip().lower(),
         "picklist_printer": values["picklist_printer"].strip(),
+        "picklist_duplex": _normalize_duplex_mode(values.get("picklist_duplex", "off")),
+        "delivery_note_sort": normalize_delivery_note_sort(values.get("delivery_note_sort")),
         "delivery_note_printer": values["delivery_note_printer"].strip(),
         "delivery_note_format": _normalize_shipping_label_format(values["delivery_note_format"].strip()),
         "delivery_note_scale_mode": _normalize_scale_mode(values.get("delivery_note_scale_mode", "none")),
@@ -6653,12 +7083,13 @@ def _settings_validate_updated_values(stdscr, updated):
             ("db_port", "DB Port"),
             ("db_name", "DB Name"),
             ("db_user", "DB User"),
-            ("printer_uri", "Drucker URI"),
-            ("printer_model", "Drucker Modell"),
-            ("label_size", "Labelformat"),
         ]
         if not updated[key]
     ]
+    if updated.get("printer_uri"):
+        missing.extend(label for key, label in [
+            ("printer_model", "Drucker Modell"), ("label_size", "Labelformat")
+        ] if not updated.get(key))
     if missing:
         message_box(stdscr, t("error"), t("missing_fields", fields=", ".join(missing)))
         return False
@@ -6750,15 +7181,16 @@ def _settings_validate_updated_values(stdscr, updated):
     return True
 
 
-def settings_dialog(stdscr):
+def settings_dialog(stdscr, initial_tab=0):
     try:
-        return _settings_dialog(stdscr)
+        return _settings_dialog(stdscr, initial_tab=initial_tab) if initial_tab else _settings_dialog(stdscr)
     finally:
         apply_color_theme(stdscr)
+        _configure_mouse()
 
 
 @modal_dialog
-def _settings_dialog(stdscr):
+def _settings_dialog(stdscr, initial_tab=0):
     global SETTINGS
     try:
         curses.curs_set(1)
@@ -6774,8 +7206,9 @@ def _settings_dialog(stdscr):
     values = _settings_dialog_initial_values(SETTINGS)
     tabs = _settings_dialog_tabs()
     _settings_apply_initial_shop_location(values)
-    active_tab = 0
+    active_tab = max(0, min(int(initial_tab), len(tabs) - 1))
     active_field_by_tab = [0 for _ in tabs]
+    field_tops = [0 for _ in tabs]
     sync_state = get_service_runtime_state(max_age_seconds=999999)
     sync_status_refresh_pending = False
     last_sync_status_request_at = 0.0
@@ -6826,11 +7259,13 @@ def _settings_dialog(stdscr):
         sync_x = max(2, width - len(sync_label) - 2)
         win.addstr(0, sync_x, sync_label[: max(0, width - sync_x - 1)])
 
+        tab_ranges = []
         tab_x = 2
         for i, entry in enumerate(tabs):
             label = f" {t(entry['title_key'])} "
             if tab_x + len(label) >= width - 2:
                 break
+            tab_ranges.append((tab_x, tab_x+len(label), i))
             if i == active_tab:
                 win.attrset(curses.color_pair(2))
                 win.addstr(1, tab_x, label)
@@ -6843,8 +7278,12 @@ def _settings_dialog(stdscr):
         field_x = min(width - 20, label_width + 4)
         field_width = max(1, width - field_x - 3)
 
-        for idx, (name, label_key) in enumerate(tab_fields):
-            row = 3 + idx
+        visible_rows = max(1, height-6)
+        field_tops[active_tab] = clamp_top_index(active_index, field_tops[active_tab], visible_rows)
+        field_top = field_tops[active_tab]
+        visible_fields = tab_fields[field_top:field_top+visible_rows]
+        for idx, (name, label_key) in enumerate(visible_fields, start=field_top):
+            row = 3 + idx - field_top
             if str(name).startswith("_heading_"):
                 label = str(label_key)
                 win.attrset(ui_attr("heading", bold=True))
@@ -6854,6 +7293,12 @@ def _settings_dialog(stdscr):
                 label = t(label_key)
                 win.addstr(row, 2, f"{label}:")
                 visible = text_state.visible_text(name, field_width, values)
+                if name == "mouse_enabled":
+                    visible = t("mouse_on" if values.get(name) else "mouse_off")
+                elif name == "delivery_note_sort":
+                    visible = _fit(t(f"delivery_sort_{normalize_delivery_note_sort(values.get(name))}"), field_width)
+                elif name in {"delivery_note_duplex", "picklist_duplex"}:
+                    visible = _fit(t(f"delivery_note_duplex_{_normalize_duplex_mode(values.get(name))}"), field_width)
                 if idx == active_index:
                     win.attrset(curses.color_pair(2))
                     win.addstr(row, field_x, visible.ljust(field_width))
@@ -6861,7 +7306,7 @@ def _settings_dialog(stdscr):
                 else:
                     win.addstr(row, field_x, visible.ljust(field_width))
 
-        for filler in range(3 + len(tab_fields), height - 2):
+        for filler in range(3 + len(visible_fields), height - 2):
             win.addstr(filler, 1, " " * (width - 2))
 
         footer = t("settings_footer_unified")
@@ -6871,7 +7316,7 @@ def _settings_dialog(stdscr):
 
         if active_name:
             cursor_x = text_state.cursor_x(active_name, field_x, field_width, values)
-            win.move(3 + active_index, cursor_x)
+            win.move(3 + active_index - field_top, cursor_x)
         win.refresh()
 
         win.timeout(200)
@@ -6881,10 +7326,52 @@ def _settings_dialog(stdscr):
             continue
         finally:
             win.timeout(-1)
-        if key in (27, curses.KEY_F9):
+        if key == curses.KEY_MOUSE:
+            event = mouse_model.read_event()
+            if not mouse_model.inside(event, y, x, height, width):
+                continue
+            footer_key = _mouse_footer_key(event)
+            if footer_key is not None:
+                key = footer_key
+            elif event.kind == "wheel":
+                if editable_indices:
+                    active_field_by_tab[active_tab] = max(0, min(len(editable_indices)-1, active_field_by_tab[active_tab]+event.step))
+                continue
+            elif event.clicked and event.y == y+1:
+                for left, right, tab_index in tab_ranges:
+                    if x+left <= event.x < x+right:
+                        active_tab = tab_index
+                        break
+                continue
+            else:
+                index = mouse_model.list_index(event, y=y, x=x, width=width,
+                    first_row=3, rows=visible_rows, top=field_top, count=len(tab_fields))
+                if index not in editable_indices:
+                    continue
+                active_field_by_tab[active_tab] = editable_indices.index(index)
+                active_index, active_name = index, tab_fields[index][0]
+                text_state.set_to_end(active_name, values)
+                selectors = {"language", "color_theme", "shop_location_mode", "shop_active_location_display",
+                    "shipping_services_display", "manual_label_default_country_display", "shipping_active_carriers_display",
+                    "delivery_note_format", "delivery_note_sort", "delivery_note_duplex", "picklist_duplex", "delivery_note_color_mode",
+                    "delivery_note_scale_mode", "shipping_label_scale_mode", "shipping_label_format", "mouse_enabled",
+                    "keyboard_bindings_display", "picklist_printer", "delivery_note_printer", "shipping_label_printer",
+                    *shipping_printer_fields.keys(), *shipping_format_fields.keys(), *shipping_scale_fields.keys(),
+                    *shipping_tracking_mode_fields.keys()}
+                if active_name in selectors or event.kind == "double":
+                    key = curses.KEY_F6
+                else:
+                    if event.x >= x+field_x:
+                        offset = text_state.scroll_offsets.get(active_name, 0)
+                        text_state.cursor_positions[active_name] = min(len(str(values.get(active_name, ""))), offset + event.x-x-field_x)
+                    continue
+        if key in (27, "\x1b", curses.KEY_F9):
             return
         if key == curses.KEY_F2:
-            break
+            updated = _settings_dialog_updated_values(values)
+            if _settings_validate_updated_values(stdscr, updated):
+                break
+            continue
         if key == "\t":
             active_tab = (active_tab + 1) % len(tabs)
             continue
@@ -6912,6 +7399,10 @@ def _settings_dialog(stdscr):
             "shipping_label_scale_mode",
             "delivery_note_scale_mode",
             "delivery_note_duplex",
+            "picklist_duplex",
+            "delivery_note_sort",
+            "keyboard_bindings_display",
+            "mouse_enabled",
             "delivery_note_color_mode",
             *shipping_scale_fields.keys(),
         }:
@@ -6976,6 +7467,7 @@ def _settings_dialog(stdscr):
                 context["title"],
                 page_size=context["page_size"],
                 lines=context["lines"],
+                print_options=context.get("print_options"),
             )
             continue
 
@@ -6999,6 +7491,10 @@ def _settings_dialog(stdscr):
                 "shipping_label_scale_mode",
                 "delivery_note_scale_mode",
                 "delivery_note_duplex",
+                "picklist_duplex",
+                "delivery_note_sort",
+                "keyboard_bindings_display",
+                "mouse_enabled",
                 "delivery_note_color_mode",
                 "shipping_services_display",
                 "manual_label_default_country_display",
@@ -7035,15 +7531,15 @@ def _settings_dialog(stdscr):
                 "shipping_label_scale_mode",
                 "delivery_note_scale_mode",
                 "delivery_note_duplex",
+                "picklist_duplex",
+                "delivery_note_sort",
+                "keyboard_bindings_display",
+                "mouse_enabled",
                 "delivery_note_color_mode",
                 *shipping_scale_fields.keys(),
             }:
                 continue
             text_state.insert_text(active_name, values, key)
-
-    updated = _settings_dialog_updated_values(values)
-    if not _settings_validate_updated_values(stdscr, updated):
-        return
 
     try:
         SETTINGS = run_background_action_dialog(
@@ -7219,7 +7715,7 @@ def change_qty(stdscr, item):
 
             key = win.get_wch()
 
-            if key in (27, curses.KEY_F9):
+            if key in (27, "\x1b", curses.KEY_F9):
                 return
 
             if key in (curses.KEY_F2, 10, 13, "\n", "\r", curses.KEY_ENTER):
@@ -7774,7 +8270,7 @@ def directory_dialog(stdscr, current_path="", title=None):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return current_path
         if key == curses.KEY_UP:
             selected = (selected - 1) % max(1, len(entries))
@@ -7891,7 +8387,7 @@ def file_dialog(stdscr, current_path="", title=None, extensions=None):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return current_path
         if key == curses.KEY_UP:
             selected = (selected - 1) % max(1, len(entries))
@@ -7983,8 +8479,8 @@ def create_delivery_note_pdf(order, order_items, output_dir=None):
     if not os.path.isdir(output_dir):
         raise FileNotFoundError(f"PDF Ordner fehlt: {output_dir}")
     output_path = os.path.join(output_dir, build_delivery_note_filename(order))
-    rows = build_delivery_note_rows(order_items)
-    build_delivery_note_pdf(template_path, output_path, order, rows, sender=get_delivery_note_sender(), logo_source=logo_source)
+    rows = build_delivery_note_rows(order_items, SETTINGS.get("delivery_note_sort", "order"))
+    build_delivery_note_pdf(template_path, output_path, order, rows, sender=get_delivery_note_sender(), logo_source=logo_source, page_size=_delivery_note_format())
     return output_path, rows
 
 
@@ -8029,7 +8525,8 @@ def print_picklist(stdscr, order, order_items):
 
     try:
         _run_lp_command(
-            ["lp", "-d", printer, "-t", f"Pickliste {order['order_name']}", temp_path],
+            ["lp", "-d", printer, "-t", f"Pickliste {order['order_name']}",
+             *_cups_print_options("A4", duplex_mode=SETTINGS.get("picklist_duplex", "off")), temp_path],
             print_kind="picklist",
             printer=printer,
             title=f"Pickliste {order['order_name']}",
@@ -8260,7 +8757,8 @@ def print_inventory_list(stdscr, session, lines):
 
     try:
         _run_lp_command(
-            ["lp", "-d", printer, "-t", session["session_name"], temp_path],
+            ["lp", "-d", printer, "-t", session["session_name"],
+             *_cups_print_options("A4", duplex_mode=SETTINGS.get("picklist_duplex", "off")), temp_path],
             print_kind="inventory_list",
             printer=printer,
             title=session["session_name"],
@@ -8471,7 +8969,7 @@ def bulk_carrier_per_order_dialog(stdscr, selected_orders, current_map):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return current_map
         if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
             return assignments
@@ -8572,7 +9070,7 @@ def select_partial_items_dialog(stdscr, order, order_items):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             stdscr.erase()
             stdscr.refresh()
             return None
@@ -8820,9 +9318,11 @@ def run_bulk_execution(stdscr, orders, order_items_cache, selected_order_ids):
                     for label_id in printed_label_ids:
                         update_shipping_label_status(label_id, "PRINTED")
             if note_paths_to_print:
-                if len(note_paths_to_print) == 1:
-                    note_title = note_titles_to_print[0] if note_titles_to_print else None
-                    _print_merged_delivery_note_pdf(note_paths_to_print[0], title=note_title)
+                if len(note_paths_to_print) == 1 or _normalize_duplex_mode(SETTINGS.get("delivery_note_duplex")) != "off":
+                    # Each order starts on its own sheet, even with an odd page count.
+                    for index, note_path in enumerate(note_paths_to_print):
+                        note_title = note_titles_to_print[index] if index < len(note_titles_to_print) else None
+                        _print_merged_delivery_note_pdf(note_path, title=note_title)
                 else:
                     merged_note_pdf = os.path.join(temp_dir, f"delivery_notes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
                     _merge_pdf_files(note_paths_to_print, merged_note_pdf)
@@ -9135,7 +9635,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
         win.refresh()
 
         key = win.get_wch()
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return
         if key == curses.KEY_DOWN:
             selected = move_selection(rows, selected, 1)
@@ -9217,6 +9717,7 @@ def shipping_history_dialog(stdscr, selected_order=None):
 
 @modal_dialog
 def orders_dialog(stdscr):
+    global _MENU_EXIT_REQUESTED
     try:
         curses.curs_set(0)
     except curses.error:
@@ -9229,6 +9730,8 @@ def orders_dialog(stdscr):
     order_shipments_cache = {}
     prefetch_order_ids = []
 
+    detail_top = 0
+    detail_order_id = None
     while True:
         for result in _ORDER_ITEMS_LOADER.poll_all():
             if result.get("error") is None and result.get("value") is not None:
@@ -9280,6 +9783,9 @@ def orders_dialog(stdscr):
 
         selected_order = state.selected_order(orders)
         selected_order_id = state.selected_order_id(orders)
+        if selected_order_id != detail_order_id:
+            detail_top = 0
+            detail_order_id = selected_order_id
 
         try:
             prefetch_order_ids = _prefetch_order_ids(orders, state.selected, ahead=5, behind=1)
@@ -9298,6 +9804,8 @@ def orders_dialog(stdscr):
         order_shipments = order_shipments_cache.get(selected_order_id, [])
 
         h, w = stdscr.getmaxyx()
+        draw_menu_bar(stdscr)
+        stdscr.noutrefresh()
         width = min(max(88, int(w * 0.84)), w - 6)
         height = min(max(18, int(h * 0.82)), h - 4)
         y = max(1, (h - height) // 2)
@@ -9324,10 +9832,10 @@ def orders_dialog(stdscr):
 
         if state.selected < state.top_index:
             state.top_index = state.selected
-        if state.selected >= state.top_index + max(1, list_height - 2):
-            state.top_index = state.selected - max(1, list_height - 2) + 1
+        if state.selected >= state.top_index + max(1, list_height - 4):
+            state.top_index = state.selected - max(1, list_height - 4) + 1
 
-        draw_panel(orders_win, t("orders_panel_title"), order_lines, state.selected if orders else 0, state.top_index, True)
+        draw_panel(orders_win, t("orders_panel_title"), order_lines, state.selected if orders else 0, state.top_index, True, refresh=False)
 
         detail_lines = build_order_detail_lines(
             selected_order,
@@ -9351,7 +9859,7 @@ def orders_dialog(stdscr):
             lambda value: value.strftime("%d.%m.%Y %H:%M") if isinstance(value, datetime.datetime) else "-",
         )
 
-        draw_panel(details_win, t("orders_positions_panel"), detail_lines, 0, 0, False)
+        draw_panel(details_win, t("orders_positions_panel"), detail_lines, 0, detail_top, False, refresh=False)
 
         footer = build_orders_footer(
             t("orders_footer"),
@@ -9363,9 +9871,15 @@ def orders_dialog(stdscr):
             _fulfillment_filter_label,
             _payment_filter_label,
         )
+        footer = menu_model.remap_footer(footer, "orders", SETTINGS.get("keyboard_bindings"))
         win.attrset(curses.color_pair(3))
         draw_footer_line(win, height - 1, 1, width - 2, footer)
-        win.refresh()
+        # Derived windows share the parent buffer; compose the complete dialog
+        # before updating the terminal so the background cannot show through.
+        win.touchwin()
+        win.noutrefresh()
+        curses.panel.update_panels()
+        curses.doupdate()
 
         try:
             key = win.get_wch()
@@ -9374,7 +9888,53 @@ def orders_dialog(stdscr):
                 state.reload_orders_snapshot = True
             continue
 
-        if key in (27, curses.KEY_F9):
+        mouse = mouse_model.read_event() if key == curses.KEY_MOUSE else None
+        if mouse:
+            if mouse.kind == "wheel" and mouse_model.inside(mouse, y+1, x+1, list_height, left_width):
+                state.selected = move_selection(orders, state.selected, mouse.step)
+                continue
+            if mouse.kind == "wheel" and mouse_model.inside(mouse, y+1, x+2+left_width, list_height, right_width):
+                detail_top = max(0, min(max(0, len(detail_lines)-max(1, list_height-4)), detail_top + mouse.step))
+                continue
+            index = mouse_model.list_index(mouse, y=y+1, x=x+1, width=left_width,
+                first_row=2, rows=max(1, list_height-4), top=state.top_index, count=len(orders))
+            if index is not None:
+                state.selected = index
+                if mouse.kind == "double" or mouse.x < x+5:
+                    state.toggle_selected_order(orders[index])
+                continue
+            footer_key = _mouse_footer_key(mouse)
+            if footer_key is not None:
+                key = footer_key
+        command = menu_model.resolve_action(key, "orders", SETTINGS.get("keyboard_bindings"))
+        mouse_menu = _menu_mouse_index(stdscr, mouse) if key == curses.KEY_MOUSE and mouse else None
+        if key == menu_model.MENU_KEY or mouse_menu is not None:
+            command = menu_bar_dialog(stdscr, "orders", selected_order, initial_menu=mouse_menu or 0)
+            if command is None:
+                continue
+        if command == "quit":
+            _MENU_EXIT_REQUESTED = True
+            return
+        if command == "show_orders":
+            continue
+        try:
+            if _common_menu_action(stdscr, command, "orders"):
+                state.reload_orders_snapshot = True
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+                continue
+            if command == "pdf_export" and selected_order:
+                export_delivery_note_pdf(stdscr, selected_order, ensure_order_items_loaded(selected_order_id, order_items_cache))
+                continue
+        except DatabaseUnavailableError as exc:
+            if not database_connection_dialog(stdscr, str(exc)):
+                return
+            state.reload_orders_snapshot = True
+            continue
+
+        if key in (27, "\x1b") or command == "show_items":
             try:
                 curses.curs_set(1)
             except curses.error:
@@ -9385,21 +9945,21 @@ def orders_dialog(stdscr):
         elif key == curses.KEY_UP:
             state.selected = move_selection(orders, state.selected, -1)
         elif key == curses.KEY_NPAGE:
-            state.selected = move_selection(orders, state.selected, max(1, list_height - 2))
+            state.selected = move_selection(orders, state.selected, max(1, list_height - 4))
         elif key == curses.KEY_PPAGE:
-            state.selected = move_selection(orders, state.selected, -max(1, list_height - 2))
-        elif key == curses.KEY_F1:
+            state.selected = move_selection(orders, state.selected, -max(1, list_height - 4))
+        elif command == 'pending_filter':
             state.only_pending = not state.only_pending
             state.reset_view()
-        elif key == curses.KEY_F2:
+        elif command == 'status_filter':
             current_index = FULFILLMENT_FILTER_SEQUENCE.index(state.fulfillment_filter) if state.fulfillment_filter in FULFILLMENT_FILTER_SEQUENCE else 0
             state.fulfillment_filter = FULFILLMENT_FILTER_SEQUENCE[(current_index + 1) % len(FULFILLMENT_FILTER_SEQUENCE)]
             state.reset_view()
-        elif key == curses.KEY_F3:
+        elif command == 'payment_filter':
             current_index = PAYMENT_FILTER_SEQUENCE.index(state.payment_filter) if state.payment_filter in PAYMENT_FILTER_SEQUENCE else 0
             state.payment_filter = PAYMENT_FILTER_SEQUENCE[(current_index + 1) % len(PAYMENT_FILTER_SEQUENCE)]
             state.reset_view()
-        elif key == curses.KEY_F4:
+        elif command == 'jump_order':
             value = order_jump_dialog(stdscr, state.order_filter or "")
             try:
                 curses.curs_set(0)
@@ -9421,7 +9981,7 @@ def orders_dialog(stdscr):
                     state.rebuild_orders_view = False
                     if target_index is not None:
                         state.selected = target_index
-        elif key == curses.KEY_F5 and selected_order:
+        elif command == 'ship_label' and selected_order:
             try:
                 create_shipping_label_for_order(stdscr, selected_order)
                 order_shipments_cache.pop(selected_order_id, None)
@@ -9437,7 +9997,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key in (curses.KEY_F17, curses.KEY_F20, "m", "M"):
+        elif command == "manual_label" or key in ("m", "M"):
             try:
                 create_manual_shipping_label(stdscr)
                 try:
@@ -9452,7 +10012,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key == curses.KEY_F6 and selected_order:
+        elif command == 'partial' and selected_order:
             try:
                 order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
@@ -9471,7 +10031,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key in (curses.KEY_F19, "t", "T") and selected_order:
+        elif (command == "partial" or key in ("t", "T")) and selected_order:
             try:
                 order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
                 run_partial_execution_for_order(stdscr, selected_order, order_items)
@@ -9490,7 +10050,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key == curses.KEY_F7:
+        elif command == 'bulk':
             try:
                 run_bulk_execution(stdscr, orders, order_items_cache, state.selected_order_ids)
                 state.reload_orders_snapshot = True
@@ -9508,7 +10068,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key == curses.KEY_F8:
+        elif command == 'history':
             try:
                 shipping_history_dialog(stdscr, selected_order)
                 order_shipments_cache.pop(selected_order_id, None)
@@ -9524,7 +10084,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key == curses.KEY_F11 and selected_order:
+        elif command == 'delivery_note' and selected_order:
             try:
                 handle_delivery_note_output(stdscr, selected_order, order_items=None, order_items_cache=order_items_cache)
                 try:
@@ -9539,10 +10099,10 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key == curses.KEY_F10 and selected_order:
+        elif command == 'picklist' and selected_order:
             order_items = ensure_order_items_loaded(selected_order_id, order_items_cache)
             print_picklist(stdscr, selected_order, order_items)
-        elif key == curses.KEY_F12:
+        elif command == 'new_order':
             try:
                 created = custom_order_dialog(stdscr)
                 if created:
@@ -9562,7 +10122,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key in (getattr(curses, "KEY_F24", curses.KEY_F12 + 12), "e", "E") and selected_order:
+        elif (command == "edit_order" or key in ("e", "E")) and selected_order:
             if not _order_is_custom(selected_order):
                 message_box(stdscr, t("custom_order_title"), t("custom_order_only_edit"))
                 continue
@@ -9585,7 +10145,7 @@ def orders_dialog(stdscr):
                         pass
                     return
                 state.reload_orders_snapshot = True
-        elif key in (curses.KEY_DC, "d", "D") and selected_order:
+        elif (command == "delete_order" or key in (curses.KEY_DC, "d", "D")) and selected_order:
             try:
                 deleted = delete_custom_order_dialog(stdscr, selected_order)
                 if deleted:
@@ -9711,7 +10271,7 @@ def inventory_dialog(stdscr):
         finally:
             win.timeout(-1)
 
-        if key in (27, curses.KEY_F9):
+        if key in (27, "\x1b", curses.KEY_F9):
             return False
         if key == curses.KEY_DOWN:
             selected = move_selection(lines, selected, 1)
@@ -9768,6 +10328,7 @@ def inventory_dialog(stdscr):
 
 
 def main(stdscr):
+    global _MENU_EXIT_REQUESTED
 
     curses.curs_set(1)
     curses.start_color()
@@ -9776,6 +10337,7 @@ def main(stdscr):
 
     apply_color_theme(stdscr)
     stdscr.keypad(True)
+    _configure_mouse()
 
     if not ensure_database_ready(stdscr):
         return
@@ -9925,18 +10487,101 @@ def main(stdscr):
 
         stdscr.timeout(200)
         try:
-            key = stdscr.get_wch()
+            if _MENU_EXIT_REQUESTED:
+                key = "__menu_quit__"
+                _MENU_EXIT_REQUESTED = False
+            else:
+                key = stdscr.get_wch()
         except curses.error:
             if should_refresh_orders(last_items_snapshot_refresh_at, interval_seconds=ITEMS_AUTO_REFRESH_SECONDS):
                 reload_items_snapshot = True
             continue
         finally:
             stdscr.timeout(-1)
+        mouse = mouse_model.read_event() if key == curses.KEY_MOUSE else None
+        mouse_command = None
+        if mouse:
+            rects = mouse_model.item_panels(*stdscr.getmaxyx())
+            for pane, rect, rows, top_index, data in (
+                ("left", rects[0], rects[0][2]-5, left_top_index, items),
+                ("right", rects[1], rects[1][2]-4, right_top_index, location_rows),
+            ):
+                py, px, ph, pw = rect
+                if not mouse_model.inside(mouse, py, px, ph, pw):
+                    continue
+                active_pane = pane
+                if mouse.kind == "wheel":
+                    if pane == "left":
+                        left_selected = move_selection(items, left_selected, mouse.step)
+                    else:
+                        right_selected = move_selection(location_rows, right_selected, mouse.step)
+                else:
+                    index = mouse_model.list_index(mouse, y=py, x=px, width=pw,
+                        first_row=3 if pane == "left" else 2, rows=rows, top=top_index, count=len(data))
+                    if index is not None:
+                        if pane == "left": left_selected = index
+                        else: right_selected = index
+                        if mouse.kind == "double": mouse_command = "info"
+                break
+            footer_key = _mouse_footer_key(mouse)
+            if footer_key is not None:
+                key = footer_key
         selected_item = (
             get_selected_item(items, left_selected)
             if active_pane == "left"
             else get_selected_location_item(location_rows, right_selected)
         )
+
+        context = _menu_context()
+        command = mouse_command or ("quit" if key == "__menu_quit__" else menu_model.resolve_action(key, context, SETTINGS.get("keyboard_bindings")))
+        mouse_menu = _menu_mouse_index(stdscr, mouse) if key == curses.KEY_MOUSE and mouse else None
+        if key == menu_model.MENU_KEY or mouse_menu is not None:
+            command = menu_bar_dialog(stdscr, context, selected_item, initial_menu=mouse_menu or 0)
+            if command is None:
+                continue
+        try:
+            if _common_menu_action(stdscr, command, context):
+                if command in {"settings", "print_settings"}:
+                    shop_locations = get_shop_locations_snapshot()
+                    active_shop_location = _resolve_active_shop_location(shop_locations, SETTINGS.get("shop_active_location_id") or None)
+                reload_items_snapshot = True
+                continue
+            if command == "show_items":
+                continue
+            if command == "new_order":
+                custom_order_dialog(stdscr)
+                continue
+            if command == "manual_label":
+                create_manual_shipping_label(stdscr)
+                continue
+            if command == "history":
+                shipping_history_dialog(stdscr)
+                continue
+            if command == "external" and selected_item:
+                toggle_external_fulfillment(stdscr, selected_item)
+                reload_items_snapshot = True
+                continue
+            if command == "select_location":
+                options = [{"value": row["location_id"], "label": row.get("name") or row["location_id"]} for row in shop_locations]
+                if options:
+                    chosen = choice_dialog(stdscr, t("menu_action_select_location"), options,
+                        active_shop_location["location_id"] if active_shop_location else "", cancel_returns_none=True)
+                    if chosen is not None:
+                        active_shop_location = _resolve_active_shop_location(shop_locations, chosen)
+                        left_selected = right_selected = left_top_index = right_top_index = 0
+                        reload_items_snapshot = True
+                continue
+            if command == "external_view":
+                modes = ("hide", "only", "all")
+                external_mode = modes[(modes.index(external_mode) + 1) % len(modes)]
+                left_selected = right_selected = left_top_index = right_top_index = 0
+                rebuild_items_view = True
+                continue
+        except DatabaseUnavailableError as exc:
+            if not database_connection_dialog(stdscr, str(exc)):
+                return
+            reload_items_snapshot = True
+            continue
 
         if key == '\t':
             active_pane = "right" if active_pane == "left" else "left"
@@ -9966,7 +10611,7 @@ def main(stdscr):
             else:
                 right_selected = move_selection(location_rows, right_selected, -right_visible_rows)
 
-        elif key == curses.KEY_F1:
+        elif command == 'sort':
             if sort_mode == "location":
                 sort_mode = "name"
             elif sort_mode == "name":
@@ -9980,7 +10625,7 @@ def main(stdscr):
             right_top_index = 0
             rebuild_items_view = True
 
-        elif key == curses.KEY_F2:
+        elif command == 'previous_location':
             if _shop_location_switch_enabled():
                 previous_location = _cycle_shop_location(
                     shop_locations,
@@ -10003,7 +10648,7 @@ def main(stdscr):
                         return
                     reload_items_snapshot = True
 
-        elif key == curses.KEY_F3:
+        elif command == 'next_location':
             if _shop_location_switch_enabled():
                 next_location = _cycle_shop_location(
                     shop_locations,
@@ -10026,7 +10671,7 @@ def main(stdscr):
                         return
                     reload_items_snapshot = True
 
-        elif key == curses.KEY_F4 and selected_item:
+        elif command == 'info' and selected_item:
             try:
                 if item_info_dialog(stdscr, selected_item) == "edit":
                     edit_item(stdscr, selected_item)
@@ -10036,7 +10681,7 @@ def main(stdscr):
                     return
                 reload_items_snapshot = True
 
-        elif key == curses.KEY_F5:
+        elif command == 'new_item':
             try:
                 add_item(stdscr)
                 reload_items_snapshot = True
@@ -10045,7 +10690,7 @@ def main(stdscr):
                     return
                 reload_items_snapshot = True
 
-        elif key == curses.KEY_F6 and selected_item:
+        elif command == 'location' and selected_item:
             try:
                 new_location = change_location(stdscr, selected_item)
                 if new_location is not None:
@@ -10072,7 +10717,7 @@ def main(stdscr):
                     return
                 reload_items_snapshot = True
 
-        elif key == curses.KEY_F7 and selected_item:
+        elif command == 'quantity' and selected_item:
             try:
                 new_qty = change_qty(stdscr, selected_item)
                 if new_qty is not None:
@@ -10088,19 +10733,10 @@ def main(stdscr):
                     return
                 reload_items_snapshot = True
 
-        elif key == curses.KEY_F8 and selected_item:
+        elif command == 'print_label' and selected_item:
             print_label(stdscr, selected_item)
 
-        elif key == curses.KEY_F1 + 12:
-            try:
-                if inventory_dialog(stdscr):
-                    reload_items_snapshot = True
-            except DatabaseUnavailableError as exc:
-                if not database_connection_dialog(stdscr, str(exc)):
-                    return
-                reload_items_snapshot = True
-
-        elif key == curses.KEY_F2 + 12:
+        elif command == 'filter_local':
             filter_local = not filter_local
             left_selected = 0
             left_top_index = 0
@@ -10108,7 +10744,7 @@ def main(stdscr):
             right_top_index = 0
             rebuild_items_view = True
 
-        elif key == curses.KEY_F3 + 12:
+        elif command == 'filter_missing':
             filter_no_location = not filter_no_location
             left_selected = 0
             left_top_index = 0
@@ -10116,7 +10752,7 @@ def main(stdscr):
             right_top_index = 0
             rebuild_items_view = True
 
-        elif key == curses.KEY_F5 + 12 and selected_item:
+        elif command == 'edit_item' and selected_item:
             try:
                 edit_item(stdscr, selected_item)
                 reload_items_snapshot = True
@@ -10125,19 +10761,10 @@ def main(stdscr):
                     return
                 reload_items_snapshot = True
 
-        elif key == curses.KEY_F8 + 12 and selected_item:
+        elif command == 'print_many' and selected_item:
             print_label_multiple(stdscr, selected_item)
 
-        elif key == curses.KEY_F11 + 12:
-            settings_dialog(stdscr)
-            shop_locations = get_shop_locations_snapshot()
-            active_shop_location = _resolve_active_shop_location(
-                shop_locations,
-                (SETTINGS.get("shop_active_location_id") or "").strip() or None,
-            )
-            reload_items_snapshot = True
-
-        elif key == curses.KEY_F9:
+        elif command == 'filter_clear':
             filter_text = None
             filter_no_location = False
             filter_local = False
@@ -10148,7 +10775,7 @@ def main(stdscr):
             right_top_index = 0
             rebuild_items_view = True
 
-        elif key == curses.KEY_F10:
+        elif command == 'quit':
             pending_count = _pending_item_write_count()
             if pending_count > 0:
                 decision = pending_item_write_exit_dialog(stdscr)
@@ -10175,10 +10802,10 @@ def main(stdscr):
                 continue
             break
 
-        elif key == curses.KEY_F11:
+        elif command == 'footer_help':
             show_secondary_help = not show_secondary_help
 
-        elif key == curses.KEY_F12:
+        elif command == 'show_orders':
             try:
                 orders_dialog(stdscr)
             except DatabaseUnavailableError as exc:

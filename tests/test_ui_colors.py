@@ -278,3 +278,142 @@ class UiColorTests(unittest.TestCase):
             self.assertEqual(self.app._color_from_name("monokai-background"), 235)
             self.assertNotIn(self.app._color_from_name("monokai-text"), [16, 17])
             init.assert_not_called()
+
+    def test_theme_save_without_printer_validates_and_persists_real_settings(self):
+        import app_settings
+        from tests.test_release_suite import FakeConnection, FakeCursor
+
+        screen = mock.Mock()
+        screen.getmaxyx.return_value = (30, 120)
+        window = mock.Mock()
+        window.getmaxyx.return_value = (20, 60)
+        theme_index = sorted(self.app.BASE_THEMES).index("monokai")
+        window.get_wch.side_effect = (
+            [curses.KEY_DOWN] * 9
+            + ["\n"]
+            + [curses.KEY_DOWN] * theme_index
+            + ["\n", curses.KEY_F2]
+        )
+        screen.derwin.return_value = window
+        loader = mock.Mock()
+        loader.poll.return_value = None
+        settings = dict(
+            self.app.DEFAULT_SETTINGS,
+            shop_system="woocommerce",
+            printer_uri="",
+            shipping_active_carriers=["free"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "settings.json"
+            local = Path(directory) / "settings.local.json"
+            project.write_text("{}")
+            with mock.patch.object(self.app, "SETTINGS", settings), mock.patch.object(
+                app_settings, "SETTINGS_PATH", project
+            ), mock.patch.object(
+                app_settings, "LOCAL_SETTINGS_PATH", local
+            ), mock.patch.object(
+                self.app, "_new_dialog_window", return_value=window
+            ), mock.patch.object(
+                self.app, "get_service_runtime_state", return_value=None
+            ), mock.patch.object(
+                self.app, "get_shop_locations_snapshot", return_value=[]
+            ), mock.patch.object(
+                self.app, "_SERVICE_RUNTIME_LOADER", loader
+            ), mock.patch.object(
+                self.app.psycopg2, "connect", return_value=FakeConnection(FakeCursor())
+            ), mock.patch.object(
+                self.app, "_set_active_shop_location"
+            ), mock.patch.object(
+                self.app, "message_box"
+            ) as message, mock.patch.object(
+                self.app,
+                "run_background_action_dialog",
+                side_effect=lambda screen, title, action, **kw: action(),
+            ), mock.patch.object(
+                self.app, "apply_color_theme"
+            ), mock.patch.object(
+                curses, "color_pair", return_value=0
+            ):
+                self.app.settings_dialog(screen)
+                self.assertEqual(self.app.SETTINGS["color_theme"], "monokai")
+                self.assertEqual(app_settings.load_settings()["color_theme"], "monokai")
+                self.assertEqual(app_settings.load_settings()["printer_uri"], "")
+                for selected in [0, 1]:
+                    self.app.draw(
+                        screen, [], selected, 0, [], 0, 0, "left", None, False, "hide"
+                    )
+                self.assertEqual(
+                    self.app._settings_dialog_initial_values(self.app.SETTINGS)[
+                        "color_theme"
+                    ],
+                    "monokai",
+                )
+                self.assertEqual(message.call_args.args[1], self.app.t("saved"))
+
+    def test_failed_settings_validation_keeps_theme_selection_for_retry(self):
+        screen = mock.Mock()
+        screen.getmaxyx.return_value = (30, 120)
+        window = mock.Mock()
+        window.get_wch.side_effect = [curses.KEY_DOWN] * 9 + [
+            "\n",
+            curses.KEY_F2,
+            curses.KEY_F2,
+        ]
+        loader = mock.Mock()
+        loader.poll.return_value = None
+        with mock.patch.object(
+            self.app, "SETTINGS", self.app.DEFAULT_SETTINGS.copy()
+        ), mock.patch.object(
+            self.app, "_new_dialog_window", return_value=window
+        ), mock.patch.object(
+            self.app, "get_service_runtime_state", return_value=None
+        ), mock.patch.object(
+            self.app, "get_shop_locations_snapshot", return_value=[]
+        ), mock.patch.object(
+            self.app, "_SERVICE_RUNTIME_LOADER", loader
+        ), mock.patch.object(
+            self.app, "choice_dialog", return_value="monokai"
+        ), mock.patch.object(
+            self.app, "_settings_validate_updated_values", side_effect=[False, True]
+        ) as validate, mock.patch.object(
+            self.app,
+            "_save_settings_checked",
+            side_effect=lambda updated: dict(updated),
+        ) as save, mock.patch.object(
+            self.app, "_set_active_shop_location"
+        ), mock.patch.object(
+            self.app, "message_box"
+        ), mock.patch.object(
+            self.app,
+            "run_background_action_dialog",
+            side_effect=lambda screen, title, action, **kw: action(),
+        ), mock.patch.object(
+            self.app, "apply_color_theme"
+        ), mock.patch.object(
+            curses, "color_pair", return_value=0
+        ):
+            self.app.settings_dialog(screen)
+            self.assertEqual(validate.call_count, 2)
+            self.assertEqual(
+                [call.args[1]["color_theme"] for call in validate.call_args_list],
+                ["monokai", "monokai"],
+            )
+            save.assert_called_once()
+            self.assertEqual(self.app.SETTINGS["color_theme"], "monokai")
+
+    def test_enabled_label_printer_requires_model_and_format(self):
+        settings = dict(
+            self.app.DEFAULT_SETTINGS,
+            printer_uri="tcp://printer",
+            printer_model="",
+            label_size="",
+        )
+        updated = self.app._settings_dialog_updated_values(
+            self.app._settings_dialog_initial_values(settings)
+        )
+        with mock.patch.object(self.app, "message_box") as message:
+            self.assertFalse(
+                self.app._settings_validate_updated_values(mock.Mock(), updated)
+            )
+        self.assertIn("Drucker Modell", message.call_args.args[2])
+        self.assertIn("Labelformat", message.call_args.args[2])
