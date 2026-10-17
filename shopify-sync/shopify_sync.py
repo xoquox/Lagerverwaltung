@@ -3,6 +3,7 @@ import time
 import json
 import argparse
 import datetime
+from decimal import Decimal, InvalidOperation
 import logging
 import secrets
 import sys
@@ -1019,7 +1020,7 @@ def update_service_runtime_state(
         VALUES (
             'shopify-sync',
             %s,
-            %s,
+            COALESCE(%s, 'unknown'),
             CASE WHEN %s THEN NOW() ELSE NULL END,
             CASE WHEN %s THEN NOW() ELSE NULL END,
             CASE WHEN %s THEN NOW() ELSE NULL END,
@@ -1030,7 +1031,7 @@ def update_service_runtime_state(
         )
         ON CONFLICT (service) DO UPDATE SET
             version = COALESCE(EXCLUDED.version, service_runtime_state.version),
-            status = COALESCE(EXCLUDED.status, service_runtime_state.status),
+            status = COALESCE(%s, service_runtime_state.status),
             last_seen_at = COALESCE(EXCLUDED.last_seen_at, service_runtime_state.last_seen_at),
             last_started_at = COALESCE(EXCLUDED.last_started_at, service_runtime_state.last_started_at),
             last_finished_at = COALESCE(EXCLUDED.last_finished_at, service_runtime_state.last_finished_at),
@@ -1052,6 +1053,7 @@ def update_service_runtime_state(
             bool(mark_pull),
             bool(mark_push),
             (last_error or "")[:1000] if last_error else None,
+            status,
             bool(clear_error),
         ),
     )
@@ -1176,6 +1178,25 @@ def _product_input_from_row(row, force_status=None):
     return product
 
 
+def _shopify_decimal_value(value):
+    text = str(value).strip()
+    if "," in text:
+        if "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        else:
+            text = text.replace(",", ".")
+    try:
+        amount = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(f"Ungueltiger Geldbetrag: {value!r}") from exc
+    if not amount.is_finite():
+        raise ValueError(f"Ungueltiger Geldbetrag: {value!r}")
+    return format(amount, "f")
+
+
 def _variant_input_from_row(row, variant_id=None):
     variant = {}
     if variant_id:
@@ -1188,7 +1209,7 @@ def _variant_input_from_row(row, variant_id=None):
         variant["barcode"] = str(row.get("barcode"))
     inventory_item = {"sku": row["display_sku"] or row["sku"], "tracked": True}
     if row.get("shop_unit_cost") not in (None, ""):
-        inventory_item["cost"] = str(row.get("shop_unit_cost"))
+        inventory_item["cost"] = _shopify_decimal_value(row.get("shop_unit_cost"))
     if row.get("shop_weight_grams") is not None:
         inventory_item["measurement"] = {
             "weight": {
